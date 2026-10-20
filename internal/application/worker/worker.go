@@ -11,8 +11,6 @@ import (
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
-	"infra-guy/internal/infrastructure/postgres"
-	"infra-guy/internal/infrastructure/terraform"
 )
 
 const HeartbeatEvery = 20 * time.Second
@@ -29,11 +27,30 @@ func StepTimeout(step run.StepName) time.Duration {
 	}
 }
 
+type Job struct {
+	ID       int64
+	RunID    run.ID
+	Step     run.StepName
+	Attempts int
+}
+
+type Request struct {
+	WorkDir, InternalBaseURL, ProjectID, StateToken, WorkingDirectory string
+	Step                                                              run.StepName
+	PlanFile                                                          []byte
+}
+
+type Result struct {
+	ExitCode                int
+	Logs, PlanText, Version string
+	PlanFile                []byte
+}
+
 type Queue interface {
-	Claim(ctx context.Context, workerID string, projects project.Repository) (*postgres.Job, error)
+	Claim(ctx context.Context, workerID string, projects project.Repository) (*Job, error)
 	Heartbeat(ctx context.Context, jobID int64) error
 	Complete(ctx context.Context, jobID int64) error
-	Reap(ctx context.Context, staleAfter time.Duration) (requeue []postgres.Job, failed []postgres.Job, err error)
+	Reap(ctx context.Context, staleAfter time.Duration) (requeue []Job, failed []Job, err error)
 }
 
 type Checkout interface {
@@ -41,7 +58,7 @@ type Checkout interface {
 }
 
 type Executor interface {
-	Run(ctx context.Context, req terraform.Request) (terraform.Result, error)
+	Run(ctx context.Context, req Request) (Result, error)
 }
 
 type Worker struct {
@@ -100,7 +117,7 @@ func (w *Worker) heartbeat(ctx context.Context, jobID int64) {
 	}
 }
 
-func (w *Worker) runJob(ctx context.Context, job postgres.Job) error {
+func (w *Worker) runJob(ctx context.Context, job Job) error {
 	r, err := w.Runs.Get(ctx, job.RunID)
 	if err != nil || r == nil {
 		return fmt.Errorf("run %s not found", job.RunID)
@@ -135,6 +152,9 @@ func (w *Worker) runJob(ctx context.Context, job postgres.Job) error {
 	ps := p.Snapshot()
 	rs := r.Snapshot()
 	dest := filepath.Join(w.WorkDir, string(job.RunID))
+	if err := os.RemoveAll(dest); err != nil {
+		return err
+	}
 	if err := w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), ps.GitHubToken, rs.SHA); err != nil {
 		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
 			return ferr
@@ -155,7 +175,7 @@ func (w *Worker) runJob(ctx context.Context, job postgres.Job) error {
 	}
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	res, err := w.Executor.Run(stepCtx, terraform.Request{
+	res, err := w.Executor.Run(stepCtx, Request{
 		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID),
 		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory,
 		Step: job.Step, PlanFile: rs.PlanFile,
@@ -185,7 +205,7 @@ func (w *Worker) runJob(ctx context.Context, job postgres.Job) error {
 	return w.completeAndCleanup(ctx, job)
 }
 
-func (w *Worker) completeAndCleanup(ctx context.Context, job postgres.Job) error {
+func (w *Worker) completeAndCleanup(ctx context.Context, job Job) error {
 	if err := w.Queue.Complete(ctx, job.ID); err != nil {
 		return err
 	}

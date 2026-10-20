@@ -11,8 +11,6 @@ import (
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
-	"infra-guy/internal/infrastructure/postgres"
-	"infra-guy/internal/infrastructure/terraform"
 )
 
 type memProjects struct {
@@ -55,14 +53,14 @@ func (m *memSched) Enqueue(_ context.Context, _ run.ID, step run.StepName) error
 }
 
 type fakeQueue struct {
-	claim      *postgres.Job
-	requeue    []postgres.Job
-	failed     []postgres.Job
+	claim      *Job
+	requeue    []Job
+	failed     []Job
 	completed  []int64
 	staleAfter time.Duration
 }
 
-func (q *fakeQueue) Claim(context.Context, string, project.Repository) (*postgres.Job, error) {
+func (q *fakeQueue) Claim(context.Context, string, project.Repository) (*Job, error) {
 	return q.claim, nil
 }
 func (q *fakeQueue) Heartbeat(context.Context, int64) error { return nil }
@@ -70,30 +68,34 @@ func (q *fakeQueue) Complete(_ context.Context, jobID int64) error {
 	q.completed = append(q.completed, jobID)
 	return nil
 }
-func (q *fakeQueue) Reap(_ context.Context, staleAfter time.Duration) ([]postgres.Job, []postgres.Job, error) {
+func (q *fakeQueue) Reap(_ context.Context, staleAfter time.Duration) ([]Job, []Job, error) {
 	q.staleAfter = staleAfter
 	return q.requeue, q.failed, nil
 }
 
 type fakeCheckout struct {
+	t                     *testing.T
 	sha, dest, url, token string
 	err                   error
 }
 
 func (c *fakeCheckout) Clone(_ context.Context, dest, cloneURL, token, sha string) error {
 	c.dest, c.url, c.token, c.sha = dest, cloneURL, token, sha
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		c.t.Fatalf("clone dest %q still exists: %v", dest, err)
+	}
 	return c.err
 }
 
 type fakeExecutor struct {
 	called bool
-	req    terraform.Request
-	res    terraform.Result
+	req    Request
+	res    Result
 	err    error
 	onRun  func(context.Context)
 }
 
-func (e *fakeExecutor) Run(ctx context.Context, req terraform.Request) (terraform.Result, error) {
+func (e *fakeExecutor) Run(ctx context.Context, req Request) (Result, error) {
 	e.called = true
 	e.req = req
 	if e.onRun != nil {
@@ -149,7 +151,7 @@ func newFixture(t *testing.T, r *run.Run, p *project.Project, q *fakeQueue, exec
 	svc := &runapp.Service{
 		Projects: projects, Runs: runs, Schedule: sched, Now: testNow,
 	}
-	co := &fakeCheckout{}
+	co := &fakeCheckout{t: t}
 	if exec == nil {
 		exec = &fakeExecutor{}
 	}
@@ -183,10 +185,10 @@ func TestTickPlanOnlyAdvancesAndDeletesWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	beginComplete(t, r, run.StepInit, run.StepResult{}, time.Unix(1, 0).UTC())
-	exec := &fakeExecutor{res: terraform.Result{
+	exec := &fakeExecutor{res: Result{
 		ExitCode: 0, PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.", Version: "1.9.8",
 	}}
-	fx := newFixture(t, r, p, &fakeQueue{claim: &postgres.Job{ID: 3, RunID: "run-1", Step: run.StepPlan}}, exec)
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 3, RunID: "run-1", Step: run.StepPlan}}, exec)
 	fx.exec.onRun = func(ctx context.Context) {
 		if _, ok := ctx.Deadline(); !ok {
 			t.Error("executor context missing deadline")
@@ -207,6 +209,9 @@ func TestTickPlanOnlyAdvancesAndDeletesWorkspace(t *testing.T) {
 		}
 	}
 	if err := os.MkdirAll(fx.ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fx.ws, "stale.txt"), []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := fx.w.Tick(ctx); err != nil {
@@ -255,8 +260,8 @@ func TestTickApplyWithoutPlanFileFailsWithoutExecutor(t *testing.T) {
 	now := time.Unix(1, 0).UTC()
 	beginComplete(t, r, run.StepInit, run.StepResult{}, now)
 	beginComplete(t, r, run.StepPlan, run.StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy."}, now)
-	exec := &fakeExecutor{res: terraform.Result{ExitCode: 0}}
-	fx := newFixture(t, r, p, &fakeQueue{claim: &postgres.Job{ID: 4, RunID: "run-1", Step: run.StepApply}}, exec)
+	exec := &fakeExecutor{res: Result{ExitCode: 0}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 4, RunID: "run-1", Step: run.StepApply}}, exec)
 	if err := os.MkdirAll(fx.ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -301,10 +306,10 @@ func TestTickClaimedPlanAlreadyRunningFinishesPlanned(t *testing.T) {
 	if err := r.BeginStep(run.StepPlan, time.Unix(2, 0).UTC()); err != nil {
 		t.Fatal(err)
 	}
-	exec := &fakeExecutor{res: terraform.Result{
+	exec := &fakeExecutor{res: Result{
 		ExitCode: 0, PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.", Version: "1.9.8",
 	}}
-	fx := newFixture(t, r, p, &fakeQueue{claim: &postgres.Job{ID: 3, RunID: "run-1", Step: run.StepPlan}}, exec)
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 3, RunID: "run-1", Step: run.StepPlan}}, exec)
 	if err := fx.w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -328,12 +333,12 @@ func TestTickStepTimeoutFailsWithoutAdvance(t *testing.T) {
 	}
 	beginComplete(t, r, run.StepInit, run.StepResult{}, time.Unix(1, 0).UTC())
 	exec := &fakeExecutor{
-		res: terraform.Result{ExitCode: 1},
+		res: Result{ExitCode: 1},
 		onRun: func(ctx context.Context) {
 			<-ctx.Done()
 		},
 	}
-	fx := newFixture(t, r, p, &fakeQueue{claim: &postgres.Job{ID: 5, RunID: "run-1", Step: run.StepPlan}}, exec)
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 5, RunID: "run-1", Step: run.StepPlan}}, exec)
 	fx.w.Timeout = func(run.StepName) time.Duration { return 30 * time.Millisecond }
 	start := time.Now()
 	if err := fx.w.Tick(ctx); err != nil {
@@ -372,7 +377,7 @@ func TestTickReapFailedApplyCallsFail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fx := newFixture(t, r, p, &fakeQueue{failed: []postgres.Job{{ID: 7, RunID: "run-1", Step: run.StepApply}}}, nil)
+	fx := newFixture(t, r, p, &fakeQueue{failed: []Job{{ID: 7, RunID: "run-1", Step: run.StepApply}}}, nil)
 	if err := os.MkdirAll(fx.ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
