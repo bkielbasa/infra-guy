@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,6 +164,84 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	if h.RunID != string(opened.Snapshot().ID) || string(h.Data) != string(body) ||
 		h.Serial == nil || *h.Serial != 7 || !h.CreatedAt.Equal(now) {
 		t.Fatalf("history %#v", h)
+	}
+}
+
+func TestInsertIfAbsentConcurrentSameKeyNilPR(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	projects := NewProjectRepo(pool)
+	runs := NewRunRepo(pool)
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	projectID := project.ID("proj-conc-" + suffix)
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := project.New(projectID, "infra", repo, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.Save(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+
+	const sha = "deadbeef"
+	const n = 2
+	var wg sync.WaitGroup
+	var insertedCount atomic.Int32
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			opened, err := run.Open(run.OpenInput{
+				ID: run.ID(fmt.Sprintf("run-conc-%d-%s", i, suffix)),
+				ProjectID: run.ProjectID(projectID),
+				Trigger:   run.TriggerPush,
+				SHA:       sha,
+				Now:       now,
+			})
+			if err != nil {
+				errCh <- err
+				return
+			}
+			inserted, err := runs.InsertIfAbsent(ctx, opened)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if inserted {
+				insertedCount.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+	if got := insertedCount.Load(); got != 1 {
+		t.Fatalf("inserted count = %d, want 1", got)
+	}
+
+	var runRows int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM runs
+		WHERE project_id = $1 AND commit_sha = $2 AND trigger = $3 AND pr_number IS NULL
+			AND status IN ('queued', 'running')`,
+		projectID, sha, run.TriggerPush,
+	).Scan(&runRows); err != nil {
+		t.Fatal(err)
+	}
+	if runRows != 1 {
+		t.Fatalf("active run rows = %d, want 1", runRows)
 	}
 }
 

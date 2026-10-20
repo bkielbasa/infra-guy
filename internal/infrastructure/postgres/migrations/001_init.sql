@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at timestamptz
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS runs_one_active_per_key
+ON runs (project_id, commit_sha, trigger, pr_number)
+NULLS NOT DISTINCT
+WHERE status IN ('queued', 'running');
+
 CREATE TABLE IF NOT EXISTS steps (
     run_id text NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
     name text NOT NULL,
