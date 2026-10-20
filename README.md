@@ -12,7 +12,7 @@ go run ./cmd/server
 
 Terraform and git must be on `PATH`.
 
-The repository must not contain a `backend` block.
+A `backend` or `cloud` block in the repository is overridden. infra-guy stores the state.
 
 Create a GitHub webhook:
 

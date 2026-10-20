@@ -2,7 +2,10 @@ package terraform
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,24 +30,6 @@ func TestBackendFile(t *testing.T) {
 	}
 	if !strings.Contains(raw, "state-tok") {
 		t.Fatalf("missing token: %s", raw)
-	}
-}
-
-func TestHasBackend(t *testing.T) {
-	with := t.TempDir()
-	if err := os.WriteFile(filepath.Join(with, "main.tf"), []byte("terraform {\n  backend \"s3\" {\n    bucket = \"x\"\n  }\n}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !hasBackend(with) {
-		t.Fatal("expected backend block")
-	}
-
-	comment := t.TempDir()
-	if err := os.WriteFile(filepath.Join(comment, "main.tf"), []byte("# backend \"s3\" is commented\nresource \"null_resource\" \"x\" {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if hasBackend(comment) {
-		t.Fatal("comment should not count as a backend block")
 	}
 }
 
@@ -108,35 +93,72 @@ func TestRunApplyRequiresPlanFile(t *testing.T) {
 	}
 }
 
-func TestRunRejectsDeclaredBackend(t *testing.T) {
-	dir := t.TempDir()
-	nested := filepath.Join(dir, "infra")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
+func TestRunOverridesDeclaredBackend(t *testing.T) {
+	if _, err := exec.LookPath("terraform"); err != nil {
+		t.Fatal("terraform is required")
 	}
-	if err := os.WriteFile(filepath.Join(nested, "main.tf"), []byte("terraform {\n  backend \"s3\" {}\n}\n"), 0o644); err != nil {
-		t.Fatal(err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	cases := []string{
+		"terraform {\n  backend \"s3\" {\n    bucket = \"keep-me\"\n  }\n}\n",
+		"terraform {\n  cloud {\n    organization = \"keep-me\"\n    workspaces { name = \"prod\" }\n  }\n}\n",
 	}
-	var e Executor
-	res, err := e.Run(context.Background(), Request{
-		WorkDir:          dir,
-		WorkingDirectory: "infra",
-		InternalBaseURL:  "http://127.0.0.1",
-		ProjectID:        "proj-1",
-		StateToken:       "tok",
-		Step:             run.StepInit,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.ExitCode != 1 {
-		t.Fatalf("exit %d", res.ExitCode)
-	}
-	const want = "the platform owns Terraform state; remove the backend block from this repository"
-	if !strings.Contains(res.Logs, want) {
-		t.Fatalf("logs: %q", res.Logs)
-	}
-	if _, err := os.Stat(filepath.Join(nested, "_platform_backend.tf.json")); err != nil {
-		t.Fatalf("backend file: %v", err)
+	for _, src := range cases {
+		t.Run(src[:20], func(t *testing.T) {
+			dir := t.TempDir()
+			nested := filepath.Join(dir, "infra")
+			if err := os.MkdirAll(nested, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(nested, "main.tf"), []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			competing := "terraform {\n  backend \"local\" {\n    path = \"not-platform.tfstate\"\n  }\n}\n"
+			if err := os.WriteFile(filepath.Join(nested, "zzz_backend_override.tf"), []byte(competing), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			var e Executor
+			res, err := e.Run(ctx, Request{
+				WorkDir:          dir,
+				WorkingDirectory: "infra",
+				InternalBaseURL:  srv.URL,
+				ProjectID:        "proj-1",
+				RunID:            "run-7",
+				StateToken:       "state-tok",
+				Step:             run.StepInit,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.ExitCode != 0 {
+				t.Fatalf("exit %d\n%s", res.ExitCode, res.Logs)
+			}
+			written, err := os.ReadFile(filepath.Join(nested, "main.tf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(written), "keep-me") {
+				t.Fatal("repository backend was rewritten")
+			}
+			state, err := os.ReadFile(filepath.Join(nested, ".terraform", "terraform.tfstate"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(state), srv.URL+"/api/projects/proj-1/state") {
+				t.Fatalf("platform backend not in use: %s", state)
+			}
+			if strings.Contains(string(state), "keep-me") || strings.Contains(string(state), "not-platform") {
+				t.Fatalf("declared backend still active: %s", state)
+			}
+		})
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -61,12 +60,9 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 	}
 
 	backend := backendFile(req.InternalBaseURL, req.ProjectID, req.RunID, req.StateToken)
-	if err := os.WriteFile(filepath.Join(dir, "_platform_backend.tf.json"), backend, 0o644); err != nil {
+	// A later *_override.tf.json replaces any backend or cloud block in the repository.
+	if err := os.WriteFile(filepath.Join(dir, "~infraguy_backend_override.tf.json"), backend, 0o644); err != nil {
 		return Result{}, err
-	}
-
-	if hasBackend(dir) {
-		return Result{ExitCode: 1, Logs: "the platform owns Terraform state; remove the backend block from this repository"}, nil
 	}
 
 	cmds := commands(req.Step)
@@ -171,28 +167,6 @@ func backendFile(baseURL, projectID, runID, token string) []byte {
 		return []byte("{}")
 	}
 	return b
-}
-
-var backendRe = regexp.MustCompile(`(?m)^\s*backend\s+"`)
-
-func hasBackend(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tf") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		if backendRe.Match(b) {
-			return true
-		}
-	}
-	return false
 }
 
 func terraformVersion(ctx context.Context, dir string, env []string) string {
