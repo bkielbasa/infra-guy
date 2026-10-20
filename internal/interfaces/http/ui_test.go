@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,9 +18,19 @@ import (
 	"infra-guy/internal/domain/state"
 )
 
-type memRuns struct{ items map[run.ID]*run.Run }
+type memRuns struct {
+	items     map[run.ID]*run.Run
+	duplicate bool
+	insertErr error
+}
 
 func (m *memRuns) InsertIfAbsent(_ context.Context, r *run.Run) (bool, error) {
+	if m.insertErr != nil {
+		return false, m.insertErr
+	}
+	if m.duplicate {
+		return false, nil
+	}
 	m.items[r.Snapshot().ID] = run.Restore(r.Snapshot())
 	return true, nil
 }
@@ -108,15 +119,30 @@ func needsApprovalSnap(id run.ID) run.Snapshot {
 	}
 }
 
+func listProject(t *testing.T) *project.Project {
+	t.Helper()
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := project.New("p1", "payments", repo, time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetStateToken("tok")
+	p.RotateWebhookSecret("whsec")
+	return p
+}
+
 func TestUI(t *testing.T) {
-	p := testProject(t)
+	p := listProject(t)
 	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
 	runs := &memRuns{items: map[run.ID]*run.Run{}}
 	states := &memStates{items: map[string]*state.State{}}
 	h := uiHandler(t, projects, runs, states, "", "")
 
 	rr := getUI(t, h, "/", "", "")
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "infra") {
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "payments") {
 		t.Fatalf("list %d %s", rr.Code, rr.Body.Bytes())
 	}
 
@@ -178,5 +204,101 @@ func TestUI(t *testing.T) {
 	got, err = opRuns.Get(context.Background(), "r-op")
 	if err != nil || got == nil || got.Snapshot().ApprovedBy != "operator" {
 		t.Fatalf("actor operator: err=%v approved=%v", err, got)
+	}
+}
+
+func TestRunPageStateUpdated(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"r-need": run.Restore(needsApprovalSnap("r-need")),
+	}}
+	st := state.New("p1")
+	if err := st.Put([]byte(`{"serial":1}`), "", "r-need", time.Date(2026, 3, 4, 15, 6, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{"p1": st}}, "", "")
+	rr := getUI(t, h, "/runs/r-need", "", "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "2026-03-04 15:06") {
+		t.Fatalf("run state updated %d %s", rr.Code, rr.Body.Bytes())
+	}
+}
+
+func TestTriggerDuplicateRedirectsToProject(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	h := uiHandler(t, projects, &memRuns{items: map[run.ID]*run.Run{}, duplicate: true}, &memStates{items: map[string]*state.State{}}, "", "")
+	rr := postUI(t, h, "/projects/p1/trigger", "", "", nil)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("duplicate trigger %d %s", rr.Code, rr.Body.Bytes())
+	}
+	if loc := rr.Header().Get("Location"); loc != "/projects/p1" {
+		t.Fatalf("duplicate location %q", loc)
+	}
+}
+
+func TestTriggerOpenErrorIsServerError(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	h := uiHandler(t, projects, &memRuns{items: map[run.ID]*run.Run{}, insertErr: errors.New("open failed")}, &memStates{items: map[string]*state.State{}}, "", "")
+	rr := postUI(t, h, "/projects/p1/trigger", "", "", nil)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("open error %d %s", rr.Code, rr.Body.Bytes())
+	}
+}
+
+func TestProjectHeadlinePollsWhileRunActive(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"r-need": run.Restore(needsApprovalSnap("r-need")),
+	}}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "", "")
+
+	page := getUI(t, h, "/projects/p1", "", "")
+	body := page.Body.String()
+	if page.Code != 200 || !strings.Contains(body, `hx-get="/projects/p1/headline"`) || !strings.Contains(body, `hx-trigger="every 2s"`) {
+		t.Fatalf("project headline poll %d %s", page.Code, page.Body.Bytes())
+	}
+
+	frag := getUI(t, h, "/projects/p1/headline", "", "")
+	live := frag.Body.String()
+	if frag.Code != 200 || !strings.Contains(live, `hx-trigger="every 2s"`) || strings.Contains(live, `id="tab-panel"`) {
+		t.Fatalf("active headline %d %s", frag.Code, frag.Body.Bytes())
+	}
+
+	runs.items["r-need"] = run.Restore(run.Snapshot{
+		ID: "r-need", ProjectID: "p1", Trigger: run.TriggerPush, Status: run.StatusSucceeded, SHA: "abc1234def",
+	})
+	done := getUI(t, h, "/projects/p1/headline", "", "")
+	if done.Code != 200 || strings.Contains(done.Body.String(), `hx-trigger="every 2s"`) || strings.Contains(done.Body.String(), `id="tab-panel"`) {
+		t.Fatalf("terminal headline %d %s", done.Code, done.Body.Bytes())
+	}
+}
+
+func TestRunHeadlinePollsWhileActive(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	need := needsApprovalSnap("r-need")
+	need.SummaryPresent = true
+	need.Add = 12
+	runs := &memRuns{items: map[run.ID]*run.Run{"r-need": run.Restore(need)}}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "", "")
+
+	page := getUI(t, h, "/runs/r-need", "", "")
+	body := page.Body.String()
+	if page.Code != 200 || !strings.Contains(body, `hx-get="/runs/r-need/headline"`) || !strings.Contains(body, "Changes +12") {
+		t.Fatalf("run headline poll %d %s", page.Code, page.Body.Bytes())
+	}
+
+	frag := getUI(t, h, "/runs/r-need/headline", "", "")
+	live := frag.Body.String()
+	if frag.Code != 200 || !strings.Contains(live, `hx-trigger="every 2s"`) || !strings.Contains(live, "Changes +12") || strings.Contains(live, `id="run-panel"`) {
+		t.Fatalf("active run headline %d %s", frag.Code, frag.Body.Bytes())
+	}
+
+	runs.items["r-need"] = run.Restore(run.Snapshot{
+		ID: "r-need", ProjectID: "p1", Trigger: run.TriggerPush, Status: run.StatusSucceeded,
+		SHA: "abc1234def", SummaryPresent: true, Add: 12,
+	})
+	done := getUI(t, h, "/runs/r-need/headline", "", "")
+	stopped := done.Body.String()
+	if done.Code != 200 || strings.Contains(stopped, `hx-trigger="every 2s"`) || !strings.Contains(stopped, "Changes +12") || strings.Contains(stopped, `id="run-panel"`) {
+		t.Fatalf("terminal run headline %d %s", done.Code, done.Body.Bytes())
 	}
 }

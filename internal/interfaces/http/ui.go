@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -76,6 +77,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /projects/new", u.newProject)
 	mux.HandleFunc("POST /projects", u.create)
 	mux.HandleFunc("GET /projects/{id}", u.project)
+	mux.HandleFunc("GET /projects/{id}/headline", u.projectHeadline)
 	mux.HandleFunc("GET /projects/{id}/tabs/tracked", u.tabTracked)
 	mux.HandleFunc("GET /projects/{id}/tabs/pulls", u.tabPulls)
 	mux.HandleFunc("GET /projects/{id}/tabs/state", u.tabState)
@@ -86,6 +88,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /projects/{id}/force-unlock", u.forceUnlock)
 	mux.HandleFunc("POST /projects/{id}/delete", u.delete)
 	mux.HandleFunc("GET /runs/{id}", u.runPage)
+	mux.HandleFunc("GET /runs/{id}/headline", u.runHeadline)
 	mux.HandleFunc("GET /runs/{id}/history", u.history)
 	mux.HandleFunc("GET /runs/{id}/changes", u.changes)
 	mux.HandleFunc("POST /runs/{id}/confirm", u.confirm)
@@ -179,6 +182,14 @@ func (u *ui) project(w http.ResponseWriter, r *http.Request) {
 	u.page(w, ps.Name, "project", u.projectView(r, ps, runs, template.HTML(panel.String())))
 }
 
+func (u *ui) projectHeadline(w http.ResponseWriter, r *http.Request) {
+	p, runs, err := u.loadProject(w, r)
+	if err != nil {
+		return
+	}
+	u.fragment(w, "project_headline", u.projectView(r, p.Snapshot(), runs, ""))
+}
+
 func (u *ui) tabTracked(w http.ResponseWriter, r *http.Request) {
 	p, runs, err := u.loadProject(w, r)
 	if err != nil {
@@ -222,13 +233,17 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) update(w http.ResponseWriter, r *http.Request) {
-	id := project.ID(r.PathValue("id"))
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	id := p.Snapshot().ID
 	if _, err := u.cfg.Projects.Update(r.Context(), projectapp.UpdateInput{
-		ID: id, Name: r.FormValue("name"), Branch: r.FormValue("branch"), Workdir: r.FormValue("workdir"),
+		ID: id, Name: p.Snapshot().Name, Branch: r.FormValue("branch"), Workdir: r.FormValue("workdir"),
 		Token: r.FormValue("token"), AutoApprove: r.FormValue("auto_approve") == "on", RotateSecret: r.FormValue("rotate_secret") == "on",
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -269,6 +284,10 @@ func (u *ui) trigger(w http.ResponseWriter, r *http.Request) {
 		Message: msg, Author: author, TriggeredBy: u.actor(r), PlanOnly: false,
 	})
 	if err != nil {
+		if errors.Is(err, runapp.ErrDuplicate) {
+			http.Redirect(w, r, "/projects/"+string(ps.ID), http.StatusSeeOther)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -303,7 +322,15 @@ func (u *ui) runPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	u.page(w, runTitle(rs), "run", u.runView(p.Snapshot(), rs, template.HTML(panel.String())))
+	u.page(w, runTitle(rs), "run", u.runView(r, p.Snapshot(), rs, template.HTML(panel.String())))
+}
+
+func (u *ui) runHeadline(w http.ResponseWriter, r *http.Request) {
+	rn, p, err := u.loadRun(w, r)
+	if err != nil {
+		return
+	}
+	u.fragment(w, "run_headline", u.runView(r, p.Snapshot(), rn.Snapshot(), ""))
 }
 
 func (u *ui) history(w http.ResponseWriter, r *http.Request) {
@@ -412,14 +439,17 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 		"LatestLabel": latestLabel(latest), "LatestClass": latestClass(latest),
 		"Meta": projectMeta(ps, latest, hist), "Empty": len(runs) == 0,
 		"WebhookURL": u.webhookURL(ps.ID), "Secret": ps.WebhookSecret, "Panel": panel,
+		"Poll": anyNonTerminal(runs),
 	}
 }
 
-func (u *ui) runView(ps project.Snapshot, rs run.Snapshot, panel template.HTML) map[string]any {
+func (u *ui) runView(r *http.Request, ps project.Snapshot, rs run.Snapshot, panel template.HTML) map[string]any {
+	hist, _ := u.cfg.States.History(r.Context(), string(ps.ID))
 	return map[string]any{
 		"ID": string(rs.ID), "ProjectID": string(ps.ID), "ProjectName": ps.Name,
 		"Title": runTitle(rs), "Status": rs.Status.Label(), "StatusClass": statusClass(rs.Status),
-		"Meta": runMeta(ps, rs), "ChangesLabel": changesLabel(rs), "Panel": panel,
+		"Meta": runMeta(ps, rs, hist), "ChangesLabel": template.HTML(changesLabel(rs)), "Panel": panel,
+		"Poll": !rs.Status.Terminal(),
 	}
 }
 
@@ -438,11 +468,15 @@ func projectMeta(ps project.Snapshot, latest *run.Snapshot, hist []state.History
 	return m
 }
 
-func runMeta(ps project.Snapshot, rs run.Snapshot) metaView {
-	return metaView{
+func runMeta(ps project.Snapshot, rs run.Snapshot, hist []state.HistoryEntry) metaView {
+	m := metaView{
 		TerraformVersion: rs.TerraformVersion, Repo: ps.Repo.String(), Workdir: ps.WorkingDirectory,
 		Branch: firstNonEmpty(rs.Branch, ps.DefaultBranch), SHA: shortSHA(rs.SHA),
 	}
+	if n := len(hist); n > 0 {
+		m.StateUpdated = fmtTime(hist[n-1].CreatedAt)
+	}
+	return m
 }
 
 func trackedTab(id project.ID, runs []*run.Run) tabView {

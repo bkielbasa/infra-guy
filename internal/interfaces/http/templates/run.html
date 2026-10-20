@@ -1,6 +1,13 @@
 {{define "run"}}
 <nav class="crumb"><a href="/">Projects</a> / <a href="/projects/{{.ProjectID}}">{{.ProjectName}}</a> / {{.Title}}</nav>
 <div class="panel">
+  {{template "run_headline" .}}
+  {{.Panel}}
+</div>
+{{end}}
+
+{{define "run_headline"}}
+<div id="run-headline" hx-get="/runs/{{.ID}}/headline"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
   <div class="headline">
     <h1>{{.Title}}</h1>
     <span class="pill {{.StatusClass}}">{{.Status}}</span>
@@ -10,6 +17,5 @@
     <a href="/runs/{{.ID}}" hx-get="/runs/{{.ID}}/history" hx-target="#run-panel" hx-swap="outerHTML">History</a>
     <a href="/runs/{{.ID}}/changes" hx-get="/runs/{{.ID}}/changes" hx-target="#run-panel" hx-swap="outerHTML">{{.ChangesLabel}}</a>
   </nav>
-  {{.Panel}}
 </div>
 {{end}}

@@ -1,11 +1,7 @@
 {{define "project"}}
 <nav class="crumb"><a href="/">Projects</a> / {{.Name}}</nav>
 <div class="panel">
-  <div class="headline">
-    <h1>{{.Name}}</h1>
-    {{if .LatestLabel}}<span class="pill {{.LatestClass}}">{{.LatestLabel}}</span>{{end}}
-  </div>
-  {{template "meta" .Meta}}
+  {{template "project_headline" .}}
   <div class="actions">
     <form method="post" action="/projects/{{.ID}}/lock" class="inline">
       <button type="submit">{{if .Locked}}Unlock{{else}}Lock{{end}}</button>
@@ -28,5 +24,15 @@
     <a href="/projects/{{.ID}}/tabs/state" hx-get="/projects/{{.ID}}/tabs/state" hx-target="#tab-panel" hx-swap="outerHTML">State history</a>
   </nav>
   {{.Panel}}
+</div>
+{{end}}
+
+{{define "project_headline"}}
+<div id="project-headline" hx-get="/projects/{{.ID}}/headline"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+  <div class="headline">
+    <h1>{{.Name}}</h1>
+    {{if .LatestLabel}}<span class="pill {{.LatestClass}}">{{.LatestLabel}}</span>{{end}}
+  </div>
+  {{template "meta" .Meta}}
 </div>
 {{end}}
