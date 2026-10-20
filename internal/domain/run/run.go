@@ -181,6 +181,9 @@ func (r *Run) Snapshot() Snapshot {
 func (r *Run) SetTerraformVersion(v string) { r.s.TerraformVersion = v }
 
 func (r *Run) BeginStep(name StepName, now time.Time) error {
+	if r.s.Status.Terminal() {
+		return fmt.Errorf("run is %s", r.s.Status)
+	}
 	st := r.step(name)
 	if st == nil {
 		return fmt.Errorf("unknown step %s", name)
@@ -198,6 +201,9 @@ func (r *Run) BeginStep(name StepName, now time.Time) error {
 }
 
 func (r *Run) CompleteStep(name StepName, result StepResult, now time.Time) (Decision, error) {
+	if r.s.Status.Terminal() {
+		return Decision{}, fmt.Errorf("run is %s", r.s.Status)
+	}
 	st := r.step(name)
 	if st == nil {
 		return Decision{}, fmt.Errorf("unknown step %s", name)

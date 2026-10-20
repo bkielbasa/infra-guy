@@ -16,6 +16,22 @@ func openFull(auto bool) *Run {
 	return r
 }
 
+func beginStep(t *testing.T, r *Run, name StepName, now time.Time) {
+	t.Helper()
+	if err := r.BeginStep(name, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func completeStep(t *testing.T, r *Run, name StepName, result StepResult, now time.Time) Decision {
+	t.Helper()
+	d, err := r.CompleteStep(name, result, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 func TestOpenPlanOnlyHasNoApply(t *testing.T) {
 	r, err := Open(OpenInput{
 		ID: "run-1", ProjectID: "proj-1", PlanOnly: true,
@@ -36,24 +52,22 @@ func TestOpenPlanOnlyHasNoApply(t *testing.T) {
 func TestCompleteInitEnqueuesPlan(t *testing.T) {
 	r := openFull(true)
 	now := time.Unix(10, 0).UTC()
-	if err := r.BeginStep(StepInit, now); err != nil {
-		t.Fatal(err)
-	}
-	d, err := r.CompleteStep(StepInit, StepResult{Logs: "ok"}, now)
-	if err != nil {
-		t.Fatal(err)
-	}
+	beginStep(t, r, StepInit, now)
+	d := completeStep(t, r, StepInit, StepResult{Logs: "ok"}, now)
 	if d.Kind != DecisionEnqueue || d.Step != StepPlan {
 		t.Fatalf("%#v", d)
 	}
 }
 
 func TestPlanOnlyFinishesPlanned(t *testing.T) {
-	r, _ := Open(OpenInput{ID: "r", ProjectID: "p", PlanOnly: true, Trigger: TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC()})
+	r, err := Open(OpenInput{ID: "r", ProjectID: "p", PlanOnly: true, Trigger: TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Unix(10, 0).UTC()
-	_ = r.BeginStep(StepInit, now)
-	_, _ = r.CompleteStep(StepInit, StepResult{}, now)
-	_ = r.BeginStep(StepPlan, now)
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
 	d, err := r.CompleteStep(StepPlan, StepResult{PlanText: "Plan: 2 to add, 0 to change, 0 to destroy.\n", PlanFile: []byte("bin")}, now)
 	if err != nil || d.Kind != DecisionFinishPlanned {
 		t.Fatalf("%v %#v", err, d)
@@ -66,9 +80,9 @@ func TestPlanOnlyFinishesPlanned(t *testing.T) {
 func TestNoChangesSkipsApply(t *testing.T) {
 	r := openFull(false)
 	now := time.Unix(10, 0).UTC()
-	_ = r.BeginStep(StepInit, now)
-	_, _ = r.CompleteStep(StepInit, StepResult{}, now)
-	_ = r.BeginStep(StepPlan, now)
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
 	d, err := r.CompleteStep(StepPlan, StepResult{PlanText: "Plan: 0 to add, 0 to change, 0 to destroy.\n"}, now)
 	if err != nil || d.Kind != DecisionFinishNoChanges {
 		t.Fatalf("%v %#v", err, d)
@@ -82,10 +96,10 @@ func TestNoChangesSkipsApply(t *testing.T) {
 func TestAutoApproveEnqueuesApply(t *testing.T) {
 	r := openFull(true)
 	now := time.Unix(10, 0).UTC()
-	_ = r.BeginStep(StepInit, now)
-	_, _ = r.CompleteStep(StepInit, StepResult{}, now)
-	_ = r.BeginStep(StepPlan, now)
-	d, _ := r.CompleteStep(StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	d := completeStep(t, r, StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
 	if d.Kind != DecisionEnqueue || d.Step != StepApply {
 		t.Fatalf("%#v", d)
 	}
@@ -94,10 +108,10 @@ func TestAutoApproveEnqueuesApply(t *testing.T) {
 func TestConfirmAndCancel(t *testing.T) {
 	r := openFull(false)
 	now := time.Unix(10, 0).UTC()
-	_ = r.BeginStep(StepInit, now)
-	_, _ = r.CompleteStep(StepInit, StepResult{}, now)
-	_ = r.BeginStep(StepPlan, now)
-	d, _ := r.CompleteStep(StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	d := completeStep(t, r, StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
 	if d.Kind != DecisionWaitApproval || r.Snapshot().Status != StatusNeedsApproval {
 		t.Fatalf("status %s decision %#v", r.Snapshot().Status, d)
 	}
@@ -108,10 +122,10 @@ func TestConfirmAndCancel(t *testing.T) {
 		t.Fatalf("%#v", r.Snapshot())
 	}
 	again := openFull(false)
-	_ = again.BeginStep(StepInit, now)
-	_, _ = again.CompleteStep(StepInit, StepResult{}, now)
-	_ = again.BeginStep(StepPlan, now)
-	_, _ = again.CompleteStep(StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
+	beginStep(t, again, StepInit, now)
+	completeStep(t, again, StepInit, StepResult{}, now)
+	beginStep(t, again, StepPlan, now)
+	completeStep(t, again, StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
 	if err := again.Cancel(now); err != nil {
 		t.Fatal(err)
 	}
@@ -129,13 +143,19 @@ func TestConfirmAndCancel(t *testing.T) {
 func TestNonZeroExitFailsAndDoesNotEnqueue(t *testing.T) {
 	r := openFull(true)
 	now := time.Unix(10, 0).UTC()
-	_ = r.BeginStep(StepInit, now)
+	beginStep(t, r, StepInit, now)
 	d, err := r.CompleteStep(StepInit, StepResult{ExitCode: 1, Logs: "boom"}, now)
 	if err != nil || d.Kind != DecisionFail {
 		t.Fatalf("%v %#v", err, d)
 	}
 	if r.Snapshot().Status != StatusFailed || !r.Snapshot().Status.Terminal() {
 		t.Fatal(r.Snapshot().Status)
+	}
+	if err := r.BeginStep(StepPlan, now); err == nil {
+		t.Fatal("expected error beginning plan after failed init")
+	}
+	if r.Snapshot().Status != StatusFailed {
+		t.Fatalf("status changed: %s", r.Snapshot().Status)
 	}
 }
 
