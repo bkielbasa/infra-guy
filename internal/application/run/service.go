@@ -146,7 +146,10 @@ func (s *Service) releaseIfTerminal(ctx context.Context, r *run.Run) error {
 		return nil
 	}
 	if err := p.ReleaseActiveRun(string(r.Snapshot().ID)); err != nil {
-		return nil
+		if errors.Is(err, project.ErrActiveRunMismatch) {
+			return nil
+		}
+		return err
 	}
 	return s.Projects.Save(ctx, p)
 }
