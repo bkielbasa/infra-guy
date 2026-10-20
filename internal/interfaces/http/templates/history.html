@@ -38,7 +38,7 @@
   {{if .Unconfirmed}}
   <div class="actions">
     <form method="post" action="/runs/{{.ID}}/confirm" hx-post="/runs/{{.ID}}/confirm" hx-target="#run-panel" hx-swap="outerHTML" class="inline">
-      <button type="submit">Confirm</button>
+      <button type="submit" class="btn-trigger">Confirm</button>
     </form>
     <form method="post" action="/runs/{{.ID}}/cancel" hx-post="/runs/{{.ID}}/cancel" hx-target="#run-panel" hx-swap="outerHTML" class="inline">
       <button type="submit">Cancel</button>

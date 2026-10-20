@@ -28,9 +28,10 @@ a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 .wrap {
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: 28px 40px 48px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 28px clamp(20px, 3vw, 56px) 64px;
 }
 
 .topbar {
@@ -195,10 +196,17 @@ pre, .log {
   color: #d7deea;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 14px 16px;
+  padding: 16px 18px;
   overflow: auto;
-  font-size: 13px;
-  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13.5px;
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+@media (max-width: 720px) {
+  .wrap { padding: 16px 16px 40px; }
+  .panel { padding: 16px; }
 }
 
 details { margin: 12px 0; }
