@@ -24,6 +24,13 @@ var content embed.FS
 
 var pages = template.Must(template.ParseFS(content, "templates/*.html"))
 
+// placeholderTenant and placeholderRepoID stand in until sessions and the
+// repository picker supply the real values.
+const (
+	placeholderTenant       = "ten"
+	placeholderRepoID int64 = 1
+)
+
 type ui struct{ cfg ServerConfig }
 
 type layoutData struct {
@@ -127,7 +134,7 @@ func (u *ui) fragment(w http.ResponseWriter, name string, data any) {
 }
 
 func (u *ui) list(w http.ResponseWriter, r *http.Request) {
-	items, err := u.cfg.Projects.List(r.Context())
+	items, err := u.cfg.Projects.List(r.Context(), placeholderTenant)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -159,7 +166,12 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	p, err := u.cfg.Projects.Create(r.Context(), r.FormValue("name"), r.FormValue("repo"), r.FormValue("branch"), r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
+	repo, err := project.ParseSourceRepo(r.FormValue("repo"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p, err := u.cfg.Projects.Create(r.Context(), placeholderTenant, r.FormValue("name"), repo, placeholderRepoID, r.FormValue("branch"), r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

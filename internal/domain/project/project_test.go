@@ -71,3 +71,19 @@ func TestClaimAndRelease(t *testing.T) {
 		t.Fatal("still locked")
 	}
 }
+
+func TestPlacement(t *testing.T) {
+	p := sample(t)
+	if err := p.SetPlacement("", 1); err == nil {
+		t.Fatal("empty tenant accepted")
+	}
+	if err := p.SetPlacement("ten-1", 0); err == nil {
+		t.Fatal("zero repo accepted")
+	}
+	if err := p.SetPlacement("ten-1", 99); err != nil {
+		t.Fatal(err)
+	}
+	if p.Snapshot().TenantID != "ten-1" || p.Snapshot().GitHubRepoID != 99 {
+		t.Fatalf("%#v", p.Snapshot())
+	}
+}

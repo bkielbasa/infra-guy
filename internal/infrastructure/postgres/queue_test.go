@@ -36,6 +36,7 @@ func TestQueueClaimBusyDelayReap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	placeTestProject(t, ctx, pool, p, "ten-"+string(projectID), 1)
 	if err := projects.Save(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +221,7 @@ func TestQueueHeartbeatAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	placeTestProject(t, ctx, pool, p, "ten-"+string(projectID), 1)
 	if err := projects.Save(ctx, p); err != nil {
 		t.Fatal(err)
 	}

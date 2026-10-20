@@ -32,12 +32,15 @@ func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, e
 	}
 	return m.items[id], nil
 }
-func (m *memProjects) List(context.Context) ([]*project.Project, error) {
+func (m *memProjects) List(context.Context, string) ([]*project.Project, error) {
 	out := make([]*project.Project, 0, len(m.items))
 	for _, p := range m.items {
 		out = append(out, p)
 	}
 	return out, nil
+}
+func (m *memProjects) FindByRepo(context.Context, string, int64) ([]*project.Project, error) {
+	return nil, nil
 }
 func (m *memProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
 	if p := m.items[id]; p != nil {

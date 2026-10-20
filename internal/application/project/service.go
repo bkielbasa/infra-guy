@@ -38,21 +38,20 @@ func randomSecret() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func (s *Service) List(ctx context.Context) ([]*project.Project, error) {
-	return s.Projects.List(ctx)
+func (s *Service) List(ctx context.Context, tenantID string) ([]*project.Project, error) {
+	return s.Projects.List(ctx, tenantID)
 }
 
 func (s *Service) Get(ctx context.Context, id project.ID) (*project.Project, error) {
 	return s.Projects.Get(ctx, id)
 }
 
-func (s *Service) Create(ctx context.Context, name, repoRaw, branch, workdir string, autoApprove bool) (*project.Project, error) {
-	repo, err := project.ParseSourceRepo(repoRaw)
+func (s *Service) Create(ctx context.Context, tenantID, name string, repo project.SourceRepo, repoID int64, branch, workdir string, autoApprove bool) (*project.Project, error) {
+	p, err := project.New(project.ID(s.NewID()), name, repo, s.Now())
 	if err != nil {
 		return nil, err
 	}
-	p, err := project.New(project.ID(s.NewID()), name, repo, s.Now())
-	if err != nil {
+	if err := p.SetPlacement(tenantID, repoID); err != nil {
 		return nil, err
 	}
 	if branch != "" {

@@ -15,6 +15,8 @@ import (
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/state"
+	"infra-guy/internal/domain/tenant"
+	"infra-guy/internal/domain/user"
 )
 
 func TestProjectRunAndStateRoundTrip(t *testing.T) {
@@ -53,8 +55,32 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	if err := p.ClaimActiveRun("run-" + suffix); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, name, github_account_id, account_type, created_at, updated_at)
+		VALUES ($1, 'acme', $2, 'organization', now(), now())`, "ten-"+suffix, time.Now().UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetPlacement("ten-"+suffix, 99); err != nil {
+		t.Fatal(err)
+	}
 	if err := projects.Save(ctx, p); err != nil {
 		t.Fatal(err)
+	}
+
+	other, err := project.New(project.ID("proj-other-"+suffix), "other", repo, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	placeTestProject(t, ctx, pool, other, "ten-other-"+suffix, 99)
+	if err := projects.Save(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	found, err := projects.FindByRepo(ctx, "ten-"+suffix, 99)
+	if err != nil || len(found) != 1 || found[0].Snapshot().ID != projectID {
+		t.Fatalf("FindByRepo leaked across tenants: %v %#v", err, found)
+	}
+	listed, err := projects.List(ctx, "ten-other-"+suffix)
+	if err != nil || len(listed) != 1 || listed[0].Snapshot().ID != other.Snapshot().ID {
+		t.Fatalf("List leaked across tenants: %v %#v", err, listed)
 	}
 
 	gotProject, err := projects.Get(ctx, projectID)
@@ -70,6 +96,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		gotP.AutoApprove != wantP.AutoApprove || gotP.Locked != wantP.Locked ||
 		gotP.GitHubToken != wantP.GitHubToken || gotP.WebhookSecret != wantP.WebhookSecret ||
 		gotP.StateToken != wantP.StateToken || gotP.ActiveRunID != wantP.ActiveRunID ||
+		gotP.TenantID != wantP.TenantID || gotP.GitHubRepoID != wantP.GitHubRepoID ||
 		!gotP.CreatedAt.Equal(wantP.CreatedAt) || !gotP.UpdatedAt.Equal(wantP.UpdatedAt) {
 		t.Fatalf("project snapshot\nwant %#v\ngot  %#v", wantP, gotP)
 	}
@@ -189,6 +216,7 @@ func TestInsertIfAbsentConcurrentSameKeyNilPR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	placeTestProject(t, ctx, pool, p, "ten-conc-"+suffix, 1)
 	if err := projects.Save(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +274,7 @@ func TestInsertIfAbsentConcurrentSameKeyNilPR(t *testing.T) {
 	}
 }
 
-func newTestProject(t *testing.T, ctx context.Context, projects *ProjectRepo, prefix string) *project.Project {
+func newTestProject(t *testing.T, ctx context.Context, pool *pgxpool.Pool, projects *ProjectRepo, prefix string) *project.Project {
 	t.Helper()
 	repo, err := project.ParseSourceRepo("bklebasa/infra")
 	if err != nil {
@@ -256,6 +284,7 @@ func newTestProject(t *testing.T, ctx context.Context, projects *ProjectRepo, pr
 	if err != nil {
 		t.Fatal(err)
 	}
+	placeTestProject(t, ctx, pool, p, "ten-"+string(p.Snapshot().ID), 1)
 	if err := projects.Save(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +298,7 @@ func TestProjectSettingsSaveKeepsActiveRunAndLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	projects := NewProjectRepo(pool)
-	stale := newTestProject(t, ctx, projects, "proj-settings")
+	stale := newTestProject(t, ctx, pool, projects, "proj-settings")
 	id := stale.Snapshot().ID
 
 	if _, err := pool.Exec(ctx, `UPDATE projects SET active_run_id = 'run-live' WHERE id = $1`, id); err != nil {
@@ -312,7 +341,7 @@ func TestStateHistoryOnlyGrows(t *testing.T) {
 	}
 	projects := NewProjectRepo(pool)
 	states := NewStateRepo(pool)
-	id := string(newTestProject(t, ctx, projects, "proj-history").Snapshot().ID)
+	id := string(newTestProject(t, ctx, pool, projects, "proj-history").Snapshot().ID)
 
 	for i, body := range []string{`{"serial":1}`, `{"serial":2}`} {
 		st, err := states.Load(ctx, id)
@@ -365,7 +394,7 @@ func TestRunSaveActiveConflictIsSentinel(t *testing.T) {
 	}
 	projects := NewProjectRepo(pool)
 	runs := NewRunRepo(pool)
-	pid := run.ProjectID(newTestProject(t, ctx, projects, "proj-conflict").Snapshot().ID)
+	pid := run.ProjectID(newTestProject(t, ctx, pool, projects, "proj-conflict").Snapshot().ID)
 	now := time.Unix(1_700_000_000, 0).UTC()
 
 	waiting := run.Restore(run.Snapshot{
@@ -402,4 +431,125 @@ func openTestPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// placeTestProject inserts a tenant row and puts p on it.
+func placeTestProject(t *testing.T, ctx context.Context, pool *pgxpool.Pool, p *project.Project, tenantID string, repoID int64) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, name, github_account_id, account_type, created_at, updated_at)
+		VALUES ($1, 'acme', $2, 'organization', now(), now()) ON CONFLICT (id) DO NOTHING`, tenantID, time.Now().UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetPlacement(tenantID, repoID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIdentityStore(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewIdentityStore(pool)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	n := time.Now().UnixNano()
+	suffix := fmt.Sprintf("%d", n)
+
+	u, err := store.UpsertUser(ctx, user.User{ID: "usr-" + suffix, GitHubUserID: n, Login: "ada"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := store.UpsertUser(ctx, user.User{ID: "usr-other-" + suffix, GitHubUserID: n, Login: "ada2", DisplayName: "Ada"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != u.ID || again.Login != "ada2" || again.DisplayName != "Ada" {
+		t.Fatalf("user upsert: %#v then %#v", u, again)
+	}
+
+	ten, err := store.UpsertTenant(ctx, tenant.Tenant{ID: "ten-" + suffix, Name: "acme", AccountType: "organization", GitHubAccountID: n}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := store.UpsertTenant(ctx, tenant.Tenant{ID: "ten-x-" + suffix, Name: "acme2", AccountType: "organization", GitHubAccountID: n}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.ID != ten.ID || renamed.Name != "acme2" {
+		t.Fatalf("tenant upsert: %#v then %#v", ten, renamed)
+	}
+
+	first := tenant.Installation{ID: "ins-1-" + suffix, TenantID: ten.ID, AccountLogin: "acme", AccountType: "organization", GitHubInstallationID: n}
+	second := tenant.Installation{ID: "ins-2-" + suffix, TenantID: ten.ID, AccountLogin: "acme", AccountType: "organization", GitHubInstallationID: n + 1}
+	if err := store.UpsertInstallation(ctx, first, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertInstallation(ctx, second, now); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.ActiveInstallation(ctx, ten.ID)
+	if err != nil || active == nil || active.GitHubInstallationID != n+1 || !active.Active {
+		t.Fatalf("active: %v %#v", err, active)
+	}
+	old, err := store.InstallationByGitHubID(ctx, n)
+	if err != nil || old == nil || old.Active {
+		t.Fatalf("old installation: %v %#v", err, old)
+	}
+	if listed, err := store.ListActiveInstallations(ctx); err != nil || !containsInstallation(listed, n+1) || containsInstallation(listed, n) {
+		t.Fatalf("list active: %v %#v", err, listed)
+	}
+	if err := store.DeactivateInstallation(ctx, n+1, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.ActiveInstallation(ctx, ten.ID); err != nil || got != nil {
+		t.Fatalf("after deactivate: %v %#v", err, got)
+	}
+	if got, err := store.InstallationByGitHubID(ctx, n+99); err != nil || got != nil {
+		t.Fatalf("missing installation: %v %#v", err, got)
+	}
+
+	sess := Session{ID: "sess-" + suffix, UserID: u.ID, Login: "ada2", AccessToken: "tok", ExpiresAt: now.Add(time.Hour)}
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetSession(ctx, sess.ID)
+	if err != nil || got == nil || got.TenantID != "" || got.AccessToken != "tok" || !got.ExpiresAt.Equal(sess.ExpiresAt) {
+		t.Fatalf("session: %v %#v", err, got)
+	}
+	sess.TenantID, sess.Role = ten.ID, "admin"
+	if err := store.SaveSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.GetSession(ctx, sess.ID); err != nil || got == nil || got.TenantID != ten.ID || got.Role != "admin" {
+		t.Fatalf("session update: %v %#v", err, got)
+	}
+	if got, err := store.GetSession(ctx, "missing-"+suffix); err != nil || got != nil {
+		t.Fatalf("missing session: %v %#v", err, got)
+	}
+
+	if err := store.SaveOAuthState(ctx, "st-"+suffix, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.ConsumeOAuthState(ctx, "st-"+suffix, now); err != nil || !ok {
+		t.Fatalf("consume: %v %v", ok, err)
+	}
+	if ok, err := store.ConsumeOAuthState(ctx, "st-"+suffix, now); err != nil || ok {
+		t.Fatalf("second consume: %v %v", ok, err)
+	}
+	if err := store.SaveOAuthState(ctx, "old-"+suffix, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.ConsumeOAuthState(ctx, "old-"+suffix, now); err != nil || ok {
+		t.Fatalf("expired consume: %v %v", ok, err)
+	}
+}
+
+func containsInstallation(list []tenant.Installation, githubID int64) bool {
+	for _, in := range list {
+		if in.GitHubInstallationID == githubID {
+			return true
+		}
+	}
+	return false
 }

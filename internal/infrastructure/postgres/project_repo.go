@@ -17,15 +17,17 @@ type ProjectRepo struct{ pool *pgxpool.Pool }
 
 func NewProjectRepo(pool *pgxpool.Pool) *ProjectRepo { return &ProjectRepo{pool: pool} }
 
-const projectColumns = `id, name, repo_owner, repo_name, default_branch, working_directory,
+const projectColumns = `id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
 	auto_approve, locked, github_token, webhook_secret, state_token, active_run_id, created_at, updated_at`
 
 func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	s := p.Snapshot()
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO projects (`+projectColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (id) DO UPDATE SET
+			tenant_id = EXCLUDED.tenant_id,
+			github_repo_id = EXCLUDED.github_repo_id,
 			name = EXCLUDED.name,
 			repo_owner = EXCLUDED.repo_owner,
 			repo_name = EXCLUDED.repo_name,
@@ -37,7 +39,7 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			state_token = EXCLUDED.state_token,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
-		s.ID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
+		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
 		s.AutoApprove, s.Locked, s.GitHubToken, s.WebhookSecret, s.StateToken, s.ActiveRunID,
 		s.CreatedAt, s.UpdatedAt,
 	)
@@ -62,8 +64,16 @@ func (r *ProjectRepo) Get(ctx context.Context, id project.ID) (*project.Project,
 	return p, err
 }
 
-func (r *ProjectRepo) List(ctx context.Context) ([]*project.Project, error) {
-	rows, err := r.pool.Query(ctx, `SELECT `+projectColumns+` FROM projects ORDER BY created_at, id`)
+func (r *ProjectRepo) List(ctx context.Context, tenantID string) ([]*project.Project, error) {
+	return r.query(ctx, `SELECT `+projectColumns+` FROM projects WHERE tenant_id = $1 ORDER BY created_at, id`, tenantID)
+}
+
+func (r *ProjectRepo) FindByRepo(ctx context.Context, tenantID string, repoID int64) ([]*project.Project, error) {
+	return r.query(ctx, `SELECT `+projectColumns+` FROM projects WHERE tenant_id = $1 AND github_repo_id = $2 ORDER BY created_at, id`, tenantID, repoID)
+}
+
+func (r *ProjectRepo) query(ctx context.Context, sql string, args ...any) ([]*project.Project, error) {
+	rows, err := r.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +102,7 @@ func scanProject(row projectScanner) (*project.Project, error) {
 	var s project.Snapshot
 	var created, updated time.Time
 	if err := row.Scan(
-		&s.ID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
+		&s.ID, &s.TenantID, &s.GitHubRepoID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
 		&s.AutoApprove, &s.Locked, &s.GitHubToken, &s.WebhookSecret, &s.StateToken, &s.ActiveRunID,
 		&created, &updated,
 	); err != nil {

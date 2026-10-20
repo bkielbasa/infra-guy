@@ -20,7 +20,10 @@ func (m *memProjects) Save(_ context.Context, p *project.Project) error {
 func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, error) {
 	return m.items[id], nil
 }
-func (m *memProjects) List(context.Context) ([]*project.Project, error) { return nil, nil }
+func (m *memProjects) List(context.Context, string) ([]*project.Project, error) { return nil, nil }
+func (m *memProjects) FindByRepo(context.Context, string, int64) ([]*project.Project, error) {
+	return nil, nil
+}
 func (m *memProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
 	if p := m.items[id]; p != nil {
 		s := p.Snapshot()
@@ -59,11 +62,24 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	projects := &memProjects{items: map[project.ID]*project.Project{}}
 	states := &memStates{items: map[string]*state.State{}}
 	svc := &Service{Projects: projects, Now: func() time.Time { return time.Unix(1, 0).UTC() }, NewID: func() string { return "p1" }}
-	created, err := svc.Create(ctx, "infra", "bklebasa/infra", "", "terraform", false)
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(ctx, "", "infra", repo, 1, "", "terraform", false); err == nil {
+		t.Fatal("create without a tenant must fail")
+	}
+	if len(projects.items) != 0 {
+		t.Fatal("rejected create was saved")
+	}
+	created, err := svc.Create(ctx, "ten", "infra", repo, 1, "", "terraform", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	snap := created.Snapshot()
+	if snap.TenantID != "ten" || snap.GitHubRepoID != 1 {
+		t.Fatalf("placement not stored: %#v", snap)
+	}
 	if snap.WebhookSecret == "" || snap.StateToken == "" || snap.DefaultBranch != "main" || snap.WorkingDirectory != "terraform" {
 		t.Fatalf("%#v", snap)
 	}

@@ -16,6 +16,8 @@ type ID string
 
 type Snapshot struct {
 	ID               ID
+	TenantID         string
+	GitHubRepoID     int64
 	Name             string
 	Repo             SourceRepo
 	DefaultBranch    string
@@ -61,6 +63,15 @@ func (p *Project) SetDefaultBranch(branch string) error {
 		return fmt.Errorf("invalid branch")
 	}
 	p.s.DefaultBranch = branch
+	return nil
+}
+
+func (p *Project) SetPlacement(tenantID string, repoID int64) error {
+	if tenantID == "" || repoID <= 0 {
+		return fmt.Errorf("placement requires tenant id and positive repository id")
+	}
+	p.s.TenantID = tenantID
+	p.s.GitHubRepoID = repoID
 	return nil
 }
 
