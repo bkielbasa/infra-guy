@@ -111,6 +111,15 @@ func (s *Service) Advance(ctx context.Context, id run.ID, step run.StepName, res
 	return s.apply(ctx, r, d)
 }
 
+func (s *Service) SetTerraformVersion(ctx context.Context, id run.ID, version string) error {
+	r, err := s.Runs.Get(ctx, id)
+	if err != nil || r == nil {
+		return fmt.Errorf("run %s not found", id)
+	}
+	r.SetTerraformVersion(version)
+	return s.Runs.Save(ctx, r)
+}
+
 func (s *Service) Fail(ctx context.Context, id run.ID, step run.StepName, message string) error {
 	r, err := s.Runs.Get(ctx, id)
 	if err != nil || r == nil {
