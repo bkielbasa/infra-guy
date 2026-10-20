@@ -55,6 +55,7 @@ type Worker struct {
 	WorkDir         string
 	InternalBaseURL string
 	Now             func() time.Time
+	Timeout         func(run.StepName) time.Duration
 }
 
 func (w *Worker) Tick(ctx context.Context) error {
@@ -68,6 +69,9 @@ func (w *Worker) Tick(ctx context.Context) error {
 			msg = "worker lost the apply; check state before starting another run"
 		}
 		if err := w.Service.Fail(ctx, job.RunID, job.Step, msg); err != nil {
+			return err
+		}
+		if err := w.removeIfTerminal(ctx, job.RunID); err != nil {
 			return err
 		}
 	}
@@ -105,11 +109,23 @@ func (w *Worker) runJob(ctx context.Context, job postgres.Job) error {
 	if w.Now != nil {
 		now = w.Now()
 	}
-	if err := r.BeginStep(job.Step, now); err != nil {
-		return err
-	}
-	if err := w.Runs.Save(ctx, r); err != nil {
-		return err
+	stepStatus := stepStatus(r, job.Step)
+	switch stepStatus {
+	case run.StepPending:
+		if err := r.BeginStep(job.Step, now); err != nil {
+			return err
+		}
+		if err := w.Runs.Save(ctx, r); err != nil {
+			return err
+		}
+	case run.StepRunning:
+	default:
+		if err := r.BeginStep(job.Step, now); err != nil {
+			return err
+		}
+		if err := w.Runs.Save(ctx, r); err != nil {
+			return err
+		}
 	}
 
 	p, err := w.Projects.Get(ctx, project.ID(r.Snapshot().ProjectID))
@@ -133,19 +149,25 @@ func (w *Worker) runJob(ctx context.Context, job postgres.Job) error {
 		return w.completeAndCleanup(ctx, job)
 	}
 
-	stepCtx, cancel := context.WithTimeout(ctx, StepTimeout(job.Step))
+	timeout := StepTimeout(job.Step)
+	if w.Timeout != nil {
+		timeout = w.Timeout(job.Step)
+	}
+	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	res, err := w.Executor.Run(stepCtx, terraform.Request{
 		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID),
 		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory,
 		Step: job.Step, PlanFile: rs.PlanFile,
 	})
-	if err != nil {
-		msg := err.Error()
-		if errors.Is(err, context.DeadlineExceeded) {
-			msg = "step timed out"
+	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
+		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "step timed out"); ferr != nil {
+			return ferr
 		}
-		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, msg); ferr != nil {
+		return w.completeAndCleanup(ctx, job)
+	}
+	if err != nil {
+		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
 			return ferr
 		}
 		return w.completeAndCleanup(ctx, job)
@@ -168,6 +190,15 @@ func (w *Worker) completeAndCleanup(ctx context.Context, job postgres.Job) error
 		return err
 	}
 	return w.removeIfTerminal(ctx, job.RunID)
+}
+
+func stepStatus(r *run.Run, name run.StepName) run.StepStatus {
+	for _, st := range r.Snapshot().Steps {
+		if st.Name == name {
+			return st.Status
+		}
+	}
+	return ""
 }
 
 func (w *Worker) removeIfTerminal(ctx context.Context, id run.ID) error {

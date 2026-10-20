@@ -288,6 +288,81 @@ func TestTickApplyWithoutPlanFileFailsWithoutExecutor(t *testing.T) {
 	}
 }
 
+func TestTickClaimedPlanAlreadyRunningFinishesPlanned(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-1", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginComplete(t, r, run.StepInit, run.StepResult{}, time.Unix(1, 0).UTC())
+	if err := r.BeginStep(run.StepPlan, time.Unix(2, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{res: terraform.Result{
+		ExitCode: 0, PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.", Version: "1.9.8",
+	}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &postgres.Job{ID: 3, RunID: "run-1", Step: run.StepPlan}}, exec)
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := fx.runs.Get(ctx, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Snapshot().Status != run.StatusPlanned {
+		t.Fatalf("status %s", saved.Snapshot().Status)
+	}
+}
+
+func TestTickStepTimeoutFailsWithoutAdvance(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-1", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginComplete(t, r, run.StepInit, run.StepResult{}, time.Unix(1, 0).UTC())
+	exec := &fakeExecutor{
+		res: terraform.Result{ExitCode: 1},
+		onRun: func(ctx context.Context) {
+			<-ctx.Done()
+		},
+	}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &postgres.Job{ID: 5, RunID: "run-1", Step: run.StepPlan}}, exec)
+	fx.w.Timeout = func(run.StepName) time.Duration { return 30 * time.Millisecond }
+	start := time.Now()
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < 20*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("elapsed %s", elapsed)
+	}
+	saved, err := fx.runs.Get(ctx, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := saved.Snapshot()
+	if snap.Status != run.StatusFailed {
+		t.Fatalf("status %s", snap.Status)
+	}
+	if snap.Error != "step timed out" {
+		t.Fatalf("error %q", snap.Error)
+	}
+	for _, st := range snap.Steps {
+		if st.Name == run.StepPlan && st.ExitCode != nil {
+			t.Fatalf("plan step exit code set via Advance: %#v", st.ExitCode)
+		}
+	}
+	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 5 {
+		t.Fatalf("complete %#v", fx.queue.completed)
+	}
+}
+
 func TestTickReapFailedApplyCallsFail(t *testing.T) {
 	ctx := context.Background()
 	p := testProject(t)
@@ -298,6 +373,9 @@ func TestTickReapFailedApplyCallsFail(t *testing.T) {
 		t.Fatal(err)
 	}
 	fx := newFixture(t, r, p, &fakeQueue{failed: []postgres.Job{{ID: 7, RunID: "run-1", Step: run.StepApply}}}, nil)
+	if err := os.MkdirAll(fx.ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := fx.w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -320,5 +398,8 @@ func TestTickReapFailedApplyCallsFail(t *testing.T) {
 	}
 	if snap.Error != "worker lost the apply; check state before starting another run" {
 		t.Fatalf("error %q", snap.Error)
+	}
+	if _, err := os.Stat(fx.ws); !os.IsNotExist(err) {
+		t.Fatalf("workspace still present: %v", err)
 	}
 }
