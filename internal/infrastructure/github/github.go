@@ -40,13 +40,22 @@ type Client struct {
 	HTTP         *http.Client
 }
 
+type tokenEntry struct {
+	token   string
+	expires time.Time
+}
+
+type tokenFlight struct {
+	done  chan struct{}
+	token string
+	err   error
+}
+
 type Tokens struct {
-	Client *Client
-	mu     sync.Mutex
-	cache  map[int64]struct {
-		token   string
-		expires time.Time
-	}
+	Client   *Client
+	mu       sync.Mutex
+	cache    map[int64]tokenEntry
+	inflight map[int64]*tokenFlight
 }
 
 func (c *Client) AppJWT(now time.Time) (string, error) {
@@ -129,10 +138,21 @@ func (c *Client) Exchange(ctx context.Context, code string) (accessToken string,
 		return "", err
 	}
 	var body struct {
-		AccessToken string `json:"access_token"`
+		AccessToken      string `json:"access_token"`
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return "", err
+	}
+	if body.Error != "" {
+		if body.ErrorDescription != "" {
+			return "", fmt.Errorf("github oauth: %s: %s", body.Error, body.ErrorDescription)
+		}
+		return "", fmt.Errorf("github oauth: %s", body.Error)
+	}
+	if body.AccessToken == "" {
+		return "", fmt.Errorf("github oauth: empty access_token")
 	}
 	return body.AccessToken, nil
 }
@@ -248,25 +268,41 @@ func (c *Client) ListRepos(ctx context.Context, installationID int64) ([]Repo, e
 
 func (t *Tokens) Token(ctx context.Context, installationID int64) (string, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.cache == nil {
-		t.cache = make(map[int64]struct {
-			token   string
-			expires time.Time
-		})
+		t.cache = make(map[int64]tokenEntry)
+	}
+	if t.inflight == nil {
+		t.inflight = make(map[int64]*tokenFlight)
 	}
 	if ent, ok := t.cache[installationID]; ok && ent.expires.Sub(time.Now()) >= 5*time.Minute {
+		t.mu.Unlock()
 		return ent.token, nil
 	}
-	token, expires, err := t.Client.InstallationToken(ctx, installationID)
-	if err != nil {
-		return "", err
+	if f, ok := t.inflight[installationID]; ok {
+		t.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-f.done:
+			return f.token, f.err
+		}
 	}
-	t.cache[installationID] = struct {
-		token   string
-		expires time.Time
-	}{token: token, expires: expires}
-	return token, nil
+	f := &tokenFlight{done: make(chan struct{})}
+	t.inflight[installationID] = f
+	t.mu.Unlock()
+
+	token, expires, err := t.Client.InstallationToken(ctx, installationID)
+
+	t.mu.Lock()
+	if err == nil {
+		t.cache[installationID] = tokenEntry{token: token, expires: expires}
+	}
+	f.token = token
+	f.err = err
+	delete(t.inflight, installationID)
+	close(f.done)
+	t.mu.Unlock()
+	return token, err
 }
 
 func (c *Client) do(ctx context.Context, method, rawURL, token, accept string, body io.Reader) (*http.Response, error) {

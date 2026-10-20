@@ -172,6 +172,25 @@ func TestExchangeCurrentUserInstallationSlug(t *testing.T) {
 	}
 }
 
+func TestExchangeOAuthError(t *testing.T) {
+	c := testClient(t, http.NotFoundHandler())
+	oauth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/login/oauth/access_token" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"error":"bad_verification_code","error_description":"The code passed is incorrect or expired."}`))
+	}))
+	t.Cleanup(oauth.Close)
+	c.OAuthURL = oauth.URL
+
+	tok, err := c.Exchange(context.Background(), "bad")
+	if err == nil || tok != "" {
+		t.Fatalf("tok=%q err=%v", tok, err)
+	}
+}
+
 func TestTokensCachesUntilFiveMinutes(t *testing.T) {
 	var calls int
 	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
