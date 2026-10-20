@@ -32,15 +32,38 @@ type State struct{ s Snapshot }
 
 func New(projectID string) *State { return &State{s: Snapshot{ProjectID: projectID}} }
 
-func Restore(s Snapshot) *State { return &State{s: s} }
+func cloneInt64(p *int64) *int64 {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
 
-func (s *State) Snapshot() Snapshot {
-	out := s.s
-	out.Data = append([]byte(nil), s.s.Data...)
-	out.LockInfo = append([]byte(nil), s.s.LockInfo...)
-	out.History = append([]HistoryEntry(nil), s.s.History...)
+func cloneSnapshot(s Snapshot) Snapshot {
+	out := s
+	out.Data = append([]byte(nil), s.Data...)
+	out.LockInfo = append([]byte(nil), s.LockInfo...)
+	out.Serial = cloneInt64(s.Serial)
+	if len(s.History) == 0 {
+		out.History = nil
+	} else {
+		out.History = make([]HistoryEntry, len(s.History))
+		for i, h := range s.History {
+			out.History[i] = HistoryEntry{
+				RunID:     h.RunID,
+				Serial:    cloneInt64(h.Serial),
+				Data:      append([]byte(nil), h.Data...),
+				CreatedAt: h.CreatedAt,
+			}
+		}
+	}
 	return out
 }
+
+func Restore(s Snapshot) *State { return &State{s: cloneSnapshot(s)} }
+
+func (s *State) Snapshot() Snapshot { return cloneSnapshot(s.s) }
 
 func (s *State) Empty() bool { return len(s.s.Data) == 0 }
 

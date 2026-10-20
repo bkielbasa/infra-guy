@@ -62,6 +62,27 @@ func TestLockConflictReturnsExisting(t *testing.T) {
 	}
 }
 
+func TestSnapshotIsolatedFromCallerMutation(t *testing.T) {
+	s := New("p1")
+	body := []byte(`{"version":4,"serial":7}`)
+	if err := s.Put(body, "", "run-1", time.Unix(5, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	snap := s.Snapshot()
+	snap.Data[0] = 'X'
+	snap.History[0].Data[0] = 'Y'
+	*snap.Serial = 99
+	*snap.History[0].Serial = 99
+
+	again := s.Snapshot()
+	if again.Data[0] != '{' || again.History[0].Data[0] != '{' {
+		t.Fatalf("data mutated: %q %q", again.Data, again.History[0].Data)
+	}
+	if *again.Serial != 7 || *again.History[0].Serial != 7 {
+		t.Fatalf("serial mutated: %d %d", *again.Serial, *again.History[0].Serial)
+	}
+}
+
 func TestMissingSerial(t *testing.T) {
 	s := New("p1")
 	if err := s.Put([]byte(`{"version":4}`), "", "run-1", time.Unix(1, 0).UTC()); err != nil {
