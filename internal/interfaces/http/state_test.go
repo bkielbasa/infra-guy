@@ -32,7 +32,13 @@ func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, e
 	}
 	return m.items[id], nil
 }
-func (m *memProjects) List(context.Context) ([]*project.Project, error) { return nil, nil }
+func (m *memProjects) List(context.Context) ([]*project.Project, error) {
+	out := make([]*project.Project, 0, len(m.items))
+	for _, p := range m.items {
+		out = append(out, p)
+	}
+	return out, nil
+}
 func (m *memProjects) Delete(_ context.Context, id project.ID) error {
 	delete(m.items, id)
 	return nil

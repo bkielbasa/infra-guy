@@ -1,0 +1,30 @@
+{{define "pulls"}}
+<div id="tab-panel" hx-get="/projects/{{.ProjectID}}/tabs/pulls"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+  {{if .Groups}}
+    {{range .Groups}}
+    <section class="group">
+      <h3>{{.Title}}</h3>
+      <div class="sub">{{.Author}} · {{.Date}} · <span class="sha">{{.SHA}}</span></div>
+      <table>
+        <thead>
+          <tr><th>Status</th><th>Date</th><th>Triggered by</th><th>Terraform</th><th>Delta</th></tr>
+        </thead>
+        <tbody>
+          {{range .Runs}}
+          <tr>
+            <td><a href="/runs/{{.ID}}"><span class="pill {{.StatusClass}}">{{.Status}}</span></a></td>
+            <td>{{.Date}}</td>
+            <td>{{.TriggeredBy}}</td>
+            <td>{{.TerraformVersion}}</td>
+            <td class="delta">{{.Delta}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
+  {{else}}
+    <p class="empty">No pull request runs.</p>
+  {{end}}
+</div>
+{{end}}

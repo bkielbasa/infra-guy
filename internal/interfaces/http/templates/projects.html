@@ -1,0 +1,23 @@
+{{define "projects"}}
+<div class="panel">
+  <div class="headline">
+    <h1>Projects</h1>
+    <a href="/projects/new">New project</a>
+  </div>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Latest run</th></tr>
+    </thead>
+    <tbody>
+      {{range .Projects}}
+      <tr>
+        <td><a href="/projects/{{.ID}}">{{.Name}}</a></td>
+        <td>{{.Repo}}</td>
+        <td>{{.Branch}}</td>
+        <td>{{if .Status}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}

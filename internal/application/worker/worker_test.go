@@ -408,3 +408,24 @@ func TestTickReapFailedApplyCallsFail(t *testing.T) {
 		t.Fatalf("workspace still present: %v", err)
 	}
 }
+
+func TestLoopStopsWhenContextDone(t *testing.T) {
+	r, err := run.Open(run.OpenInput{ID: "run-1", ProjectID: "p1", SHA: "abc", Now: testNow()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newFixture(t, r, testProject(t), &fakeQueue{}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		fx.w.Loop(ctx)
+		close(done)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Loop did not return")
+	}
+}

@@ -56,6 +56,17 @@ func conflict(err error, lockJSON []byte) (Outcome, bool) {
 	return Outcome{}, false
 }
 
+func (s *Service) History(ctx context.Context, projectID string) ([]state.HistoryEntry, error) {
+	st, err := s.States.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, nil
+	}
+	return st.Snapshot().History, nil
+}
+
 func (s *Service) Get(ctx context.Context, projectID, token string) (Outcome, error) {
 	if out, err, ok := s.authorize(ctx, projectID, token); !ok {
 		return out, err

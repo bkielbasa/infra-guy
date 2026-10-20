@@ -1,0 +1,15 @@
+{{define "run"}}
+<nav class="crumb"><a href="/">Projects</a> / <a href="/projects/{{.ProjectID}}">{{.ProjectName}}</a> / {{.Title}}</nav>
+<div class="panel">
+  <div class="headline">
+    <h1>{{.Title}}</h1>
+    <span class="pill {{.StatusClass}}">{{.Status}}</span>
+  </div>
+  {{template "meta" .Meta}}
+  <nav class="tabs">
+    <a href="/runs/{{.ID}}" hx-get="/runs/{{.ID}}/history" hx-target="#run-panel" hx-swap="outerHTML">History</a>
+    <a href="/runs/{{.ID}}/changes" hx-get="/runs/{{.ID}}/changes" hx-target="#run-panel" hx-swap="outerHTML">{{.ChangesLabel}}</a>
+  </nav>
+  {{.Panel}}
+</div>
+{{end}}

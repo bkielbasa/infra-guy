@@ -38,6 +38,14 @@ func randomSecret() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+func (s *Service) List(ctx context.Context) ([]*project.Project, error) {
+	return s.Projects.List(ctx)
+}
+
+func (s *Service) Get(ctx context.Context, id project.ID) (*project.Project, error) {
+	return s.Projects.Get(ctx, id)
+}
+
 func (s *Service) Create(ctx context.Context, name, repoRaw, branch, workdir string, autoApprove bool) (*project.Project, error) {
 	repo, err := project.ParseSourceRepo(repoRaw)
 	if err != nil {

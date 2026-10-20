@@ -1,0 +1,29 @@
+{{define "details"}}
+<nav class="crumb"><a href="/">Projects</a> / <a href="/projects/{{.ID}}">{{.Name}}</a> / Details</nav>
+<div class="panel">
+  <h1>Details</h1>
+  <form method="post" action="/projects/{{.ID}}">
+    <label>Webhook URL</label>
+    <input type="url" value="{{.WebhookURL}}" readonly>
+    <label>Webhook secret</label>
+    <input type="text" value="{{.Secret}}" readonly>
+    <label class="check"><input type="checkbox" name="rotate_secret"> Rotate secret</label>
+    <label>GitHub token</label>
+    <input type="password" name="token" placeholder="leave blank to keep" autocomplete="off">
+    <label class="check"><input type="checkbox" name="auto_approve"{{if .AutoApprove}} checked{{end}}> Auto-approve</label>
+    <label>Default branch</label>
+    <input type="text" name="branch" value="{{.Branch}}">
+    <label>Working directory</label>
+    <input type="text" name="workdir" value="{{.Workdir}}">
+    <div class="actions">
+      <button type="submit">Save</button>
+    </div>
+  </form>
+  <form method="post" action="/projects/{{.ID}}/force-unlock" class="inline">
+    <button type="submit">Force-unlock state</button>
+  </form>
+  <form method="post" action="/projects/{{.ID}}/delete" class="inline">
+    <button type="submit" class="btn-danger">Delete project</button>
+  </form>
+</div>
+{{end}}

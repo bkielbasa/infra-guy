@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -73,6 +74,21 @@ type Worker struct {
 	InternalBaseURL string
 	Now             func() time.Time
 	Timeout         func(run.StepName) time.Duration
+}
+
+func (w *Worker) Loop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		if err := w.Tick(ctx); err != nil {
+			log.Printf("worker tick: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (w *Worker) Tick(ctx context.Context) error {

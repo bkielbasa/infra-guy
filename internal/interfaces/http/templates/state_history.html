@@ -1,0 +1,31 @@
+{{define "state_history"}}
+<div id="tab-panel" hx-get="/projects/{{.ProjectID}}/tabs/state"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+  {{if .Entries}}
+  <table>
+    <thead>
+      <tr><th>Time</th><th>Run</th><th>Serial</th><th>Size</th></tr>
+    </thead>
+    <tbody>
+      {{range .Entries}}
+      <tr>
+        <td>{{.Time}}</td>
+        <td>{{if .RunID}}<a href="/runs/{{.RunID}}">{{.RunID}}</a>{{end}}</td>
+        <td>{{.Serial}}</td>
+        <td>{{.Size}}</td>
+      </tr>
+      <tr>
+        <td colspan="4">
+          <details>
+            <summary>JSON</summary>
+            <pre>{{.JSON}}</pre>
+          </details>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="empty">No stored state.</p>
+  {{end}}
+</div>
+{{end}}

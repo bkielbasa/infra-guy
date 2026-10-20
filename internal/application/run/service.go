@@ -37,6 +37,14 @@ type Service struct {
 	NewID    func() string
 }
 
+func (s *Service) Get(ctx context.Context, id run.ID) (*run.Run, error) {
+	return s.Runs.Get(ctx, id)
+}
+
+func (s *Service) ListByProject(ctx context.Context, projectID project.ID) ([]*run.Run, error) {
+	return s.Runs.ListByProject(ctx, run.ProjectID(projectID))
+}
+
 func (s *Service) Open(ctx context.Context, in OpenRequest) (*run.Run, error) {
 	p, err := s.Projects.Get(ctx, in.ProjectID)
 	if err != nil {

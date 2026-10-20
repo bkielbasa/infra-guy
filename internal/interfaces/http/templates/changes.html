@@ -1,0 +1,12 @@
+{{define "changes"}}
+<div id="run-panel">
+  {{if .Delta}}
+  <p class="delta">{{.Delta}}</p>
+  {{end}}
+  {{if .PlanText}}
+  <pre class="log">{{.PlanText}}</pre>
+  {{else}}
+  <p class="empty">No plan yet.</p>
+  {{end}}
+</div>
+{{end}}

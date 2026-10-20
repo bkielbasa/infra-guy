@@ -1,0 +1,30 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="topbar"><a class="brand" href="/">infra-guy</a></header>
+  {{.Body}}
+</div>
+</body>
+</html>
+{{end}}
+
+{{define "meta"}}
+<div class="meta">
+  {{if .TerraformVersion}}<span>{{.TerraformVersion}}</span>{{end}}
+  <span>{{.Repo}}</span>
+  {{if .Workdir}}<span>{{.Workdir}}</span>{{end}}
+  {{if .Branch}}<span>{{.Branch}}</span>{{end}}
+  {{if .SHA}}<span class="sha">{{.SHA}}</span>{{end}}
+  {{if .StateUpdated}}<span>{{.StateUpdated}}</span>{{end}}
+  <span>State managed by infra-guy</span>
+</div>
+{{end}}

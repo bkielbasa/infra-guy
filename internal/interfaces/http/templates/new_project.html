@@ -1,0 +1,20 @@
+{{define "new_project"}}
+<nav class="crumb"><a href="/">Projects</a> / New</nav>
+<div class="panel">
+  <h1>New project</h1>
+  <form method="post" action="/projects">
+    <label>Name</label>
+    <input type="text" name="name" required>
+    <label>Repository</label>
+    <input type="text" name="repo" placeholder="owner/repo" required>
+    <label>Default branch</label>
+    <input type="text" name="branch" value="main">
+    <label>Working directory</label>
+    <input type="text" name="workdir">
+    <label class="check"><input type="checkbox" name="auto_approve"> Auto-approve</label>
+    <div class="actions">
+      <button type="submit">Create</button>
+    </div>
+  </form>
+</div>
+{{end}}

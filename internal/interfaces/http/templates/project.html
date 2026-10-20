@@ -1,0 +1,32 @@
+{{define "project"}}
+<nav class="crumb"><a href="/">Projects</a> / {{.Name}}</nav>
+<div class="panel">
+  <div class="headline">
+    <h1>{{.Name}}</h1>
+    {{if .LatestLabel}}<span class="pill {{.LatestClass}}">{{.LatestLabel}}</span>{{end}}
+  </div>
+  {{template "meta" .Meta}}
+  <div class="actions">
+    <form method="post" action="/projects/{{.ID}}/lock" class="inline">
+      <button type="submit">{{if .Locked}}Unlock{{else}}Lock{{end}}</button>
+    </form>
+    <form method="post" action="/projects/{{.ID}}/trigger" class="inline">
+      <button type="submit" class="btn-trigger">Trigger</button>
+    </form>
+    <a href="/projects/{{.ID}}/details">Details</a>
+  </div>
+  {{if .Empty}}
+  <section class="empty">
+    <p>Webhook URL: <code>{{.WebhookURL}}</code></p>
+    <p>Secret: <code>{{.Secret}}</code></p>
+    <p>This repository must not declare a Terraform backend.</p>
+  </section>
+  {{end}}
+  <nav class="tabs">
+    <a href="/projects/{{.ID}}" hx-get="/projects/{{.ID}}/tabs/tracked" hx-target="#tab-panel" hx-swap="outerHTML">Tracked runs</a>
+    <a href="/projects/{{.ID}}/tabs/pulls" hx-get="/projects/{{.ID}}/tabs/pulls" hx-target="#tab-panel" hx-swap="outerHTML">Pull requests</a>
+    <a href="/projects/{{.ID}}/tabs/state" hx-get="/projects/{{.ID}}/tabs/state" hx-target="#tab-panel" hx-swap="outerHTML">State history</a>
+  </nav>
+  {{.Panel}}
+</div>
+{{end}}
