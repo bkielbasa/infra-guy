@@ -108,6 +108,18 @@ func TestGitHubWebhook(t *testing.T) {
 	}
 
 	open.reqs = nil
+	fork := []byte(`{"action":"opened","pull_request":{"number":4,"title":"f","draft":false,"head":{"sha":"s","ref":"b","repo":{"full_name":"mallory/infra"}}},"repository":{"full_name":"bklebasa/infra"},"sender":{"login":"mallory"}}`)
+	rr = postWebhook(t, h, "p1", "pull_request", "whsec", fork, "")
+	if rr.Code != 200 || len(open.reqs) != 0 {
+		t.Fatalf("fork %d calls %d", rr.Code, len(open.reqs))
+	}
+	sameRepo := []byte(`{"action":"opened","pull_request":{"number":5,"title":"s","draft":false,"head":{"sha":"s","ref":"b","repo":{"full_name":"bklebasa/infra"}}},"repository":{"full_name":"bklebasa/infra"},"sender":{"login":"alice"}}`)
+	rr = postWebhook(t, h, "p1", "pull_request", "whsec", sameRepo, "")
+	if rr.Code != 200 || len(open.reqs) != 1 {
+		t.Fatalf("same repo %d calls %d", rr.Code, len(open.reqs))
+	}
+
+	open.reqs = nil
 	draft := []byte(`{"action":"opened","pull_request":{"number":1,"title":"d","draft":true,"head":{"sha":"s","ref":"b"}},"sender":{"login":"alice"}}`)
 	rr = postWebhook(t, h, "p1", "pull_request", "whsec", draft, "")
 	if rr.Code != 200 || len(open.reqs) != 0 {

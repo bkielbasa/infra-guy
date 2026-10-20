@@ -28,7 +28,7 @@
 {{end}}
 
 {{define "project_headline"}}
-<div id="project-headline" hx-get="/projects/{{.ID}}/headline"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+<div id="project-headline"{{if .Poll}} hx-get="/projects/{{.ID}}/headline" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
   <div class="headline">
     <h1>{{.Name}}</h1>
     {{if .LatestLabel}}<span class="pill {{.LatestClass}}">{{.LatestLabel}}</span>{{end}}

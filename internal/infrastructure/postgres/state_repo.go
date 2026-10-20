@@ -55,22 +55,20 @@ func (r *StateRepo) Save(ctx context.Context, st *state.State) error {
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO states (project_id, data, lock_id, lock_info, serial, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6)
-		ON CONFLICT (project_id) DO UPDATE SET
-			data = EXCLUDED.data,
-			lock_id = EXCLUDED.lock_id,
-			lock_info = EXCLUDED.lock_info,
-			serial = EXCLUDED.serial,
-			updated_at = EXCLUDED.updated_at`,
+		INSERT INTO states (project_id) VALUES ($1) ON CONFLICT (project_id) DO NOTHING`, s.ProjectID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM states WHERE project_id = $1 FOR UPDATE`, s.ProjectID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE states SET data = $2, lock_id = $3, lock_info = $4, serial = $5, updated_at = $6
+		WHERE project_id = $1`,
 		s.ProjectID, s.Data, s.LockID, s.LockInfo, s.Serial, s.UpdatedAt,
 	); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM state_history WHERE project_id = $1`, s.ProjectID); err != nil {
-		return err
-	}
-	for _, h := range s.History {
+	for _, h := range st.NewHistory() {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO state_history (project_id, run_id, serial, data, created_at)
 			VALUES ($1,$2,$3,$4,$5)`,

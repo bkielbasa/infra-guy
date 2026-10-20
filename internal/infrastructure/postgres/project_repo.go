@@ -32,17 +32,25 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			default_branch = EXCLUDED.default_branch,
 			working_directory = EXCLUDED.working_directory,
 			auto_approve = EXCLUDED.auto_approve,
-			locked = EXCLUDED.locked,
 			github_token = EXCLUDED.github_token,
 			webhook_secret = EXCLUDED.webhook_secret,
 			state_token = EXCLUDED.state_token,
-			active_run_id = EXCLUDED.active_run_id,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
 		s.AutoApprove, s.Locked, s.GitHubToken, s.WebhookSecret, s.StateToken, s.ActiveRunID,
 		s.CreatedAt, s.UpdatedAt,
 	)
+	return err
+}
+
+func (r *ProjectRepo) SetLocked(ctx context.Context, id project.ID, locked bool) error {
+	_, err := r.pool.Exec(ctx, `UPDATE projects SET locked = $2 WHERE id = $1`, id, locked)
+	return err
+}
+
+func (r *ProjectRepo) ReleaseActiveRun(ctx context.Context, id project.ID, runID string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE projects SET active_run_id = '' WHERE id = $1 AND active_run_id = $2`, id, runID)
 	return err
 }
 

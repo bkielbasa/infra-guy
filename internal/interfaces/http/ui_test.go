@@ -22,6 +22,7 @@ type memRuns struct {
 	items     map[run.ID]*run.Run
 	duplicate bool
 	insertErr error
+	saveErr   error
 }
 
 func (m *memRuns) InsertIfAbsent(_ context.Context, r *run.Run) (bool, error) {
@@ -35,6 +36,9 @@ func (m *memRuns) InsertIfAbsent(_ context.Context, r *run.Run) (bool, error) {
 	return true, nil
 }
 func (m *memRuns) Save(_ context.Context, r *run.Run) error {
+	if m.saveErr != nil {
+		return m.saveErr
+	}
 	m.items[r.Snapshot().ID] = run.Restore(r.Snapshot())
 	return nil
 }
@@ -269,6 +273,75 @@ func TestProjectHeadlinePollsWhileRunActive(t *testing.T) {
 	done := getUI(t, h, "/projects/p1/headline", "", "")
 	if done.Code != 200 || strings.Contains(done.Body.String(), `hx-trigger="every 2s"`) || strings.Contains(done.Body.String(), `id="tab-panel"`) {
 		t.Fatalf("terminal headline %d %s", done.Code, done.Body.Bytes())
+	}
+}
+
+func TestConfirmRejectsCrossSitePost(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	runs := &memRuns{items: map[run.ID]*run.Run{"r-need": run.Restore(needsApprovalSnap("r-need"))}}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "", "")
+
+	cross := httptest.NewRequest(http.MethodPost, "http://infra.example/runs/r-need/confirm", nil)
+	cross.Header.Set("Sec-Fetch-Site", "cross-site")
+	cross.Header.Set("Origin", "https://evil.example")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, cross)
+	if rr.Code != http.StatusForbidden || runs.items["r-need"].Snapshot().ApprovedBy != "" {
+		t.Fatalf("cross-site confirm %d approved=%q", rr.Code, runs.items["r-need"].Snapshot().ApprovedBy)
+	}
+
+	same := httptest.NewRequest(http.MethodPost, "http://infra.example/runs/r-need/confirm", nil)
+	same.Header.Set("Sec-Fetch-Site", "same-origin")
+	same.Header.Set("Origin", "http://infra.example")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, same)
+	if rr.Code != http.StatusSeeOther || runs.items["r-need"].Snapshot().ApprovedBy != "operator" {
+		t.Fatalf("same-origin confirm %d %s", rr.Code, rr.Body.Bytes())
+	}
+}
+
+func TestStateAPINotCrossOriginChecked(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	h := uiHandler(t, projects, &memRuns{items: map[run.ID]*run.Run{}}, &memStates{items: map[string]*state.State{}}, "", "")
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/p1/state", strings.NewReader(`{"serial":1}`))
+	req.SetBasicAuth("terraform", "tok")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("state api %d", rr.Code)
+	}
+}
+
+func TestConfirmActiveConflictIs409(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	runs := &memRuns{items: map[run.ID]*run.Run{"r-need": run.Restore(needsApprovalSnap("r-need"))}, saveErr: run.ErrActiveConflict}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "", "")
+	rr := postUI(t, h, "/runs/r-need/confirm", "", "", nil)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "must finish") {
+		t.Fatalf("conflict confirm %d %s", rr.Code, rr.Body.Bytes())
+	}
+}
+
+func TestTerminalPanelsDoNotRefetch(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	runs := &memRuns{items: map[run.ID]*run.Run{"r-done": run.Restore(run.Snapshot{
+		ID: "r-done", ProjectID: "p1", Trigger: run.TriggerPush, Status: run.StatusSucceeded, SHA: "abc1234def",
+		Steps: []run.Step{{Name: run.StepInit, Position: 1, Status: run.StepSucceeded, Logs: "init ok"}},
+	})}}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "", "")
+	for _, path := range []string{
+		"/runs/r-done/history", "/runs/r-done/headline", "/projects/p1/headline",
+		"/projects/p1/tabs/tracked", "/projects/p1/tabs/pulls", "/projects/p1/tabs/state",
+	} {
+		body := getUI(t, h, path, "", "").Body.String()
+		if strings.Contains(body, `hx-get="`+path+`"`) || strings.Contains(body, "hx-trigger") {
+			t.Fatalf("terminal %s still refetches itself: %s", path, body)
+		}
+	}
+	page := getUI(t, h, "/runs/r-done", "", "").Body.String()
+	if strings.Contains(page, `hx-trigger`) || strings.Contains(page, `<div id="run-panel" hx-get`) {
+		t.Fatalf("terminal run page still refetches: %s", page)
 	}
 }
 

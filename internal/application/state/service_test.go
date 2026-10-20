@@ -24,6 +24,20 @@ func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, e
 	return m.items[id], nil
 }
 func (m *memProjects) List(context.Context) ([]*project.Project, error) { return nil, nil }
+func (m *memProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
+	if p := m.items[id]; p != nil {
+		s := p.Snapshot()
+		s.Locked = locked
+		m.items[id] = project.Restore(s)
+	}
+	return nil
+}
+func (m *memProjects) ReleaseActiveRun(_ context.Context, id project.ID, runID string) error {
+	if p := m.items[id]; p != nil {
+		_ = p.ReleaseActiveRun(runID)
+	}
+	return nil
+}
 func (m *memProjects) Delete(_ context.Context, id project.ID) error {
 	delete(m.items, id)
 	return nil

@@ -1,6 +1,11 @@
 package run
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var ErrActiveConflict = errors.New("another run for this commit is queued or running")
 
 type Repository interface {
 	InsertIfAbsent(ctx context.Context, r *Run) (inserted bool, err error)

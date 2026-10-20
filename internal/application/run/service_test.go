@@ -2,6 +2,8 @@ package runapp
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,7 +11,9 @@ import (
 	"infra-guy/internal/domain/run"
 )
 
-type memProjects struct{ items map[project.ID]*project.Project }
+type memProjects struct {
+	items map[project.ID]*project.Project
+}
 
 func (m *memProjects) Save(_ context.Context, p *project.Project) error {
 	m.items[p.Snapshot().ID] = project.Restore(p.Snapshot())
@@ -19,6 +23,20 @@ func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, e
 	return m.items[id], nil
 }
 func (m *memProjects) List(context.Context) ([]*project.Project, error) { return nil, nil }
+func (m *memProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
+	if p := m.items[id]; p != nil {
+		s := p.Snapshot()
+		s.Locked = locked
+		m.items[id] = project.Restore(s)
+	}
+	return nil
+}
+func (m *memProjects) ReleaseActiveRun(_ context.Context, id project.ID, runID string) error {
+	if p := m.items[id]; p != nil {
+		_ = p.ReleaseActiveRun(runID)
+	}
+	return nil
+}
 func (m *memProjects) Delete(_ context.Context, id project.ID) error {
 	delete(m.items, id)
 	return nil
@@ -52,11 +70,84 @@ func (m *memRuns) ListByProject(context.Context, run.ProjectID) ([]*run.Run, err
 	return nil, nil
 }
 
-type memSched struct{ steps []run.StepName }
+type memSched struct {
+	steps []run.StepName
+	err   error
+}
 
 func (m *memSched) Enqueue(_ context.Context, _ run.ID, step run.StepName) error {
+	if m.err != nil {
+		return m.err
+	}
 	m.steps = append(m.steps, step)
 	return nil
+}
+
+func TestOpenEnqueueFailureAllowsRetry(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := project.ParseSourceRepo("bklebasa/infra")
+	p, _ := project.New("p1", "infra", repo, time.Unix(0, 0).UTC())
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	sched := &memSched{err: errors.New("queue down")}
+	ids := []string{"run-1", "run-2"}
+	svc := &Service{Projects: projects, Runs: runs, Schedule: sched, Now: func() time.Time { return time.Unix(1, 0).UTC() },
+		NewID: func() string { id := ids[0]; ids = ids[1:]; return id }}
+	in := OpenRequest{ProjectID: "p1", Trigger: run.TriggerPush, SHA: "abc"}
+	if _, err := svc.Open(ctx, in); err == nil || !strings.Contains(err.Error(), "queue down") {
+		t.Fatalf("open error %v", err)
+	}
+	if st := runs.items["run-1"].Snapshot().Status; st != run.StatusFailed {
+		t.Fatalf("failed enqueue left run %s", st)
+	}
+	sched.err = nil
+	retried, err := svc.Open(ctx, in)
+	if err != nil || retried.Snapshot().ID != "run-2" || len(sched.steps) != 1 || sched.steps[0] != run.StepInit {
+		t.Fatalf("retry %v %#v", err, sched.steps)
+	}
+}
+
+func TestAdvanceEnqueueFailureFailsRunAndReleases(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := project.ParseSourceRepo("bklebasa/infra")
+	p, _ := project.New("p1", "infra", repo, time.Unix(0, 0).UTC())
+	r, err := run.Open(run.OpenInput{
+		ID: "run-1", ProjectID: "p1", Trigger: run.TriggerPush, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginStep(t, r, run.StepInit, time.Unix(1, 0).UTC())
+	svc, sched, projects := testService(t, p, r)
+	sched.err = errors.New("queue down")
+	if err := svc.Advance(ctx, "run-1", run.StepInit, run.StepResult{}); err == nil {
+		t.Fatal("expected enqueue error")
+	}
+	snap := runsFromService(t, svc, "run-1").Snapshot()
+	if snap.Status != run.StatusFailed || !strings.Contains(snap.Error, "queue down") {
+		t.Fatalf("run %s %q", snap.Status, snap.Error)
+	}
+	if projects.items["p1"].Snapshot().ActiveRunID != "" {
+		t.Fatalf("active run %q", projects.items["p1"].Snapshot().ActiveRunID)
+	}
+}
+
+func TestConfirmEnqueueFailureFailsRun(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := project.ParseSourceRepo("bklebasa/infra")
+	p, _ := project.New("p1", "infra", repo, time.Unix(0, 0).UTC())
+	r, _ := needsApprovalRun(t)
+	svc, sched, projects := testService(t, p, r)
+	sched.err = errors.New("queue down")
+	if err := svc.Confirm(ctx, "run-1", "operator"); err == nil {
+		t.Fatal("expected enqueue error")
+	}
+	if st := runsFromService(t, svc, "run-1").Snapshot().Status; st != run.StatusFailed {
+		t.Fatalf("status %s", st)
+	}
+	if projects.items["p1"].Snapshot().ActiveRunID != "" {
+		t.Fatalf("active run %q", projects.items["p1"].Snapshot().ActiveRunID)
+	}
 }
 
 func TestOpenEnqueuesOnlyInit(t *testing.T) {

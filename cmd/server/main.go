@@ -71,7 +71,12 @@ func main() {
 		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{}},
 		WorkDir: workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
 	}
-	go w.Loop(ctx)
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		w.Loop(workerCtx)
+	}()
 
 	h := httpapi.NewServer(httpapi.ServerConfig{
 		Projects: &projectapp.Service{Projects: projects, Now: now, NewID: newID},
@@ -85,6 +90,11 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: h}
 	go func() {
 		<-ctx.Done()
+		stopWorker()
+		select {
+		case <-workerDone:
+		case <-time.After(terraform.WaitDelay):
+		}
 		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shCtx)

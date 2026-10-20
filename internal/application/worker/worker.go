@@ -36,9 +36,9 @@ type Job struct {
 }
 
 type Request struct {
-	WorkDir, InternalBaseURL, ProjectID, StateToken, WorkingDirectory string
-	Step                                                              run.StepName
-	PlanFile                                                          []byte
+	WorkDir, InternalBaseURL, ProjectID, RunID, StateToken, WorkingDirectory, GitHubToken string
+	Step                                                                                  run.StepName
+	PlanFile                                                                              []byte
 }
 
 type Result struct {
@@ -192,8 +192,8 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	res, err := w.Executor.Run(stepCtx, Request{
-		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID),
-		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory,
+		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID), RunID: string(job.RunID),
+		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: ps.GitHubToken,
 		Step: job.Step, PlanFile: rs.PlanFile,
 	})
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {

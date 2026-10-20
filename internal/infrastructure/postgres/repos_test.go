@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -202,7 +203,7 @@ func TestInsertIfAbsentConcurrentSameKeyNilPR(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			opened, err := run.Open(run.OpenInput{
-				ID: run.ID(fmt.Sprintf("run-conc-%d-%s", i, suffix)),
+				ID:        run.ID(fmt.Sprintf("run-conc-%d-%s", i, suffix)),
 				ProjectID: run.ProjectID(projectID),
 				Trigger:   run.TriggerPush,
 				SHA:       sha,
@@ -242,6 +243,150 @@ func TestInsertIfAbsentConcurrentSameKeyNilPR(t *testing.T) {
 	}
 	if runRows != 1 {
 		t.Fatalf("active run rows = %d, want 1", runRows)
+	}
+}
+
+func newTestProject(t *testing.T, ctx context.Context, projects *ProjectRepo, prefix string) *project.Project {
+	t.Helper()
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := project.New(project.ID(fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())), "infra", repo, time.Unix(1_700_000_000, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.Save(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestProjectSettingsSaveKeepsActiveRunAndLock(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	projects := NewProjectRepo(pool)
+	stale := newTestProject(t, ctx, projects, "proj-settings")
+	id := stale.Snapshot().ID
+
+	if _, err := pool.Exec(ctx, `UPDATE projects SET active_run_id = 'run-live' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.SetLocked(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	stale.SetAutoApprove(true)
+	if err := projects.Save(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	got, err := projects.Get(ctx, id)
+	if err != nil || got == nil {
+		t.Fatal(err)
+	}
+	if s := got.Snapshot(); s.ActiveRunID != "run-live" || !s.Locked || !s.AutoApprove {
+		t.Fatalf("settings save clobbered columns: %#v", s)
+	}
+
+	if err := projects.ReleaseActiveRun(ctx, id, "run-other"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := projects.Get(ctx, id); got.Snapshot().ActiveRunID != "run-live" {
+		t.Fatalf("mismatched release cleared %q", got.Snapshot().ActiveRunID)
+	}
+	if err := projects.ReleaseActiveRun(ctx, id, "run-live"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := projects.Get(ctx, id); got.Snapshot().ActiveRunID != "" {
+		t.Fatalf("release left %q", got.Snapshot().ActiveRunID)
+	}
+}
+
+func TestStateHistoryOnlyGrows(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	projects := NewProjectRepo(pool)
+	states := NewStateRepo(pool)
+	id := string(newTestProject(t, ctx, projects, "proj-history").Snapshot().ID)
+
+	for i, body := range []string{`{"serial":1}`, `{"serial":2}`} {
+		st, err := states.Load(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Put([]byte(body), "", fmt.Sprintf("run-%d", i), time.Unix(int64(1_700_000_000+i), 0).UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if err := states.Save(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var firstID int64
+	if err := pool.QueryRow(ctx, `SELECT min(id) FROM state_history WHERE project_id = $1`, id).Scan(&firstID); err != nil {
+		t.Fatal(err)
+	}
+	st, err := states.Load(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Lock([]byte(`{"ID":"L1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := states.Save(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	var minID int64
+	if err := pool.QueryRow(ctx, `SELECT count(*), min(id) FROM state_history WHERE project_id = $1`, id).Scan(&rows, &minID); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 || minID != firstID {
+		t.Fatalf("history rows %d first id %d (was %d)", rows, minID, firstID)
+	}
+	loaded, err := states.Load(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := loaded.Snapshot().History; len(h) != 2 || h[0].RunID != "run-0" || h[1].RunID != "run-1" || loaded.Snapshot().LockID != "L1" {
+		t.Fatalf("loaded %#v", loaded.Snapshot())
+	}
+}
+
+func TestRunSaveActiveConflictIsSentinel(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	projects := NewProjectRepo(pool)
+	runs := NewRunRepo(pool)
+	pid := run.ProjectID(newTestProject(t, ctx, projects, "proj-conflict").Snapshot().ID)
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	waiting := run.Restore(run.Snapshot{
+		ID: run.ID(string(pid) + "-a"), ProjectID: pid, Trigger: run.TriggerPush, Status: run.StatusNeedsApproval,
+		SHA: "abc", CreatedAt: now,
+	})
+	if ok, err := runs.InsertIfAbsent(ctx, waiting); err != nil || !ok {
+		t.Fatalf("insert waiting %v %v", ok, err)
+	}
+	queued, err := run.Open(run.OpenInput{ID: run.ID(string(pid) + "-b"), ProjectID: pid, Trigger: run.TriggerPush, SHA: "abc", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := runs.InsertIfAbsent(ctx, queued); err != nil || !ok {
+		t.Fatalf("insert queued %v %v", ok, err)
+	}
+	if _, err := waiting.Confirm("operator", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.Save(ctx, waiting); !errors.Is(err, run.ErrActiveConflict) {
+		t.Fatalf("save conflict: %v", err)
 	}
 }
 

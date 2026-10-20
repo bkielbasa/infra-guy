@@ -12,8 +12,8 @@ type WorkerExecutor struct{ Executor }
 
 func (e WorkerExecutor) Run(ctx context.Context, req worker.Request) (worker.Result, error) {
 	res, err := e.Executor.Run(ctx, Request{
-		WorkDir: req.WorkDir, InternalBaseURL: req.InternalBaseURL, ProjectID: req.ProjectID,
-		StateToken: req.StateToken, WorkingDirectory: req.WorkingDirectory,
+		WorkDir: req.WorkDir, InternalBaseURL: req.InternalBaseURL, ProjectID: req.ProjectID, RunID: req.RunID,
+		StateToken: req.StateToken, WorkingDirectory: req.WorkingDirectory, GitHubToken: req.GitHubToken,
 		Step: req.Step, PlanFile: req.PlanFile,
 	})
 	return worker.Result{

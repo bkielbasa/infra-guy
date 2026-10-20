@@ -355,6 +355,10 @@ func (u *ui) changes(w http.ResponseWriter, r *http.Request) {
 func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 	id := run.ID(r.PathValue("id"))
 	if err := u.cfg.Runs.Confirm(r.Context(), id, u.actor(r)); err != nil {
+		if errors.Is(err, run.ErrActiveConflict) {
+			http.Error(w, "Another run for this commit is queued or running; it must finish before this run can be confirmed.", http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

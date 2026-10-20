@@ -1,5 +1,5 @@
 {{define "history"}}
-<div id="run-panel" hx-get="/runs/{{.ID}}/history"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+<div id="run-panel"{{if .Poll}} hx-get="/runs/{{.ID}}/history" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
   <ol class="timeline">
     {{if .Terminal}}
     <li><span class="pill {{.StatusClass}}">{{.StatusLabel}}</span></li>

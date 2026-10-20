@@ -93,10 +93,8 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*project.Project,
 			return nil, err
 		}
 	}
-	if in.Workdir != "" {
-		if err := p.SetWorkingDirectory(in.Workdir); err != nil {
-			return nil, err
-		}
+	if err := p.SetWorkingDirectory(in.Workdir); err != nil {
+		return nil, err
 	}
 	p.SetAutoApprove(in.AutoApprove)
 	p.SetGitHubToken(in.Token)
@@ -121,12 +119,7 @@ func (s *Service) SetLocked(ctx context.Context, id project.ID, locked bool) err
 	if p == nil {
 		return fmt.Errorf("project %s not found", id)
 	}
-	if locked {
-		p.Lock()
-	} else {
-		p.Unlock()
-	}
-	return s.Projects.Save(ctx, p)
+	return s.Projects.SetLocked(ctx, id, locked)
 }
 
 func (s *Service) Delete(ctx context.Context, id project.ID) error {

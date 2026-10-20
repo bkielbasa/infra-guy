@@ -1,5 +1,5 @@
 {{define "state_history"}}
-<div id="tab-panel" hx-get="/projects/{{.ProjectID}}/tabs/state"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+<div id="tab-panel"{{if .Poll}} hx-get="/projects/{{.ProjectID}}/tabs/state" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
   {{if .Entries}}
   <table>
     <thead>

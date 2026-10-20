@@ -39,6 +39,20 @@ func (m *memProjects) List(context.Context) ([]*project.Project, error) {
 	}
 	return out, nil
 }
+func (m *memProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
+	if p := m.items[id]; p != nil {
+		s := p.Snapshot()
+		s.Locked = locked
+		m.items[id] = project.Restore(s)
+	}
+	return nil
+}
+func (m *memProjects) ReleaseActiveRun(_ context.Context, id project.ID, runID string) error {
+	if p := m.items[id]; p != nil {
+		_ = p.ReleaseActiveRun(runID)
+	}
+	return nil
+}
 func (m *memProjects) Delete(_ context.Context, id project.ID) error {
 	delete(m.items, id)
 	return nil
@@ -157,6 +171,15 @@ func TestStateHTTP(t *testing.T) {
 	rr = doState(t, h, http.MethodPost, "/api/projects/p1/state?ID=L1", "terraform", "tok", []byte(`{"serial":4}`))
 	if rr.Code != 200 {
 		t.Fatalf("put locked %d", rr.Code)
+	}
+
+	rr = doState(t, h, http.MethodPost, "/api/projects/p1/state?run=run-9&ID=L1", "terraform", "tok", []byte(`{"serial":5}`))
+	if rr.Code != 200 {
+		t.Fatalf("put with run %d", rr.Code)
+	}
+	st, _ = states.Load(context.Background(), "p1")
+	if hist := st.Snapshot().History; len(hist) != 3 || hist[2].RunID != "run-9" {
+		t.Fatalf("run query not recorded %#v", hist)
 	}
 
 	rr = doState(t, h, "UNLOCK", "/api/projects/p1/state/lock", "terraform", "tok", []byte(`{"ID":"L1"}`))

@@ -28,7 +28,10 @@ type Snapshot struct {
 	History   []HistoryEntry
 }
 
-type State struct{ s Snapshot }
+type State struct {
+	s        Snapshot
+	restored int
+}
 
 func New(projectID string) *State { return &State{s: Snapshot{ProjectID: projectID}} }
 
@@ -61,9 +64,13 @@ func cloneSnapshot(s Snapshot) Snapshot {
 	return out
 }
 
-func Restore(s Snapshot) *State { return &State{s: cloneSnapshot(s)} }
+func Restore(s Snapshot) *State { return &State{s: cloneSnapshot(s), restored: len(s.History)} }
 
 func (s *State) Snapshot() Snapshot { return cloneSnapshot(s.s) }
+
+func (s *State) NewHistory() []HistoryEntry {
+	return cloneSnapshot(Snapshot{History: s.s.History[s.restored:]}).History
+}
 
 func (s *State) Empty() bool { return len(s.s.Data) == 0 }
 

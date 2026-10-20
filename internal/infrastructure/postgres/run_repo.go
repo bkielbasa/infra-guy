@@ -86,6 +86,10 @@ func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 		s.Add, s.Change, s.Destroy, s.SummaryPresent, s.TerraformVersion, s.Error, s.ApprovedBy,
 		s.ApprovedAt, s.CreatedAt, s.StartedAt, s.FinishedAt,
 	); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return run.ErrActiveConflict
+		}
 		return err
 	}
 	if err := upsertSteps(ctx, tx, s); err != nil {

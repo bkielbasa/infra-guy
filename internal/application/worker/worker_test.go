@@ -25,6 +25,20 @@ func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, e
 	return m.items[id], nil
 }
 func (m *memProjects) List(context.Context) ([]*project.Project, error) { return nil, nil }
+func (m *memProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
+	if p := m.items[id]; p != nil {
+		s := p.Snapshot()
+		s.Locked = locked
+		m.items[id] = project.Restore(s)
+	}
+	return nil
+}
+func (m *memProjects) ReleaseActiveRun(_ context.Context, id project.ID, runID string) error {
+	if p := m.items[id]; p != nil {
+		_ = p.ReleaseActiveRun(runID)
+	}
+	return nil
+}
 func (m *memProjects) Delete(_ context.Context, id project.ID) error {
 	delete(m.items, id)
 	return nil
@@ -237,7 +251,8 @@ func TestTickPlanOnlyAdvancesAndDeletesWorkspace(t *testing.T) {
 	if !fx.exec.called {
 		t.Fatal("executor not called")
 	}
-	if fx.exec.req.WorkDir != fx.ws || fx.exec.req.InternalBaseURL != "http://127.0.0.1:8759" || fx.exec.req.ProjectID != "p1" || fx.exec.req.StateToken != "state-token" || fx.exec.req.Step != run.StepPlan {
+	if fx.exec.req.WorkDir != fx.ws || fx.exec.req.InternalBaseURL != "http://127.0.0.1:8759" || fx.exec.req.ProjectID != "p1" || fx.exec.req.StateToken != "state-token" || fx.exec.req.Step != run.StepPlan ||
+		fx.exec.req.RunID != "run-1" || fx.exec.req.GitHubToken != "gh-token" {
 		t.Fatalf("executor req %#v", fx.exec.req)
 	}
 	if _, err := os.Stat(fx.ws); !os.IsNotExist(err) {

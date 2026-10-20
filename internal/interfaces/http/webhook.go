@@ -91,15 +91,24 @@ func pullRequestOpen(id project.ID, body []byte) (runapp.OpenRequest, bool) {
 			Title  string `json:"title"`
 			Draft  bool   `json:"draft"`
 			Head   struct {
-				SHA string `json:"sha"`
-				Ref string `json:"ref"`
+				SHA  string `json:"sha"`
+				Ref  string `json:"ref"`
+				Repo *struct {
+					FullName string `json:"full_name"`
+				} `json:"repo"`
 			} `json:"head"`
 		} `json:"pull_request"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
 		Sender struct {
 			Login string `json:"login"`
 		} `json:"sender"`
 	}
 	if json.Unmarshal(body, &ev) != nil {
+		return runapp.OpenRequest{}, false
+	}
+	if head := ev.PullRequest.Head.Repo; head != nil && head.FullName != "" && !strings.EqualFold(head.FullName, ev.Repository.FullName) {
 		return runapp.OpenRequest{}, false
 	}
 	switch ev.Action {

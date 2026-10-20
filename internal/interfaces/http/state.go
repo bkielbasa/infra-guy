@@ -70,7 +70,8 @@ func (a *api) putState(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	out, err := a.states.Put(r.Context(), r.PathValue("id"), token, r.URL.Query().Get("ID"), body, "")
+	q := r.URL.Query()
+	out, err := a.states.Put(r.Context(), r.PathValue("id"), token, q.Get("ID"), body, q.Get("run"))
 	writeOutcome(w, out, err)
 }
 

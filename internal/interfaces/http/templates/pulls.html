@@ -1,5 +1,5 @@
 {{define "pulls"}}
-<div id="tab-panel" hx-get="/projects/{{.ProjectID}}/tabs/pulls"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+<div id="tab-panel"{{if .Poll}} hx-get="/projects/{{.ProjectID}}/tabs/pulls" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
   {{if .Groups}}
     {{range .Groups}}
     <section class="group">

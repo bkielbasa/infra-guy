@@ -69,10 +69,23 @@ func (s *Service) Open(ctx context.Context, in OpenRequest) (*run.Run, error) {
 	if !ok {
 		return nil, ErrDuplicate
 	}
-	if err := s.Schedule.Enqueue(ctx, opened.Snapshot().ID, run.StepInit); err != nil {
+	if err := s.enqueue(ctx, opened.Snapshot().ID, run.StepInit); err != nil {
 		return nil, err
 	}
 	return opened, nil
+}
+
+// enqueue fails the run when the job cannot be queued, so the run never sits
+// queued without a job and a retry is not rejected as a duplicate.
+func (s *Service) enqueue(ctx context.Context, id run.ID, step run.StepName) error {
+	err := s.Schedule.Enqueue(ctx, id, step)
+	if err == nil {
+		return nil
+	}
+	if ferr := s.Fail(ctx, id, step, "could not queue "+string(step)+": "+err.Error()); ferr != nil {
+		return errors.Join(err, ferr)
+	}
+	return err
 }
 
 func (s *Service) Confirm(ctx context.Context, id run.ID, actor string) error {
@@ -144,29 +157,15 @@ func (s *Service) Fail(ctx context.Context, id run.ID, step run.StepName, messag
 
 func (s *Service) apply(ctx context.Context, r *run.Run, d run.Decision) error {
 	if d.Kind == run.DecisionEnqueue {
-		if err := s.Schedule.Enqueue(ctx, r.Snapshot().ID, d.Step); err != nil {
-			return err
-		}
+		return s.enqueue(ctx, r.Snapshot().ID, d.Step)
 	}
 	return s.releaseIfTerminal(ctx, r)
 }
 
 func (s *Service) releaseIfTerminal(ctx context.Context, r *run.Run) error {
-	if !r.Snapshot().Status.Terminal() {
+	rs := r.Snapshot()
+	if !rs.Status.Terminal() {
 		return nil
 	}
-	p, err := s.Projects.Get(ctx, project.ID(r.Snapshot().ProjectID))
-	if err != nil || p == nil {
-		return err
-	}
-	if p.Snapshot().ActiveRunID == "" {
-		return nil
-	}
-	if err := p.ReleaseActiveRun(string(r.Snapshot().ID)); err != nil {
-		if errors.Is(err, project.ErrActiveRunMismatch) {
-			return nil
-		}
-		return err
-	}
-	return s.Projects.Save(ctx, p)
+	return s.Projects.ReleaseActiveRun(ctx, project.ID(rs.ProjectID), string(rs.ID))
 }

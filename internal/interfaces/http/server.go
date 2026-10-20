@@ -35,7 +35,7 @@ func NewServer(cfg ServerConfig) http.Handler {
 	api := New(cfg.States, cfg.Runs, cfg.Projects.Projects)
 	uiMux := http.NewServeMux()
 	(&ui{cfg: cfg}).routes(uiMux)
-	auth := withBasicAuth(uiMux, cfg.BasicAuthUser, cfg.BasicAuthPassword)
+	auth := http.NewCrossOriginProtection().Handler(withBasicAuth(uiMux, cfg.BasicAuthUser, cfg.BasicAuthPassword))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/webhooks/") {
 			api.ServeHTTP(w, r)

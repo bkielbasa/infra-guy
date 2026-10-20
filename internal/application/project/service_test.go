@@ -21,6 +21,20 @@ func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, e
 	return m.items[id], nil
 }
 func (m *memProjects) List(context.Context) ([]*project.Project, error) { return nil, nil }
+func (m *memProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
+	if p := m.items[id]; p != nil {
+		s := p.Snapshot()
+		s.Locked = locked
+		m.items[id] = project.Restore(s)
+	}
+	return nil
+}
+func (m *memProjects) ReleaseActiveRun(_ context.Context, id project.ID, runID string) error {
+	if p := m.items[id]; p != nil {
+		_ = p.ReleaseActiveRun(runID)
+	}
+	return nil
+}
 func (m *memProjects) Delete(_ context.Context, id project.ID) error {
 	delete(m.items, id)
 	return nil
@@ -56,6 +70,12 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	updated, err := svc.Update(ctx, UpdateInput{ID: "p1", Token: ""})
 	if err != nil || updated.Snapshot().StateToken != snap.StateToken {
 		t.Fatal(err)
+	}
+	if updated.Snapshot().WorkingDirectory != "" {
+		t.Fatalf("empty workdir must mean repository root, got %q", updated.Snapshot().WorkingDirectory)
+	}
+	if err := svc.SetLocked(ctx, "p1", true); err != nil || !projects.items["p1"].Snapshot().Locked {
+		t.Fatalf("lock: %v", err)
 	}
 	if err := created.ClaimActiveRun("run-1"); err != nil {
 		t.Fatal(err)

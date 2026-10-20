@@ -7,7 +7,7 @@
 {{end}}
 
 {{define "run_headline"}}
-<div id="run-headline" hx-get="/runs/{{.ID}}/headline"{{if .Poll}} hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+<div id="run-headline"{{if .Poll}} hx-get="/runs/{{.ID}}/headline" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
   <div class="headline">
     <h1>{{.Title}}</h1>
     <span class="pill {{.StatusClass}}">{{.Status}}</span>
