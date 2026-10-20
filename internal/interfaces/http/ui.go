@@ -24,12 +24,8 @@ var content embed.FS
 
 var pages = template.Must(template.ParseFS(content, "templates/*.html"))
 
-// placeholderTenant and placeholderRepoID stand in until sessions and the
-// repository picker supply the real values.
-const (
-	placeholderTenant       = "ten"
-	placeholderRepoID int64 = 1
-)
+// placeholderRepoID stands in until the repository picker supplies the real value.
+const placeholderRepoID int64 = 1
 
 type ui struct{ cfg ServerConfig }
 
@@ -75,11 +71,16 @@ type stepView struct {
 
 type historyView struct {
 	ID, StatusLabel, StatusClass, ApprovedBy, QueuedAt string
-	Poll, Terminal, Unconfirmed, Confirmed, Queued     bool
+	Poll, Terminal, Unconfirmed, Confirmed, Cancelled  bool
+	Queued                                             bool
 	Apply, Plan, Init                                  *stepView
 }
 
 func (u *ui) routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /github/login", u.githubLogin)
+	mux.HandleFunc("GET /github/callback", u.githubCallback)
+	mux.HandleFunc("GET /github/setup", u.githubSetup)
+	mux.HandleFunc("POST /github/tenant", u.githubTenant)
 	mux.HandleFunc("GET /{$}", u.list)
 	mux.HandleFunc("GET /projects/new", u.newProject)
 	mux.HandleFunc("POST /projects", u.create)
@@ -104,14 +105,15 @@ func (u *ui) routes(mux *http.ServeMux) {
 }
 
 func (u *ui) actor(r *http.Request) string {
-	if u.cfg.BasicAuthUser == "" || u.cfg.BasicAuthPassword == "" {
-		return "operator"
+	login, _, _, _ := SessionFrom(r.Context())
+	return login
+}
+
+func (u *ui) now() time.Time {
+	if u.cfg.Auth != nil && u.cfg.Auth.Now != nil {
+		return u.cfg.Auth.Now()
 	}
-	user, _, ok := r.BasicAuth()
-	if !ok || user == "" {
-		return "operator"
-	}
-	return user
+	return time.Now().UTC()
 }
 
 func (u *ui) page(w http.ResponseWriter, title, name string, data any) {
@@ -134,7 +136,16 @@ func (u *ui) fragment(w http.ResponseWriter, name string, data any) {
 }
 
 func (u *ui) list(w http.ResponseWriter, r *http.Request) {
-	items, err := u.cfg.Projects.List(r.Context(), placeholderTenant)
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if tenantID == "" {
+		u.picker(w, r)
+		return
+	}
+	items, err := u.cfg.Projects.List(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -171,7 +182,12 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	p, err := u.cfg.Projects.Create(r.Context(), placeholderTenant, r.FormValue("name"), repo, placeholderRepoID, r.FormValue("branch"), r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	p, err := u.cfg.Projects.Create(r.Context(), tenantID, r.FormValue("name"), repo, placeholderRepoID, r.FormValue("branch"), r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -307,7 +323,11 @@ func (u *ui) trigger(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) forceUnlock(w http.ResponseWriter, r *http.Request) {
-	id := project.ID(r.PathValue("id"))
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	id := p.Snapshot().ID
 	if err := u.cfg.Projects.ForceUnlock(r.Context(), id, u.cfg.States.States); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -316,7 +336,11 @@ func (u *ui) forceUnlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) delete(w http.ResponseWriter, r *http.Request) {
-	if err := u.cfg.Projects.Delete(r.Context(), project.ID(r.PathValue("id"))); err != nil {
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	if err := u.cfg.Projects.Delete(r.Context(), p.Snapshot().ID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -365,6 +389,9 @@ func (u *ui) changes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := u.loadRun(w, r); err != nil {
+		return
+	}
 	id := run.ID(r.PathValue("id"))
 	if err := u.cfg.Runs.Confirm(r.Context(), id, u.actor(r)); err != nil {
 		if errors.Is(err, run.ErrActiveConflict) {
@@ -382,8 +409,11 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) cancel(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := u.loadRun(w, r); err != nil {
+		return
+	}
 	id := run.ID(r.PathValue("id"))
-	if err := u.cfg.Runs.Cancel(r.Context(), id); err != nil {
+	if err := u.cfg.Runs.Cancel(r.Context(), id, u.actor(r)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -401,6 +431,11 @@ func (u *ui) getProject(w http.ResponseWriter, r *http.Request) (*project.Projec
 		return nil, err
 	}
 	if p == nil {
+		http.NotFound(w, r)
+		return nil, fmt.Errorf("not found")
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || p.Snapshot().TenantID != tenantID {
 		http.NotFound(w, r)
 		return nil, fmt.Errorf("not found")
 	}
@@ -436,6 +471,11 @@ func (u *ui) loadRun(w http.ResponseWriter, r *http.Request) (*run.Run, *project
 		return nil, nil, err
 	}
 	if p == nil {
+		http.NotFound(w, r)
+		return nil, nil, fmt.Errorf("not found")
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || p.Snapshot().TenantID != tenantID {
 		http.NotFound(w, r)
 		return nil, nil, fmt.Errorf("not found")
 	}
@@ -578,7 +618,9 @@ func historyFrom(s run.Snapshot) historyView {
 	h := historyView{
 		ID: string(s.ID), Poll: !s.Status.Terminal(), StatusLabel: s.Status.Label(), StatusClass: statusClass(s.Status),
 		Terminal: s.Status.Terminal(), Unconfirmed: s.Status == run.StatusNeedsApproval,
-		Confirmed: s.ApprovedBy != "", ApprovedBy: s.ApprovedBy, Queued: true, QueuedAt: fmtTime(s.CreatedAt),
+		Confirmed:  s.ApprovedBy != "" && s.Status != run.StatusCancelled,
+		Cancelled:  s.Status == run.StatusCancelled,
+		ApprovedBy: s.ApprovedBy, Queued: true, QueuedAt: fmtTime(s.CreatedAt),
 	}
 	for _, st := range s.Steps {
 		sv := &stepView{Open: st.Status == run.StepRunning, Logs: st.Logs}

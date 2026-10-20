@@ -284,12 +284,12 @@ func TestCancelNeedsApprovalReleasesActiveRun(t *testing.T) {
 	p, _ := project.New("p1", "infra", repo, time.Unix(0, 0).UTC())
 	r, _ := needsApprovalRun(t)
 	svc, sched, projects := testService(t, p, r)
-	if err := svc.Cancel(ctx, r.Snapshot().ID); err != nil {
+	if err := svc.Cancel(ctx, r.Snapshot().ID, "ada"); err != nil {
 		t.Fatal(err)
 	}
 	snap := runsFromService(t, svc, r.Snapshot().ID).Snapshot()
-	if snap.Status != run.StatusCancelled {
-		t.Fatalf("status %s", snap.Status)
+	if snap.Status != run.StatusCancelled || snap.ApprovedBy != "ada" || snap.ApprovedAt == nil || !snap.ApprovedAt.Equal(time.Unix(20, 0).UTC()) {
+		t.Fatalf("%#v", snap)
 	}
 	if len(sched.steps) != 0 {
 		t.Fatalf("enqueued %#v", sched.steps)

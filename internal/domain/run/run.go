@@ -267,11 +267,13 @@ func (r *Run) Confirm(actor string, now time.Time) (Decision, error) {
 	return Decision{Kind: DecisionEnqueue, Step: StepApply}, nil
 }
 
-func (r *Run) Cancel(now time.Time) error {
+func (r *Run) Cancel(actor string, now time.Time) error {
 	if r.s.Status != StatusNeedsApproval {
 		return ErrNotUnconfirmed
 	}
 	r.skip(StepApply, now)
+	r.s.ApprovedBy = actor
+	r.s.ApprovedAt = &now
 	r.s.Status = StatusCancelled
 	r.s.FinishedAt = &now
 	return nil

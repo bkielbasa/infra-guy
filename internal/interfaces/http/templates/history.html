@@ -12,7 +12,9 @@
       </details>
     </li>
     {{end}}
-    {{if .Confirmed}}
+    {{if .Cancelled}}
+    <li>Cancelled by {{.ApprovedBy}}</li>
+    {{else if .Confirmed}}
     <li>Confirmed by {{.ApprovedBy}}</li>
     {{end}}
     {{if .Plan}}

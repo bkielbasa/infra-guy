@@ -3,21 +3,29 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	authapp "infra-guy/internal/application/auth"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
 	"infra-guy/internal/application/worker"
+	"infra-guy/internal/domain/tenant"
+	"infra-guy/internal/domain/user"
 	"infra-guy/internal/infrastructure/git"
+	"infra-guy/internal/infrastructure/github"
 	"infra-guy/internal/infrastructure/postgres"
 	"infra-guy/internal/infrastructure/terraform"
 	httpapi "infra-guy/internal/interfaces/http"
@@ -78,13 +86,17 @@ func main() {
 		w.Loop(workerCtx)
 	}()
 
+	gh := githubAppClient()
 	h := httpapi.NewServer(httpapi.ServerConfig{
 		Projects: &projectapp.Service{Projects: projects, Now: now, NewID: newID},
 		Runs:     runSvc,
 		States:   &stateapp.Service{Projects: projects, States: states, Now: now},
 		Checkout: git.Checkout{}, Lookup: git.CommitLookup{},
 		PublicBaseURL: public,
-		BasicAuthUser: os.Getenv("BASIC_AUTH_USER"), BasicAuthPassword: os.Getenv("BASIC_AUTH_PASSWORD"),
+		Auth: &authapp.Service{
+			Store: identityAdapter{store: postgres.NewIdentityStore(pool)}, GitHub: gh,
+			Now: now, NewID: newID, PublicBaseURL: public, ClientID: gh.ClientID,
+		},
 	})
 
 	srv := &http.Server{Addr: addr, Handler: h}
@@ -111,6 +123,98 @@ func internalBaseURL(addr string) string {
 		log.Fatalf("HTTP_ADDR: %v", err)
 	}
 	return "http://127.0.0.1:" + port
+}
+
+func githubAppClient() *github.Client {
+	c := &github.Client{
+		ClientID: os.Getenv("GITHUB_APP_CLIENT_ID"), ClientSecret: os.Getenv("GITHUB_APP_CLIENT_SECRET"),
+	}
+	if raw := os.Getenv("GITHUB_APP_ID"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			log.Fatalf("GITHUB_APP_ID: %v", err)
+		}
+		c.AppID = id
+	}
+	if path := os.Getenv("GITHUB_APP_PRIVATE_KEY_FILE"); path != "" {
+		key, err := loadAppKey(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		c.Key = key
+	}
+	return c
+}
+
+func loadAppKey(path string) (*rsa.PrivateKey, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, fmt.Errorf("GITHUB_APP_PRIVATE_KEY_FILE: no PEM block")
+	}
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("GITHUB_APP_PRIVATE_KEY_FILE: %w", err)
+	}
+	key, ok := parsed.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("GITHUB_APP_PRIVATE_KEY_FILE: not an RSA key")
+	}
+	return key, nil
+}
+
+type identityAdapter struct{ store *postgres.IdentityStore }
+
+func (a identityAdapter) UpsertUser(ctx context.Context, u user.User, now time.Time) (user.User, error) {
+	return a.store.UpsertUser(ctx, u, now)
+}
+
+func (a identityAdapter) UpsertTenant(ctx context.Context, t tenant.Tenant, now time.Time) (tenant.Tenant, error) {
+	return a.store.UpsertTenant(ctx, t, now)
+}
+
+func (a identityAdapter) UpsertInstallation(ctx context.Context, in tenant.Installation, now time.Time) error {
+	return a.store.UpsertInstallation(ctx, in, now)
+}
+
+func (a identityAdapter) ActiveInstallation(ctx context.Context, tenantID string) (*tenant.Installation, error) {
+	return a.store.ActiveInstallation(ctx, tenantID)
+}
+
+func (a identityAdapter) ListActiveInstallations(ctx context.Context) ([]tenant.Installation, error) {
+	return a.store.ListActiveInstallations(ctx)
+}
+
+func (a identityAdapter) SaveSession(ctx context.Context, sess authapp.Session) error {
+	return a.store.SaveSession(ctx, postgres.Session{
+		ID: sess.ID, UserID: sess.UserID, TenantID: sess.TenantID, Role: sess.Role,
+		Login: sess.Login, AccessToken: sess.AccessToken, ExpiresAt: sess.ExpiresAt,
+	})
+}
+
+func (a identityAdapter) GetSession(ctx context.Context, id string) (*authapp.Session, error) {
+	sess, err := a.store.GetSession(ctx, id)
+	if err != nil || sess == nil {
+		return nil, err
+	}
+	return &authapp.Session{
+		ID: sess.ID, UserID: sess.UserID, TenantID: sess.TenantID, Role: sess.Role,
+		Login: sess.Login, AccessToken: sess.AccessToken, ExpiresAt: sess.ExpiresAt,
+	}, nil
+}
+
+func (a identityAdapter) SaveOAuthState(ctx context.Context, state string, expiresAt time.Time) error {
+	return a.store.SaveOAuthState(ctx, state, expiresAt)
+}
+
+func (a identityAdapter) ConsumeOAuthState(ctx context.Context, state string, now time.Time) (bool, error) {
+	return a.store.ConsumeOAuthState(ctx, state, now)
 }
 
 func newID() string {

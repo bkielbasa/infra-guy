@@ -126,13 +126,14 @@ func TestConfirmAndCancel(t *testing.T) {
 	completeStep(t, again, StepInit, StepResult{}, now)
 	beginStep(t, again, StepPlan, now)
 	completeStep(t, again, StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
-	if err := again.Cancel(now); err != nil {
+	if err := again.Cancel("ada", now); err != nil {
 		t.Fatal(err)
 	}
-	if again.Snapshot().Status != StatusCancelled || again.Snapshot().Steps[2].Status != StepSkipped {
-		t.Fatalf("%#v", again.Snapshot())
+	snap := again.Snapshot()
+	if snap.Status != StatusCancelled || snap.Steps[2].Status != StepSkipped || snap.ApprovedBy != "ada" || snap.ApprovedAt == nil || !snap.ApprovedAt.Equal(now) {
+		t.Fatalf("%#v", snap)
 	}
-	if err := again.Cancel(now); err != ErrNotUnconfirmed {
+	if err := again.Cancel("ada", now); err != ErrNotUnconfirmed {
 		t.Fatalf("second cancel: %v", err)
 	}
 	if _, err := again.Confirm("operator", now); err != ErrNotUnconfirmed {

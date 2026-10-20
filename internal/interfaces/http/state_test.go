@@ -86,6 +86,9 @@ func testProject(t *testing.T) *project.Project {
 	}
 	p.SetStateToken("tok")
 	p.RotateWebhookSecret("whsec")
+	if err := p.SetPlacement("ten", 1); err != nil {
+		t.Fatal(err)
+	}
 	return p
 }
 

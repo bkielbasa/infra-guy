@@ -1,0 +1,21 @@
+{{define "tenants"}}
+<div class="panel">
+  <div class="headline">
+    <h1>Choose a tenant</h1>
+  </div>
+  {{if .InstallURL}}
+  <p><a href="{{.InstallURL}}">Install GitHub App</a></p>
+  {{else}}
+  <ul>
+    {{range .Tenants}}
+    <li>
+      <form method="post" action="/github/tenant">
+        <input type="hidden" name="tenant_id" value="{{.ID}}">
+        <button type="submit">{{.Name}}</button>
+      </form>
+    </li>
+    {{end}}
+  </ul>
+  {{end}}
+</div>
+{{end}}

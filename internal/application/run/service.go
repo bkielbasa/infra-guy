@@ -103,12 +103,12 @@ func (s *Service) Confirm(ctx context.Context, id run.ID, actor string) error {
 	return s.apply(ctx, r, d)
 }
 
-func (s *Service) Cancel(ctx context.Context, id run.ID) error {
+func (s *Service) Cancel(ctx context.Context, id run.ID, actor string) error {
 	r, err := s.Runs.Get(ctx, id)
 	if err != nil || r == nil {
 		return fmt.Errorf("run %s not found", id)
 	}
-	if err := r.Cancel(s.Now()); err != nil {
+	if err := r.Cancel(actor, s.Now()); err != nil {
 		return err
 	}
 	if err := s.Runs.Save(ctx, r); err != nil {
