@@ -100,6 +100,21 @@ func (q *Queue) Claim(ctx context.Context, workerID string, projects project.Rep
 	return &job, nil
 }
 
+func (q *Queue) Get(ctx context.Context, jobID int64) (*Job, error) {
+	var job Job
+	err := q.pool.QueryRow(ctx, `
+		SELECT id, run_id, step_name, attempts
+		FROM jobs
+		WHERE id = $1 AND status = 'running'`, jobID).Scan(&job.ID, &job.RunID, &job.Step, &job.Attempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 func (q *Queue) Heartbeat(ctx context.Context, jobID int64) error {
 	_, err := q.pool.Exec(ctx, `
 		UPDATE jobs SET locked_at = now() WHERE id = $1 AND status = 'running'`, jobID)

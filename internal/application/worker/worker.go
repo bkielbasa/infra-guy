@@ -52,9 +52,14 @@ type Result struct {
 
 type Queue interface {
 	Claim(ctx context.Context, workerID string, projects project.Repository) (*Job, error)
+	Get(ctx context.Context, jobID int64) (*Job, error)
 	Heartbeat(ctx context.Context, jobID int64) error
 	Complete(ctx context.Context, jobID int64) error
 	Reap(ctx context.Context, staleAfter time.Duration) (requeue []Job, failed []Job, err error)
+}
+
+type Dispatcher interface {
+	Dispatch(ctx context.Context, job Job) error
 }
 
 type Checkout interface {
@@ -81,6 +86,7 @@ type Worker struct {
 	Service         *runapp.Service
 	Checkout        Checkout
 	Executor        Executor
+	Dispatcher      Dispatcher
 	Tokens          TokenSource
 	Contexts        ContextResolver
 	WorkDir         string
@@ -127,6 +133,31 @@ func (w *Worker) Tick(ctx context.Context) error {
 		return err
 	}
 
+	if w.Dispatcher != nil {
+		if err := w.Dispatcher.Dispatch(ctx, *job); err != nil {
+			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "dispatch worker job: "+err.Error()); ferr != nil {
+				return ferr
+			}
+			return w.completeAndCleanup(ctx, *job)
+		}
+		return nil
+	}
+
+	hbCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go w.heartbeat(hbCtx, job.ID)
+	return w.runJob(ctx, *job)
+}
+
+func (w *Worker) ExecuteClaimed(ctx context.Context, jobID int64) error {
+	job, err := w.Queue.Get(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found or not running", jobID)
+	}
+	_ = w.Queue.Heartbeat(ctx, job.ID)
 	hbCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go w.heartbeat(hbCtx, job.ID)

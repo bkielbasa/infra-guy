@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,17 +72,35 @@ func (m *memSched) Enqueue(_ context.Context, _ run.ID, step run.StepName) error
 }
 
 type fakeQueue struct {
+	mu         sync.Mutex
 	claim      *Job
+	get        map[int64]*Job
+	getErr     error
 	requeue    []Job
 	failed     []Job
 	completed  []int64
+	heartbeats []int64
 	staleAfter time.Duration
 }
 
 func (q *fakeQueue) Claim(context.Context, string, project.Repository) (*Job, error) {
 	return q.claim, nil
 }
-func (q *fakeQueue) Heartbeat(context.Context, int64) error { return nil }
+func (q *fakeQueue) Get(_ context.Context, jobID int64) (*Job, error) {
+	if q.getErr != nil {
+		return nil, q.getErr
+	}
+	if q.get != nil {
+		return q.get[jobID], nil
+	}
+	return nil, nil
+}
+func (q *fakeQueue) Heartbeat(_ context.Context, jobID int64) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.heartbeats = append(q.heartbeats, jobID)
+	return nil
+}
 func (q *fakeQueue) Complete(_ context.Context, jobID int64) error {
 	q.completed = append(q.completed, jobID)
 	return nil
@@ -89,6 +108,16 @@ func (q *fakeQueue) Complete(_ context.Context, jobID int64) error {
 func (q *fakeQueue) Reap(_ context.Context, staleAfter time.Duration) ([]Job, []Job, error) {
 	q.staleAfter = staleAfter
 	return q.requeue, q.failed, nil
+}
+
+type fakeDispatcher struct {
+	dispatched []Job
+	err        error
+}
+
+func (d *fakeDispatcher) Dispatch(_ context.Context, job Job) error {
+	d.dispatched = append(d.dispatched, job)
+	return d.err
 }
 
 type fakeCheckout struct {
@@ -576,5 +605,144 @@ func TestTickContextResolutionErrorFailsWithoutExecutor(t *testing.T) {
 	}
 	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 10 {
 		t.Fatalf("completed jobs %#v, want [10]", fx.queue.completed)
+	}
+}
+
+func TestTickWithDispatcherDispatchesWithoutInProcessExecution(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-disp", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed := Job{ID: 11, RunID: "run-disp", Step: run.StepInit, Attempts: 1}
+	exec := &fakeExecutor{res: Result{ExitCode: 0}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &claimed}, exec)
+	disp := &fakeDispatcher{}
+	fx.w.Dispatcher = disp
+
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(disp.dispatched) != 1 || disp.dispatched[0] != claimed {
+		t.Fatalf("dispatched = %#v, want [%#v]", disp.dispatched, claimed)
+	}
+	if fx.exec.called {
+		t.Fatal("executor should not be called when Dispatcher is set")
+	}
+	if fx.co.dest != "" {
+		t.Fatalf("checkout should not be called when Dispatcher is set, got dest=%q", fx.co.dest)
+	}
+	if len(fx.queue.completed) != 0 {
+		t.Fatalf("completed = %#v, want empty (spawned worker completes job)", fx.queue.completed)
+	}
+}
+
+func TestTickWithDispatcherErrorFailsRunAndCompletesJob(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-disp-err", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed := Job{ID: 12, RunID: "run-disp-err", Step: run.StepInit, Attempts: 1}
+	exec := &fakeExecutor{res: Result{ExitCode: 0}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &claimed}, exec)
+	disp := &fakeDispatcher{err: errors.New("k8s api 403 forbidden")}
+	fx.w.Dispatcher = disp
+	if err := os.MkdirAll(fx.ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.exec.called {
+		t.Fatal("executor should not be called on dispatch error")
+	}
+	saved, err := fx.runs.Get(ctx, "run-disp-err")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := saved.Snapshot()
+	if snap.Status != run.StatusFailed {
+		t.Fatalf("status = %s, want failed", snap.Status)
+	}
+	if snap.Error != "dispatch worker job: k8s api 403 forbidden" {
+		t.Fatalf("error = %q, want %q", snap.Error, "dispatch worker job: k8s api 403 forbidden")
+	}
+	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 12 {
+		t.Fatalf("completed = %#v, want [12]", fx.queue.completed)
+	}
+	if _, err := os.Stat(fx.ws); !os.IsNotExist(err) {
+		t.Fatalf("workspace still present: %v", err)
+	}
+}
+
+func TestExecuteClaimedRunsAndCompletesJob(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-claimed", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginComplete(t, r, run.StepInit, run.StepResult{}, time.Unix(1, 0).UTC())
+	exec := &fakeExecutor{res: Result{
+		ExitCode: 0, PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.", Version: "1.9.8",
+	}}
+	q := &fakeQueue{
+		get: map[int64]*Job{
+			42: {ID: 42, RunID: "run-claimed", Step: run.StepPlan, Attempts: 1},
+		},
+	}
+	fx := newFixture(t, r, p, q, exec)
+
+	if err := fx.w.ExecuteClaimed(ctx, 42); err != nil {
+		t.Fatal(err)
+	}
+	q.mu.Lock()
+	hbs := append([]int64(nil), q.heartbeats...)
+	q.mu.Unlock()
+	if len(hbs) == 0 || hbs[0] != 42 {
+		t.Fatalf("heartbeats = %#v, want initial heartbeat for 42", hbs)
+	}
+	if !fx.exec.called {
+		t.Fatal("executor was not called")
+	}
+	saved, err := fx.runs.Get(ctx, "run-claimed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Snapshot().Status != run.StatusPlanned {
+		t.Fatalf("status = %s, want planned", saved.Snapshot().Status)
+	}
+	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 42 {
+		t.Fatalf("completed = %#v, want [42]", fx.queue.completed)
+	}
+}
+
+func TestExecuteClaimedReturnsErrorWhenJobNotFound(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-missing", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newFixture(t, r, p, &fakeQueue{}, nil)
+
+	err = fx.w.ExecuteClaimed(ctx, 999)
+	if err == nil || !strings.Contains(err.Error(), "job 999 not found or not running") {
+		t.Fatalf("err = %v, want not found or not running", err)
+	}
+	if fx.exec.called {
+		t.Fatal("executor should not be called when job is missing")
 	}
 }

@@ -21,6 +21,15 @@ func (q WorkerQueue) Claim(ctx context.Context, workerID string, projects projec
 	return &out, err
 }
 
+func (q WorkerQueue) Get(ctx context.Context, jobID int64) (*worker.Job, error) {
+	job, err := q.Queue.Get(ctx, jobID)
+	if job == nil {
+		return nil, err
+	}
+	out := toWorkerJob(*job)
+	return &out, err
+}
+
 func (q WorkerQueue) Reap(ctx context.Context, staleAfter time.Duration) ([]worker.Job, []worker.Job, error) {
 	requeue, failed, err := q.Queue.Reap(ctx, staleAfter)
 	return toWorkerJobs(requeue), toWorkerJobs(failed), err
