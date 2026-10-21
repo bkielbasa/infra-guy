@@ -296,8 +296,7 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 	}
 	ps := p.Snapshot()
 	u.page(w, ps.Name+" details", "details", map[string]any{
-		"ID": string(ps.ID), "Name": ps.Name, "WebhookURL": u.webhookURL(ps.ID),
-		"Secret": ps.WebhookSecret, "AutoApprove": ps.AutoApprove,
+		"ID": string(ps.ID), "Name": ps.Name, "AutoApprove": ps.AutoApprove,
 		"Branch": ps.DefaultBranch, "Workdir": ps.WorkingDirectory,
 	})
 }
@@ -314,7 +313,7 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 	id := p.Snapshot().ID
 	if _, err := u.cfg.Projects.Update(r.Context(), projectapp.UpdateInput{
 		ID: id, Name: p.Snapshot().Name, Branch: r.FormValue("branch"), Workdir: r.FormValue("workdir"),
-		Token: r.FormValue("token"), AutoApprove: r.FormValue("auto_approve") == "on", RotateSecret: r.FormValue("rotate_secret") == "on",
+		AutoApprove: r.FormValue("auto_approve") == "on",
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -533,10 +532,6 @@ func (u *ui) loadRun(w http.ResponseWriter, r *http.Request) (*run.Run, *project
 	return rn, p, nil
 }
 
-func (u *ui) webhookURL(id project.ID) string {
-	return strings.TrimRight(u.cfg.PublicBaseURL, "/") + "/webhooks/github/" + string(id)
-}
-
 func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, panel template.HTML) map[string]any {
 	tracked := filterRuns(runs, isTracked)
 	latest := latestSnapshot(tracked)
@@ -545,8 +540,8 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 		"ID": string(ps.ID), "Name": ps.Name, "Locked": ps.Locked,
 		"LatestLabel": latestLabel(latest), "LatestClass": latestClass(latest),
 		"Meta": projectMeta(ps, latest, hist), "Empty": len(runs) == 0,
-		"WebhookURL": u.webhookURL(ps.ID), "Secret": ps.WebhookSecret, "Panel": panel,
-		"Poll": anyNonTerminal(runs),
+		"Panel": panel,
+		"Poll":  anyNonTerminal(runs),
 	}
 }
 

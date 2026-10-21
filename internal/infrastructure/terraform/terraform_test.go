@@ -53,14 +53,35 @@ func TestPlanAndApplyStartWithInit(t *testing.T) {
 
 func TestCommandEnvDropsPlatformSecrets(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://secret")
+	t.Setenv("POSTGRES_PASSWORD", "db-pw")
 	t.Setenv("BASIC_AUTH_USER", "admin")
 	t.Setenv("BASIC_AUTH_PASSWORD", "pw")
+	t.Setenv("GITHUB_APP_ID", "42")
+	t.Setenv("GITHUB_APP_PRIVATE_KEY", "pem-bytes")
+	t.Setenv("GITHUB_APP_PRIVATE_KEY_FILE", "/run/secrets/key.pem")
+	t.Setenv("GITHUB_APP_WEBHOOK_SECRET", "wh-secret")
+	t.Setenv("GITHUB_APP_CLIENT_ID", "Iv1.abc")
+	t.Setenv("GITHUB_APP_CLIENT_SECRET", "client-secret")
 	t.Setenv("TF_LOG", "TRACE")
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("SOME_GH_COPY", "ghp_project_token")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
 	env := strings.Join(commandEnv("ghp_project_token"), "\n")
-	for _, banned := range []string{"DATABASE_URL=", "BASIC_AUTH_USER=", "BASIC_AUTH_PASSWORD=", "TF_LOG=", "GIT_TRACE=", "ghp_project_token"} {
+	for _, banned := range []string{
+		"DATABASE_URL=",
+		"POSTGRES_PASSWORD=",
+		"BASIC_AUTH_USER=",
+		"BASIC_AUTH_PASSWORD=",
+		"GITHUB_APP_ID=",
+		"GITHUB_APP_PRIVATE_KEY=",
+		"GITHUB_APP_PRIVATE_KEY_FILE=",
+		"GITHUB_APP_WEBHOOK_SECRET=",
+		"GITHUB_APP_CLIENT_ID=",
+		"GITHUB_APP_CLIENT_SECRET=",
+		"TF_LOG=",
+		"GIT_TRACE=",
+		"ghp_project_token",
+	} {
 		if strings.Contains(env, banned) {
 			t.Fatalf("env leaks %q", banned)
 		}

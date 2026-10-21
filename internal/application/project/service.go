@@ -21,13 +21,11 @@ type Service struct {
 }
 
 type UpdateInput struct {
-	ID           project.ID
-	Name         string
-	Branch       string
-	Workdir      string
-	Token        string
-	AutoApprove  bool
-	RotateSecret bool
+	ID          project.ID
+	Name        string
+	Branch      string
+	Workdir     string
+	AutoApprove bool
 }
 
 func randomSecret() (string, error) {
@@ -63,15 +61,10 @@ func (s *Service) Create(ctx context.Context, tenantID, name string, repo projec
 		return nil, err
 	}
 	p.SetAutoApprove(autoApprove)
-	webhook, err := randomSecret()
-	if err != nil {
-		return nil, err
-	}
 	token, err := randomSecret()
 	if err != nil {
 		return nil, err
 	}
-	p.RotateWebhookSecret(webhook)
 	p.SetStateToken(token)
 	if err := s.Projects.Save(ctx, p); err != nil {
 		return nil, err
@@ -96,14 +89,6 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*project.Project,
 		return nil, err
 	}
 	p.SetAutoApprove(in.AutoApprove)
-	p.SetGitHubToken(in.Token)
-	if in.RotateSecret {
-		secret, err := randomSecret()
-		if err != nil {
-			return nil, err
-		}
-		p.RotateWebhookSecret(secret)
-	}
 	if err := s.Projects.Save(ctx, p); err != nil {
 		return nil, err
 	}

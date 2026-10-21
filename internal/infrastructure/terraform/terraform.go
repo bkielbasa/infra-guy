@@ -117,11 +117,18 @@ func command(ctx context.Context, dir string, env []string, args ...string) *exe
 }
 
 var blockedEnv = map[string]bool{
-	"DATABASE_URL":        true,
-	"BASIC_AUTH_USER":     true,
-	"BASIC_AUTH_PASSWORD": true,
-	"TF_LOG":              true,
-	"GIT_TRACE":           true,
+	"DATABASE_URL":                true,
+	"POSTGRES_PASSWORD":           true,
+	"BASIC_AUTH_USER":             true,
+	"BASIC_AUTH_PASSWORD":         true,
+	"GITHUB_APP_ID":               true,
+	"GITHUB_APP_PRIVATE_KEY":      true,
+	"GITHUB_APP_PRIVATE_KEY_FILE": true,
+	"GITHUB_APP_WEBHOOK_SECRET":   true,
+	"GITHUB_APP_CLIENT_ID":        true,
+	"GITHUB_APP_CLIENT_SECRET":    true,
+	"TF_LOG":                      true,
+	"GIT_TRACE":                   true,
 }
 
 func commandEnv(githubToken string) []string {

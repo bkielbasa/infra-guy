@@ -18,13 +18,13 @@ type ProjectRepo struct{ pool *pgxpool.Pool }
 func NewProjectRepo(pool *pgxpool.Pool) *ProjectRepo { return &ProjectRepo{pool: pool} }
 
 const projectColumns = `id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-	auto_approve, locked, github_token, webhook_secret, state_token, active_run_id, created_at, updated_at`
+	auto_approve, locked, state_token, active_run_id, created_at, updated_at`
 
 func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	s := p.Snapshot()
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO projects (`+projectColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (id) DO UPDATE SET
 			tenant_id = EXCLUDED.tenant_id,
 			github_repo_id = EXCLUDED.github_repo_id,
@@ -34,13 +34,11 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			default_branch = EXCLUDED.default_branch,
 			working_directory = EXCLUDED.working_directory,
 			auto_approve = EXCLUDED.auto_approve,
-			github_token = EXCLUDED.github_token,
-			webhook_secret = EXCLUDED.webhook_secret,
 			state_token = EXCLUDED.state_token,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
-		s.AutoApprove, s.Locked, s.GitHubToken, s.WebhookSecret, s.StateToken, s.ActiveRunID,
+		s.AutoApprove, s.Locked, s.StateToken, s.ActiveRunID,
 		s.CreatedAt, s.UpdatedAt,
 	)
 	return err
@@ -103,7 +101,7 @@ func scanProject(row projectScanner) (*project.Project, error) {
 	var created, updated time.Time
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.GitHubRepoID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
-		&s.AutoApprove, &s.Locked, &s.GitHubToken, &s.WebhookSecret, &s.StateToken, &s.ActiveRunID,
+		&s.AutoApprove, &s.Locked, &s.StateToken, &s.ActiveRunID,
 		&created, &updated,
 	); err != nil {
 		return nil, err

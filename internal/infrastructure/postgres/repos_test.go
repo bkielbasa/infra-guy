@@ -48,8 +48,6 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.SetAutoApprove(true)
-	p.SetGitHubToken("gh-token")
-	p.RotateWebhookSecret("wh-secret")
 	p.SetStateToken("st-token")
 	p.Lock()
 	if err := p.ClaimActiveRun("run-" + suffix); err != nil {
@@ -94,7 +92,6 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	if gotP.ID != wantP.ID || gotP.Name != wantP.Name || gotP.Repo != wantP.Repo ||
 		gotP.DefaultBranch != wantP.DefaultBranch || gotP.WorkingDirectory != wantP.WorkingDirectory ||
 		gotP.AutoApprove != wantP.AutoApprove || gotP.Locked != wantP.Locked ||
-		gotP.GitHubToken != wantP.GitHubToken || gotP.WebhookSecret != wantP.WebhookSecret ||
 		gotP.StateToken != wantP.StateToken || gotP.ActiveRunID != wantP.ActiveRunID ||
 		gotP.TenantID != wantP.TenantID || gotP.GitHubRepoID != wantP.GitHubRepoID ||
 		!gotP.CreatedAt.Equal(wantP.CreatedAt) || !gotP.UpdatedAt.Equal(wantP.UpdatedAt) {

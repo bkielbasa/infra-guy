@@ -80,10 +80,10 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	if snap.TenantID != "ten" || snap.GitHubRepoID != 1 {
 		t.Fatalf("placement not stored: %#v", snap)
 	}
-	if snap.WebhookSecret == "" || snap.StateToken == "" || snap.DefaultBranch != "main" || snap.WorkingDirectory != "terraform" {
+	if snap.StateToken == "" || snap.DefaultBranch != "main" || snap.WorkingDirectory != "terraform" {
 		t.Fatalf("%#v", snap)
 	}
-	updated, err := svc.Update(ctx, UpdateInput{ID: "p1", Token: ""})
+	updated, err := svc.Update(ctx, UpdateInput{ID: "p1"})
 	if err != nil || updated.Snapshot().StateToken != snap.StateToken {
 		t.Fatal(err)
 	}

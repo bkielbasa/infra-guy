@@ -24,8 +24,6 @@ type Snapshot struct {
 	WorkingDirectory string
 	AutoApprove      bool
 	Locked           bool
-	GitHubToken      string
-	WebhookSecret    string
 	StateToken       string
 	ActiveRunID      string
 	CreatedAt        time.Time
@@ -77,14 +75,6 @@ func (p *Project) SetPlacement(tenantID string, repoID int64) error {
 
 func (p *Project) SetAutoApprove(v bool) { p.s.AutoApprove = v }
 
-func (p *Project) SetGitHubToken(token string) {
-	if token == "" {
-		return
-	}
-	p.s.GitHubToken = token
-}
-
-func (p *Project) RotateWebhookSecret(secret string) { p.s.WebhookSecret = secret }
 func (p *Project) SetStateToken(token string)        { p.s.StateToken = token }
 func (p *Project) Lock()                             { p.s.Locked = true }
 func (p *Project) Unlock()                           { p.s.Locked = false }

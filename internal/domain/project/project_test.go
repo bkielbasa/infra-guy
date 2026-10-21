@@ -26,18 +26,16 @@ func TestWorkingDirectoryAndToken(t *testing.T) {
 	if err := p.SetWorkingDirectory("/tmp"); err == nil {
 		t.Fatal("absolute directory accepted")
 	}
-	p.SetGitHubToken("secret")
-	p.SetGitHubToken("")
-	if p.Snapshot().GitHubToken != "secret" {
-		t.Fatal("blank token replaced the stored token")
+	if err := p.SetDefaultBranch("develop"); err != nil {
+		t.Fatal(err)
 	}
-	p.SetGitHubToken("next")
-	if p.Snapshot().GitHubToken != "next" {
-		t.Fatal("new token not stored")
+	if p.Snapshot().DefaultBranch != "develop" {
+		t.Fatalf("%#v", p.Snapshot())
 	}
-	p.RotateWebhookSecret("w1")
-	p.RotateWebhookSecret("w2")
-	if p.Snapshot().WebhookSecret != "w2" || p.Snapshot().DefaultBranch != "main" {
+	if err := p.SetDefaultBranch("main"); err != nil {
+		t.Fatal(err)
+	}
+	if p.Snapshot().DefaultBranch != "main" {
 		t.Fatalf("%#v", p.Snapshot())
 	}
 }
