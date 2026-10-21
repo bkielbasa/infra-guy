@@ -4,9 +4,10 @@
   <div class="headline">
     <h1>{{.Name}}</h1>
     <form method="post" action="/contexts/{{.ID}}/delete" class="inline">
-      <button type="submit" class="btn-danger">Delete context</button>
+      <button type="submit" class="btn-danger">Delete</button>
     </form>
   </div>
+  {{if .Entries}}
   <table>
     <thead>
       <tr><th>Kind</th><th>Key / Path</th><th>Value</th><th></th></tr>
@@ -26,23 +27,24 @@
       {{end}}
     </tbody>
   </table>
-</div>
-<div class="panel">
-  <h2>Add or update entry</h2>
-  <form method="post" action="/contexts/{{.ID}}/entries">
-    <label>Kind</label>
-    <select name="kind" required>
-      <option value="plain_env">Environment variable (plain)</option>
-      <option value="secret_env">Environment variable (secret)</option>
-      <option value="secret_file">Mounted file in $HOME (secret)</option>
-    </select>
-    <label>Key or relative path in $HOME (e.g. TF_VAR_region or .kube/config)</label>
-    <input type="text" name="key" required>
-    <label>Value</label>
-    <textarea name="value" rows="4" required></textarea>
-    <div class="actions">
-      <button type="submit">Save entry</button>
-    </div>
-  </form>
+  {{end}}
+  <details{{if not .Entries}} open{{end}}>
+    <summary>Add or update entry</summary>
+    <form method="post" action="/contexts/{{.ID}}/entries">
+      <label>Kind</label>
+      <select name="kind" required>
+        <option value="plain_env">Environment variable (plain)</option>
+        <option value="secret_env">Environment variable (secret)</option>
+        <option value="secret_file">Mounted file in $HOME (secret)</option>
+      </select>
+      <label>Key or relative path in $HOME</label>
+      <input type="text" name="key" placeholder="TF_VAR_region or .kube/config" required>
+      <label>Value</label>
+      <textarea name="value" rows="3" required></textarea>
+      <div class="actions">
+        <button type="submit">Save entry</button>
+      </div>
+    </form>
+  </details>
 </div>
 {{end}}

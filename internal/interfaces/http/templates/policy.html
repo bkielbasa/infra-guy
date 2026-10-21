@@ -4,32 +4,27 @@
   <div class="headline">
     <h1>{{.Name}}</h1>
     <form method="post" action="/policies/{{.ID}}/delete" class="inline">
-      <button type="submit" class="btn-danger">Delete policy</button>
+      <button type="submit" class="btn-danger">Delete</button>
     </form>
   </div>
 
   <form method="post" action="/policies/{{.ID}}">
-    <label>Policy name</label>
+    <label>Name</label>
     <input type="text" name="name" value="{{.Name}}" required>
     <label>Description</label>
     <input type="text" name="description" value="{{.Description}}">
-    <label>Rego policy</label>
+    <label>Rego</label>
     <textarea id="policy-rego" name="rego" rows="14" data-code-editor="rego" required>{{.Rego}}</textarea>
+    <details>
+      <summary>Test input JSON</summary>
+      <textarea id="policy-input-json" name="input_json" rows="10" data-code-editor="json">{{.SampleInputJSON}}</textarea>
+    </details>
     <div class="actions">
-      <button type="submit" class="btn-trigger">Save policy</button>
+      <button type="submit" class="btn-trigger">Save</button>
       <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
     </div>
+    <div id="policy-test-result" class="meta"></div>
   </form>
-</div>
-
-<div class="panel">
-  <h2>Online Policy Editor &amp; Tester</h2>
-  <label>Policy Input JSON (paste from a Run or edit below)</label>
-  <textarea id="policy-input-json" name="input_json" rows="14" data-code-editor="json">{{.SampleInputJSON}}</textarea>
-  <div class="actions">
-    <button type="button" onclick="runPolicyTest()">Test Policy</button>
-  </div>
-  <div id="policy-test-result" class="meta"></div>
 </div>
 
 <script>

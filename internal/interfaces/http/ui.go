@@ -105,6 +105,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /projects/{id}/tabs/pulls", u.tabPulls)
 	mux.HandleFunc("GET /projects/{id}/tabs/state", u.tabState)
 	mux.HandleFunc("GET /projects/{id}/details", u.details)
+	mux.HandleFunc("GET /projects/{id}/settings", u.details)
 	mux.HandleFunc("POST /projects/{id}", u.update)
 	mux.HandleFunc("POST /projects/{id}/policy", u.updateProjectPolicy)
 	mux.HandleFunc("POST /projects/{id}/lock", u.lock)
@@ -696,11 +697,8 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 		"ID": string(ps.ID), "Name": ps.Name, "Locked": ps.Locked,
 		"LatestLabel": latestLabel(latest), "LatestClass": latestClass(latest),
 		"Meta": projectMeta(ps, latest, hist), "Empty": len(runs) == 0,
-		"Panel":              panel,
-		"Poll":               anyNonTerminal(runs),
-		"ApprovalPolicyID":   ps.ApprovalPolicyID,
-		"ApprovalPolicyName": u.policyName(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
-		"Policies":           u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
+		"Panel": panel,
+		"Poll":  anyNonTerminal(runs),
 	}
 }
 

@@ -1,7 +1,7 @@
 {{define "details"}}
-<nav class="crumb"><a href="/">Projects</a> / <a href="/projects/{{.ID}}">{{.Name}}</a> / Details</nav>
+<nav class="crumb"><a href="/">Projects</a> / <a href="/projects/{{.ID}}">{{.Name}}</a> / Settings</nav>
 <div class="panel">
-  <h1>Details</h1>
+  <h1>Settings</h1>
   <form method="post" action="/projects/{{.ID}}">
     <label class="check"><input type="checkbox" name="auto_approve"{{if .AutoApprove}} checked{{end}}> Auto-approve</label>
     <label>Default branch</label>
@@ -18,9 +18,9 @@
     <label class="check"><input type="checkbox" name="context_ids" value="{{.ID}}"{{if .Attached}} checked{{end}}> {{.Name}}</label>
     {{end}}
     {{end}}
-    <label>Approval Policy</label>
+    <label>Approval policy</label>
     <select name="approval_policy_id">
-      <option value="">None (anyone with project access can approve)</option>
+      <option value="">None</option>
       {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
     </select>
     <div class="actions">

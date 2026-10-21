@@ -16,22 +16,6 @@
     <input type="text" name="branch" value="main">
     <label>Working directory</label>
     <input type="text" name="workdir">
-    <label>Terraform version</label>
-    <select name="terraform_version">
-      {{range .Versions}}<option value="{{.}}"{{if eq . $.DefaultVersion}} selected{{end}}>{{.}}</option>{{end}}
-    </select>
-    {{if .Contexts}}
-    <label>Contexts</label>
-    {{range .Contexts}}
-    <label class="check"><input type="checkbox" name="context_ids" value="{{.ID}}"> {{.Name}}</label>
-    {{end}}
-    {{end}}
-    <label>Approval Policy</label>
-    <select name="approval_policy_id">
-      <option value="">None (anyone with project access can approve)</option>
-      {{range .Policies}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
-    </select>
-    <label class="check"><input type="checkbox" name="auto_approve"> Auto-approve</label>
     <div class="actions">
       <button type="submit">Create</button>
     </div>

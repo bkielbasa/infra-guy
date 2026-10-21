@@ -9,7 +9,7 @@
     <form method="post" action="/projects/{{.ID}}/trigger" class="inline">
       <button type="submit" class="btn-trigger">Trigger</button>
     </form>
-    <a href="/projects/{{.ID}}/details">Details</a>
+    <a href="/projects/{{.ID}}/settings">Settings</a>
   </div>
   {{if .Empty}}
   <section class="empty">
@@ -23,27 +23,6 @@
     <a href="/projects/{{.ID}}/tabs/state" hx-get="/projects/{{.ID}}/tabs/state" hx-target="#tab-panel" hx-swap="outerHTML">State history</a>
   </nav>
   {{.Panel}}
-</div>
-<div class="panel">
-  <h2>Approval Policy</h2>
-  <p>
-    Current policy:
-    {{if .ApprovalPolicyID}}
-    <a href="/policies/{{.ApprovalPolicyID}}">{{if .ApprovalPolicyName}}{{.ApprovalPolicyName}}{{else}}{{.ApprovalPolicyID}}{{end}}</a>
-    {{else}}
-    None (anyone with project access can approve)
-    {{end}}
-  </p>
-  <form method="post" action="/projects/{{.ID}}/policy">
-    <label>Approval Policy</label>
-    <select name="approval_policy_id">
-      <option value="">None (anyone with project access can approve)</option>
-      {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
-    </select>
-    <div class="actions">
-      <button type="submit">Save policy</button>
-    </div>
-  </form>
 </div>
 {{end}}
 

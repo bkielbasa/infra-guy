@@ -1357,7 +1357,15 @@ deny contains "Cannot destroy S3 buckets" if {
 		t.Fatalf("GET /policies/pol-2 = %d: %s", rrPol.Code, rrPol.Body.String())
 	}
 
-	// 5. Assign policy to project via POST /projects/p1/policy
+	// 5. Assign policy to project via POST /projects/p1/policy (and verify settings page vs minimal project page)
+	rrProjPage := getUI(t, h, "/projects/p1")
+	if rrProjPage.Code != http.StatusOK || strings.Contains(rrProjPage.Body.String(), `name="approval_policy_id"`) {
+		t.Fatalf("expected /projects/p1 to be minimal without policy form, got %d: %s", rrProjPage.Code, rrProjPage.Body.String())
+	}
+	rrSettings := getUI(t, h, "/projects/p1/settings")
+	if rrSettings.Code != http.StatusOK || !strings.Contains(rrSettings.Body.String(), `name="approval_policy_id"`) {
+		t.Fatalf("expected /projects/p1/settings to render approval_policy_id select, got %d: %s", rrSettings.Code, rrSettings.Body.String())
+	}
 	rrAssign := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id=pol-2"))
 	if rrAssign.Code != http.StatusSeeOther {
 		t.Fatalf("POST /projects/p1/policy = %d: %s", rrAssign.Code, rrAssign.Body.String())

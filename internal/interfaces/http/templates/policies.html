@@ -3,6 +3,7 @@
   <div class="headline">
     <h1>Policies</h1>
   </div>
+  {{if .Policies}}
   <table>
     <thead>
       <tr><th>Name</th><th>Description</th><th>Updated</th></tr>
@@ -17,26 +18,27 @@
       {{end}}
     </tbody>
   </table>
-</div>
-
-<div class="panel">
-  <h2>New Policy &amp; Online Policy Editor / Tester</h2>
-  <form method="post" action="/policies">
-    <label>Policy name</label>
-    <input type="text" name="name" placeholder="e.g. prod-approval-policy" required>
-    <label>Description</label>
-    <input type="text" name="description" placeholder="Optional description">
-    <label>Rego policy</label>
-    <textarea id="policy-rego" name="rego" rows="14" data-code-editor="rego" required>{{.DefaultRego}}</textarea>
-    <div class="actions">
-      <button type="submit" class="btn-trigger">Create policy</button>
-      <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
-    </div>
-  </form>
-
-  <label>Sample Policy Input JSON (plan, current_user, project)</label>
-  <textarea id="policy-input-json" name="input_json" rows="14" data-code-editor="json">{{.SampleInputJSON}}</textarea>
-  <div id="policy-test-result" class="meta"></div>
+  {{end}}
+  <details{{if not .Policies}} open{{end}}>
+    <summary>New policy</summary>
+    <form method="post" action="/policies">
+      <label>Name</label>
+      <input type="text" name="name" placeholder="e.g. prod-approval" required>
+      <label>Description</label>
+      <input type="text" name="description">
+      <label>Rego</label>
+      <textarea id="policy-rego" name="rego" rows="12" data-code-editor="rego" required>{{.DefaultRego}}</textarea>
+      <details>
+        <summary>Test input JSON</summary>
+        <textarea id="policy-input-json" name="input_json" rows="10" data-code-editor="json">{{.SampleInputJSON}}</textarea>
+      </details>
+      <div class="actions">
+        <button type="submit" class="btn-trigger">Create</button>
+        <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
+      </div>
+      <div id="policy-test-result" class="meta"></div>
+    </form>
+  </details>
 </div>
 
 <script>
