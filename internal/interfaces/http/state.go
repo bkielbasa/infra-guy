@@ -7,24 +7,39 @@ import (
 	"net/http"
 
 	stateapp "infra-guy/internal/application/state"
+	"infra-guy/internal/application/installation"
 	"infra-guy/internal/domain/project"
 )
 
-type api struct {
-	states   *stateapp.Service
-	open     opener
-	projects project.Repository
+type WebhookOption func(*api)
+
+func WithWebhook(installations *installation.Service, secret string) WebhookOption {
+	return func(a *api) {
+		a.installations = installations
+		a.webhookSecret = secret
+	}
 }
 
-func New(states *stateapp.Service, open opener, projects project.Repository) *http.ServeMux {
+type api struct {
+	states        *stateapp.Service
+	open          opener
+	projects      project.Repository
+	installations *installation.Service
+	webhookSecret string
+}
+
+func New(states *stateapp.Service, open opener, projects project.Repository, opts ...WebhookOption) *http.ServeMux {
 	a := &api{states: states, open: open, projects: projects}
+	for _, opt := range opts {
+		opt(a)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/projects/{id}/state", a.getState)
 	mux.HandleFunc("POST /api/projects/{id}/state", a.putState)
 	mux.HandleFunc("LOCK /api/projects/{id}/state/lock", a.lockState)
 	mux.HandleFunc("UNLOCK /api/projects/{id}/state/lock", a.unlockState)
 	mux.HandleFunc("POST /api/projects/{id}/state/lock", a.postLock)
-	mux.HandleFunc("POST /webhooks/github/{id}", a.webhook)
+	mux.HandleFunc("POST /webhooks/github", a.webhook)
 	return mux
 }
 

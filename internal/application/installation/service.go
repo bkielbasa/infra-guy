@@ -54,34 +54,64 @@ type Service struct {
 
 func (s *Service) Apply(ctx context.Context, event string, payload InstallationEvent) error {
 	now := s.now()
-	switch payload.Action {
-	case "created", "unsuspend":
-		accountType, err := tenant.ParseAccountType(payload.AccountType)
+	if event == "installation" || event == "" {
+		switch payload.Action {
+		case "created", "unsuspend":
+			accountType, err := tenant.ParseAccountType(payload.AccountType)
+			if err != nil {
+				return err
+			}
+			if s.NewID == nil {
+				return fmt.Errorf("missing id generator")
+			}
+			ten, err := s.Store.UpsertTenant(ctx, tenant.Tenant{
+				ID:              s.NewID(),
+				Name:            payload.AccountLogin,
+				AccountType:     accountType,
+				GitHubAccountID: payload.AccountID,
+			}, now)
+			if err != nil {
+				return err
+			}
+			return s.Store.UpsertInstallation(ctx, tenant.Installation{
+				ID:                   s.NewID(),
+				TenantID:             ten.ID,
+				AccountLogin:         payload.AccountLogin,
+				AccountType:          accountType,
+				GitHubInstallationID: payload.InstallationID,
+				Active:               true,
+			}, now)
+		case "deleted", "suspend":
+			if err := s.Store.DeactivateInstallation(ctx, payload.InstallationID, now); err != nil {
+				return err
+			}
+			if payload.AccountLogin != "" && payload.AccountID != 0 && payload.AccountType != "" {
+				accountType, err := tenant.ParseAccountType(payload.AccountType)
+				if err != nil {
+					return err
+				}
+				if s.NewID == nil {
+					return fmt.Errorf("missing id generator")
+				}
+				_, err = s.Store.UpsertTenant(ctx, tenant.Tenant{
+					ID:              s.NewID(),
+					Name:            payload.AccountLogin,
+					AccountType:     accountType,
+					GitHubAccountID: payload.AccountID,
+				}, now)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		default:
+			return nil
+		}
+	}
+
+	if payload.InstallationID != 0 {
+		existing, err := s.Store.InstallationByGitHubID(ctx, payload.InstallationID)
 		if err != nil {
-			return err
-		}
-		if s.NewID == nil {
-			return fmt.Errorf("missing id generator")
-		}
-		ten, err := s.Store.UpsertTenant(ctx, tenant.Tenant{
-			ID:              s.NewID(),
-			Name:            payload.AccountLogin,
-			AccountType:     accountType,
-			GitHubAccountID: payload.AccountID,
-		}, now)
-		if err != nil {
-			return err
-		}
-		return s.Store.UpsertInstallation(ctx, tenant.Installation{
-			ID:                   s.NewID(),
-			TenantID:             ten.ID,
-			AccountLogin:         payload.AccountLogin,
-			AccountType:          accountType,
-			GitHubInstallationID: payload.InstallationID,
-			Active:               true,
-		}, now)
-	case "deleted", "suspend":
-		if err := s.Store.DeactivateInstallation(ctx, payload.InstallationID, now); err != nil {
 			return err
 		}
 		if payload.AccountLogin != "" && payload.AccountID != 0 && payload.AccountType != "" {
@@ -92,7 +122,7 @@ func (s *Service) Apply(ctx context.Context, event string, payload InstallationE
 			if s.NewID == nil {
 				return fmt.Errorf("missing id generator")
 			}
-			_, err = s.Store.UpsertTenant(ctx, tenant.Tenant{
+			ten, err := s.Store.UpsertTenant(ctx, tenant.Tenant{
 				ID:              s.NewID(),
 				Name:            payload.AccountLogin,
 				AccountType:     accountType,
@@ -101,11 +131,33 @@ func (s *Service) Apply(ctx context.Context, event string, payload InstallationE
 			if err != nil {
 				return err
 			}
+			if existing == nil {
+				return s.Store.UpsertInstallation(ctx, tenant.Installation{
+					ID:                   s.NewID(),
+					TenantID:             ten.ID,
+					AccountLogin:         payload.AccountLogin,
+					AccountType:          accountType,
+					GitHubInstallationID: payload.InstallationID,
+					Active:               !payload.Suspended,
+				}, now)
+			}
+			if existing.Active && (existing.AccountLogin != payload.AccountLogin || existing.AccountType != accountType) {
+				return s.Store.UpsertInstallation(ctx, tenant.Installation{
+					ID:                   existing.ID,
+					TenantID:             ten.ID,
+					AccountLogin:         payload.AccountLogin,
+					AccountType:          accountType,
+					GitHubInstallationID: payload.InstallationID,
+					Active:               true,
+				}, now)
+			}
 		}
-		return nil
-	default:
-		return nil
 	}
+	return nil
+}
+
+func (s *Service) Installation(ctx context.Context, githubInstallationID int64) (*tenant.Installation, error) {
+	return s.Store.InstallationByGitHubID(ctx, githubInstallationID)
 }
 
 func (s *Service) Repos(ctx context.Context, tenantID string) ([]Repo, error) {

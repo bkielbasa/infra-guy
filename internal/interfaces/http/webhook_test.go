@@ -7,23 +7,47 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"sync"
 	"testing"
+	"time"
 
+	"infra-guy/internal/application/installation"
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
+	"infra-guy/internal/domain/tenant"
 )
 
 type fakeOpen struct {
+	mu   sync.Mutex
 	reqs []runapp.OpenRequest
 	err  error
 }
 
 func (f *fakeOpen) Open(_ context.Context, in runapp.OpenRequest) (*run.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.reqs = append(f.reqs, in)
 	return nil, f.err
+}
+
+func (f *fakeOpen) calls() []runapp.OpenRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]runapp.OpenRequest, len(f.reqs))
+	copy(cp, f.reqs)
+	return cp
+}
+
+func (f *fakeOpen) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reqs = nil
+	f.err = nil
 }
 
 func sign(secret string, body []byte) string {
@@ -32,14 +56,191 @@ func sign(secret string, body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-func webhookMux(t *testing.T, projects *memProjects, open *fakeOpen) http.Handler {
-	t.Helper()
-	return New(nil, open, projects)
+type webhookProjects struct {
+	mu    sync.Mutex
+	items map[project.ID]*project.Project
+	err   error
 }
 
-func postWebhook(t *testing.T, h http.Handler, id, event, secret string, body []byte, sig string) *httptest.ResponseRecorder {
+func newWebhookProjects() *webhookProjects {
+	return &webhookProjects{items: make(map[project.ID]*project.Project)}
+}
+
+func (m *webhookProjects) Save(_ context.Context, p *project.Project) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return m.err
+	}
+	m.items[p.Snapshot().ID] = project.Restore(p.Snapshot())
+	return nil
+}
+
+func (m *webhookProjects) Get(_ context.Context, id project.ID) (*project.Project, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.items[id], nil
+}
+
+func (m *webhookProjects) List(_ context.Context, tenantID string) ([]*project.Project, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*project.Project
+	for _, p := range m.items {
+		if p.Snapshot().TenantID == tenantID {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (m *webhookProjects) FindByRepo(_ context.Context, tenantID string, repoID int64) ([]*project.Project, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return nil, m.err
+	}
+	var out []*project.Project
+	for _, p := range m.items {
+		s := p.Snapshot()
+		if s.TenantID == tenantID && s.GitHubRepoID == repoID {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Snapshot().ID < out[j].Snapshot().ID
+	})
+	return out, nil
+}
+
+func (m *webhookProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.items[id]; p != nil {
+		s := p.Snapshot()
+		s.Locked = locked
+		m.items[id] = project.Restore(s)
+	}
+	return nil
+}
+
+func (m *webhookProjects) ReleaseActiveRun(_ context.Context, id project.ID, runID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.items[id]; p != nil {
+		_ = p.ReleaseActiveRun(runID)
+	}
+	return nil
+}
+
+func (m *webhookProjects) Delete(_ context.Context, id project.ID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.items, id)
+	return nil
+}
+
+type memInstallationStore struct {
+	mu            sync.Mutex
+	tenants       map[string]tenant.Tenant
+	installations map[int64]tenant.Installation
+}
+
+func newMemInstallationStore() *memInstallationStore {
+	return &memInstallationStore{
+		tenants:       make(map[string]tenant.Tenant),
+		installations: make(map[int64]tenant.Installation),
+	}
+}
+
+func (m *memInstallationStore) UpsertTenant(_ context.Context, t tenant.Tenant, _ time.Time) (tenant.Tenant, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ex := range m.tenants {
+		if ex.GitHubAccountID == t.GitHubAccountID {
+			ex.Name = t.Name
+			ex.AccountType = t.AccountType
+			m.tenants[ex.ID] = ex
+			return ex, nil
+		}
+	}
+	m.tenants[t.ID] = t
+	return t, nil
+}
+
+func (m *memInstallationStore) UpsertInstallation(_ context.Context, in tenant.Installation, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, ex := range m.installations {
+		if ex.TenantID == in.TenantID && ex.GitHubInstallationID != in.GitHubInstallationID && ex.Active {
+			ex.Active = false
+			m.installations[id] = ex
+		}
+	}
+	if ex, ok := m.installations[in.GitHubInstallationID]; ok {
+		in.ID = ex.ID
+	}
+	m.installations[in.GitHubInstallationID] = in
+	return nil
+}
+
+func (m *memInstallationStore) ActiveInstallation(_ context.Context, tenantID string) (*tenant.Installation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, in := range m.installations {
+		if in.TenantID == tenantID && in.Active {
+			cp := in
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *memInstallationStore) InstallationByGitHubID(_ context.Context, githubInstallationID int64) (*tenant.Installation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if in, ok := m.installations[githubInstallationID]; ok {
+		cp := in
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+func (m *memInstallationStore) DeactivateInstallation(_ context.Context, githubInstallationID int64, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if in, ok := m.installations[githubInstallationID]; ok {
+		in.Active = false
+		m.installations[githubInstallationID] = in
+	}
+	return nil
+}
+
+func makeProject(t *testing.T, id, name, tenantID string, repoID int64, defaultBranch string) *project.Project {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/github/"+id, bytes.NewReader(body))
+	repo, err := project.ParseSourceRepo("acme/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := project.New(project.ID(id), name, repo, time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetDefaultBranch(defaultBranch); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetPlacement(tenantID, repoID); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func postWebhook(t *testing.T, h http.Handler, event, secret string, body []byte, sig string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
 	req.Header.Set("X-GitHub-Event", event)
 	if sig != "" {
 		req.Header.Set("X-Hub-Signature-256", sig)
@@ -52,125 +253,351 @@ func postWebhook(t *testing.T, h http.Handler, id, event, secret string, body []
 }
 
 func TestGitHubWebhook(t *testing.T) {
-	p := testProject(t)
-	if err := p.SetDefaultBranch("trunk"); err != nil {
+	const secret = "app-secret"
+
+	instStore := newMemInstallationStore()
+	var idCount int
+	newID := func() string {
+		idCount++
+		return fmt.Sprintf("id-%d", idCount)
+	}
+	instSvc := &installation.Service{
+		Store: instStore,
+		NewID: newID,
+		Now:   time.Now,
+	}
+
+	// Seed tenant and installation 9
+	ctx := context.Background()
+	ten, err := instStore.UpsertTenant(ctx, tenant.Tenant{
+		ID:              "ten-1",
+		Name:            "acme",
+		AccountType:     "organization",
+		GitHubAccountID: 50,
+	}, time.Now())
+	if err != nil {
 		t.Fatal(err)
 	}
-	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	if err := instStore.UpsertInstallation(ctx, tenant.Installation{
+		ID:                   "inst-9",
+		TenantID:             ten.ID,
+		AccountLogin:         "acme",
+		AccountType:          "organization",
+		GitHubInstallationID: 9,
+		Active:               true,
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Projects:
+	// - p1: tenant ten-1, repo 5, default branch main
+	// - p2: tenant ten-1, repo 5, default branch main
+	// - p3: tenant ten-1, repo 5, default branch dev
+	// - p4: tenant ten-2, repo 5, default branch main
+	projects := newWebhookProjects()
+	p1 := makeProject(t, "p1", "infra-prod", "ten-1", 5, "main")
+	p2 := makeProject(t, "p2", "infra-stage", "ten-1", 5, "main")
+	p3 := makeProject(t, "p3", "infra-dev", "ten-1", 5, "dev")
+	p4 := makeProject(t, "p4", "infra-other", "ten-2", 5, "main")
+	_ = projects.Save(ctx, p1)
+	_ = projects.Save(ctx, p2)
+	_ = projects.Save(ctx, p3)
+	_ = projects.Save(ctx, p4)
+
 	open := &fakeOpen{}
-	h := webhookMux(t, projects, open)
+	h := New(nil, open, projects, WithWebhook(instSvc, secret))
 
-	body := []byte(`{"zen":"ok"}`)
-	rr := postWebhook(t, h, "missing", "ping", "whsec", body, sign("whsec", body))
-	if rr.Code != 404 || len(open.reqs) != 0 {
-		t.Fatalf("missing project %d calls %d", rr.Code, len(open.reqs))
-	}
-
-	rr = postWebhook(t, h, "p1", "ping", "", body, "")
-	if rr.Code != 401 || len(open.reqs) != 0 {
-		t.Fatalf("missing sig %d calls %d", rr.Code, len(open.reqs))
-	}
-
-	rr = postWebhook(t, h, "p1", "ping", "", body, sign("wrong", body))
-	if rr.Code != 401 || len(open.reqs) != 0 {
-		t.Fatalf("bad sig %d calls %d", rr.Code, len(open.reqs))
-	}
-
-	rr = postWebhook(t, h, "p1", "ping", "whsec", body, "")
-	if rr.Code != 200 || len(open.reqs) != 0 {
-		t.Fatalf("ping %d calls %d", rr.Code, len(open.reqs))
-	}
-
-	prOpened := []byte(`{
-		"action":"opened",
-		"pull_request":{"number":12,"title":"add lock","draft":false,"head":{"sha":"abc123","ref":"feat"}},
-		"sender":{"login":"alice"}
-	}`)
-	rr = postWebhook(t, h, "p1", "pull_request", "whsec", prOpened, "")
-	if rr.Code != 200 || len(open.reqs) != 1 {
-		t.Fatalf("pr opened %d calls %d", rr.Code, len(open.reqs))
-	}
-	got := open.reqs[0]
-	if got.ProjectID != "p1" || got.Trigger != run.TriggerPullRequest || got.SHA != "abc123" || got.Branch != "feat" || got.PRTitle != "add lock" || got.TriggeredBy != "alice" || !got.PlanOnly {
-		t.Fatalf("pr req %#v", got)
-	}
-	if got.PRNumber == nil || *got.PRNumber != 12 {
-		t.Fatalf("pr number %#v", got.PRNumber)
-	}
-
-	for _, action := range []string{"synchronize", "reopened", "ready_for_review"} {
-		open.reqs = nil
-		payload := []byte(`{"action":"` + action + `","pull_request":{"number":3,"title":"t","draft":false,"head":{"sha":"s","ref":"b"}},"sender":{"login":"bob"}}`)
-		rr = postWebhook(t, h, "p1", "pull_request", "whsec", payload, "")
-		if rr.Code != 200 || len(open.reqs) != 1 || !open.reqs[0].PlanOnly || open.reqs[0].Trigger != run.TriggerPullRequest {
-			t.Fatalf("action %s %d %#v", action, rr.Code, open.reqs)
-		}
-	}
-
-	open.reqs = nil
-	fork := []byte(`{"action":"opened","pull_request":{"number":4,"title":"f","draft":false,"head":{"sha":"s","ref":"b","repo":{"full_name":"mallory/infra"}}},"repository":{"full_name":"bklebasa/infra"},"sender":{"login":"mallory"}}`)
-	rr = postWebhook(t, h, "p1", "pull_request", "whsec", fork, "")
-	if rr.Code != 200 || len(open.reqs) != 0 {
-		t.Fatalf("fork %d calls %d", rr.Code, len(open.reqs))
-	}
-	sameRepo := []byte(`{"action":"opened","pull_request":{"number":5,"title":"s","draft":false,"head":{"sha":"s","ref":"b","repo":{"full_name":"bklebasa/infra"}}},"repository":{"full_name":"bklebasa/infra"},"sender":{"login":"alice"}}`)
-	rr = postWebhook(t, h, "p1", "pull_request", "whsec", sameRepo, "")
-	if rr.Code != 200 || len(open.reqs) != 1 {
-		t.Fatalf("same repo %d calls %d", rr.Code, len(open.reqs))
-	}
-
-	open.reqs = nil
-	draft := []byte(`{"action":"opened","pull_request":{"number":1,"title":"d","draft":true,"head":{"sha":"s","ref":"b"}},"sender":{"login":"alice"}}`)
-	rr = postWebhook(t, h, "p1", "pull_request", "whsec", draft, "")
-	if rr.Code != 200 || len(open.reqs) != 0 {
-		t.Fatalf("draft %d calls %d", rr.Code, len(open.reqs))
-	}
-
-	closed := []byte(`{"action":"closed","pull_request":{"number":1,"title":"d","draft":false,"head":{"sha":"s","ref":"b"}},"sender":{"login":"alice"}}`)
-	rr = postWebhook(t, h, "p1", "pull_request", "whsec", closed, "")
-	if rr.Code != 200 || len(open.reqs) != 0 {
-		t.Fatalf("closed %d calls %d", rr.Code, len(open.reqs))
-	}
-
-	push := []byte(`{
-		"ref":"refs/heads/trunk",
+	pushPayload := []byte(`{
+		"ref":"refs/heads/main",
 		"after":"ffffffffffffffffffffffffffffffffffffffff",
 		"head_commit":{"message":"ship it","author":{"name":"Cara"}},
-		"sender":{"login":"cara"}
+		"sender":{"login":"cara"},
+		"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+		"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}}
 	}`)
-	rr = postWebhook(t, h, "p1", "push", "whsec", push, "")
-	if rr.Code != 200 || len(open.reqs) != 1 {
-		t.Fatalf("push %d calls %d", rr.Code, len(open.reqs))
-	}
-	got = open.reqs[0]
-	if got.Trigger != run.TriggerPush || got.PlanOnly || got.SHA != "ffffffffffffffffffffffffffffffffffffffff" || got.Branch != "trunk" || got.Message != "ship it" || got.Author != "Cara" || got.TriggeredBy != "cara" || got.ProjectID != "p1" {
-		t.Fatalf("push req %#v", got)
-	}
 
-	open.reqs = nil
-	other := []byte(`{"ref":"refs/heads/other","after":"ffffffffffffffffffffffffffffffffffffffff","head_commit":{"message":"x","author":{"name":"Cara"}},"sender":{"login":"cara"}}`)
-	rr = postWebhook(t, h, "p1", "push", "whsec", other, "")
-	if rr.Code != 200 || len(open.reqs) != 0 {
-		t.Fatalf("other branch %d calls %d", rr.Code, len(open.reqs))
-	}
+	t.Run("bad signature returns 401 and calls no opener", func(t *testing.T) {
+		open.reset()
+		// Missing signature
+		rr := postWebhook(t, h, "push", "", pushPayload, "")
+		if rr.Code != http.StatusUnauthorized || len(open.calls()) != 0 {
+			t.Fatalf("missing sig code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+		// Wrong signature
+		rr = postWebhook(t, h, "push", "", pushPayload, sign("wrong-secret", pushPayload))
+		if rr.Code != http.StatusUnauthorized || len(open.calls()) != 0 {
+			t.Fatalf("wrong sig code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+	})
 
-	zeros := []byte(`{"ref":"refs/heads/trunk","after":"0000000000000000000000000000000000000000","head_commit":{"message":"x","author":{"name":"Cara"}},"sender":{"login":"cara"}}`)
-	rr = postWebhook(t, h, "p1", "push", "whsec", zeros, "")
-	if rr.Code != 200 || len(open.reqs) != 0 {
-		t.Fatalf("deleted %d calls %d", rr.Code, len(open.reqs))
-	}
+	t.Run("ping returns 200 and calls no opener", func(t *testing.T) {
+		open.reset()
+		body := []byte(`{"zen":"Keep it logically awesome."}`)
+		rr := postWebhook(t, h, "ping", secret, body, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("ping code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+	})
 
-	open.err = runapp.ErrDuplicate
-	open.reqs = nil
-	rr = postWebhook(t, h, "p1", "push", "whsec", push, "")
-	if rr.Code != 200 || len(open.reqs) != 1 {
-		t.Fatalf("duplicate %d calls %d", rr.Code, len(open.reqs))
-	}
+	t.Run("malformed json returns 200 and calls no opener", func(t *testing.T) {
+		open.reset()
+		rr := postWebhook(t, h, "push", secret, []byte(`{not valid json`), "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("malformed code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+	})
 
-	open.err = errors.New("boom")
-	open.reqs = nil
-	rr = postWebhook(t, h, "p1", "push", "whsec", push, "")
-	if rr.Code != 500 || len(open.reqs) != 1 {
-		t.Fatalf("open error %d calls %d", rr.Code, len(open.reqs))
-	}
+	t.Run("push opens one run per matching project in tenant", func(t *testing.T) {
+		open.reset()
+		rr := postWebhook(t, h, "push", secret, pushPayload, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("push code=%d", rr.Code)
+		}
+		calls := open.calls()
+		if len(calls) != 2 {
+			t.Fatalf("expected 2 calls (p1, p2), got %d: %#v", len(calls), calls)
+		}
+		// Deterministic order: p1 then p2
+		if calls[0].ProjectID != "p1" || calls[1].ProjectID != "p2" {
+			t.Fatalf("unexpected call project IDs: %s, %s", calls[0].ProjectID, calls[1].ProjectID)
+		}
+		for _, c := range calls {
+			if c.Trigger != run.TriggerPush || c.PlanOnly || c.SHA != "ffffffffffffffffffffffffffffffffffffffff" || c.Branch != "main" || c.Message != "ship it" || c.Author != "Cara" || c.TriggeredBy != "cara" {
+				t.Fatalf("unexpected call payload: %#v", c)
+			}
+		}
+	})
+
+	t.Run("push zeros after-SHA opens nothing", func(t *testing.T) {
+		open.reset()
+		zerosPayload := []byte(`{
+			"ref":"refs/heads/main",
+			"after":"0000000000000000000000000000000000000000",
+			"head_commit":{"message":"deleted","author":{"name":"Cara"}},
+			"sender":{"login":"cara"},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}}
+		}`)
+		rr := postWebhook(t, h, "push", secret, zerosPayload, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("zeros code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+	})
+
+	t.Run("push other branch opens nothing", func(t *testing.T) {
+		open.reset()
+		otherBranchPayload := []byte(`{
+			"ref":"refs/heads/feature-branch",
+			"after":"ffffffffffffffffffffffffffffffffffffffff",
+			"head_commit":{"message":"other","author":{"name":"Cara"}},
+			"sender":{"login":"cara"},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}}
+		}`)
+		rr := postWebhook(t, h, "push", secret, otherBranchPayload, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("other branch code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+	})
+
+	t.Run("pull request opened opens all matching projects plan-only", func(t *testing.T) {
+		open.reset()
+		prOpened := []byte(`{
+			"action":"opened",
+			"pull_request":{
+				"number":12,
+				"title":"add lock",
+				"draft":false,
+				"head":{"sha":"abc123","ref":"feat","repo":{"full_name":"acme/infra"}}
+			},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"sender":{"login":"alice"}
+		}`)
+		rr := postWebhook(t, h, "pull_request", secret, prOpened, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("pr opened code=%d", rr.Code)
+		}
+		calls := open.calls()
+		// Should open for p1, p2, p3 in tenant ten-1
+		if len(calls) != 3 {
+			t.Fatalf("expected 3 calls (p1, p2, p3), got %d: %#v", len(calls), calls)
+		}
+		for _, c := range calls {
+			if c.Trigger != run.TriggerPullRequest || !c.PlanOnly || c.SHA != "abc123" || c.Branch != "feat" || c.PRTitle != "add lock" || c.TriggeredBy != "alice" {
+				t.Fatalf("unexpected pr call: %#v", c)
+			}
+			if c.PRNumber == nil || *c.PRNumber != 12 {
+				t.Fatalf("unexpected pr number: %#v", c.PRNumber)
+			}
+		}
+	})
+
+	t.Run("pull request actions synchronize reopened ready_for_review open runs", func(t *testing.T) {
+		for _, action := range []string{"synchronize", "reopened", "ready_for_review"} {
+			open.reset()
+			payload := []byte(fmt.Sprintf(`{
+				"action":"%s",
+				"pull_request":{
+					"number":15,
+					"title":"update",
+					"draft":false,
+					"head":{"sha":"def456","ref":"feat-2","repo":{"full_name":"acme/infra"}}
+				},
+				"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}},
+				"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+				"sender":{"login":"bob"}
+			}`, action))
+			rr := postWebhook(t, h, "pull_request", secret, payload, "")
+			if rr.Code != http.StatusOK || len(open.calls()) != 3 {
+				t.Fatalf("action %s code=%d calls=%d", action, rr.Code, len(open.calls()))
+			}
+		}
+	})
+
+	t.Run("draft and fork pull request open nothing", func(t *testing.T) {
+		// Draft
+		open.reset()
+		draftPayload := []byte(`{
+			"action":"opened",
+			"pull_request":{
+				"number":14,
+				"title":"draft pr",
+				"draft":true,
+				"head":{"sha":"abc123","ref":"draft","repo":{"full_name":"acme/infra"}}
+			},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"sender":{"login":"alice"}
+		}`)
+		rr := postWebhook(t, h, "pull_request", secret, draftPayload, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("draft code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+
+		// Fork
+		open.reset()
+		forkPayload := []byte(`{
+			"action":"opened",
+			"pull_request":{
+				"number":14,
+				"title":"fork pr",
+				"draft":false,
+				"head":{"sha":"abc123","ref":"fork-branch","repo":{"full_name":"mallory/infra"}}
+			},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"sender":{"login":"mallory"}
+		}`)
+		rr = postWebhook(t, h, "pull_request", secret, forkPayload, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("fork code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+
+		// Closed
+		open.reset()
+		closedPayload := []byte(`{
+			"action":"closed",
+			"pull_request":{
+				"number":14,
+				"title":"closed pr",
+				"draft":false,
+				"head":{"sha":"abc123","ref":"feat","repo":{"full_name":"acme/infra"}}
+			},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"sender":{"login":"alice"}
+		}`)
+		rr = postWebhook(t, h, "pull_request", secret, closedPayload, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("closed code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+	})
+
+	t.Run("duplicate run returns 200", func(t *testing.T) {
+		open.reset()
+		open.err = runapp.ErrDuplicate
+		rr := postWebhook(t, h, "push", secret, pushPayload, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("duplicate code=%d", rr.Code)
+		}
+	})
+
+	t.Run("opener error returns 500", func(t *testing.T) {
+		open.reset()
+		open.err = errors.New("boom")
+		rr := postWebhook(t, h, "push", secret, pushPayload, "")
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("error code=%d", rr.Code)
+		}
+	})
+
+	t.Run("repo rename updates project repo", func(t *testing.T) {
+		open.reset()
+		renamedPush := []byte(`{
+			"ref":"refs/heads/main",
+			"after":"ffffffffffffffffffffffffffffffffffffffff",
+			"head_commit":{"message":"rename ship","author":{"name":"Cara"}},
+			"sender":{"login":"cara"},
+			"installation":{"id":9,"account":{"id":50,"login":"acme-corp","type":"Organization"}},
+			"repository":{"id":5,"full_name":"acme-corp/infra-new","name":"infra-new","owner":{"login":"acme-corp"}}
+		}`)
+		rr := postWebhook(t, h, "push", secret, renamedPush, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("rename code=%d", rr.Code)
+		}
+		p, err := projects.Get(ctx, "p1")
+		if err != nil || p == nil {
+			t.Fatalf("get p1 err=%v", err)
+		}
+		if p.Snapshot().Repo.Owner != "acme-corp" || p.Snapshot().Repo.Name != "infra-new" {
+			t.Fatalf("expected renamed repo acme-corp/infra-new, got %#v", p.Snapshot().Repo)
+		}
+	})
+
+	t.Run("unknown installation upserts installation and returns 200 without opening", func(t *testing.T) {
+		open.reset()
+		unknownPush := []byte(`{
+			"ref":"refs/heads/main",
+			"after":"ffffffffffffffffffffffffffffffffffffffff",
+			"head_commit":{"message":"init","author":{"name":"Dave"}},
+			"sender":{"login":"dave"},
+			"installation":{"id":99,"account":{"id":990,"login":"newcorp","type":"Organization"}},
+			"repository":{"id":999,"full_name":"newcorp/newrepo","name":"newrepo","owner":{"login":"newcorp"}}
+		}`)
+		rr := postWebhook(t, h, "push", secret, unknownPush, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("unknown inst code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+		inst, err := instStore.InstallationByGitHubID(ctx, 99)
+		if err != nil || inst == nil {
+			t.Fatalf("installation 99 not upserted: %v, %#v", err, inst)
+		}
+		if !inst.Active || inst.AccountLogin != "newcorp" {
+			t.Fatalf("installation 99 properties mismatch: %#v", inst)
+		}
+	})
+
+	t.Run("suspend marks installation inactive and subsequent push returns 200 without opening", func(t *testing.T) {
+		open.reset()
+		suspendPayload := []byte(`{
+			"action":"suspend",
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}}
+		}`)
+		rr := postWebhook(t, h, "installation", secret, suspendPayload, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("suspend code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+		inst, err := instStore.InstallationByGitHubID(ctx, 9)
+		if err != nil || inst == nil || inst.Active {
+			t.Fatalf("expected inactive installation 9, got err=%v inst=%#v", err, inst)
+		}
+
+		// Subsequent push returns 200 and opens nothing
+		open.reset()
+		rr = postWebhook(t, h, "push", secret, pushPayload, "")
+		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
+			t.Fatalf("post-suspend push code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+	})
 }

@@ -30,10 +30,11 @@ type ServerConfig struct {
 	PublicBaseURL string
 	Auth          *authapp.Service
 	Installations *installation.Service
+	WebhookSecret string
 }
 
 func NewServer(cfg ServerConfig) http.Handler {
-	api := New(cfg.States, cfg.Runs, cfg.Projects.Projects)
+	api := New(cfg.States, cfg.Runs, cfg.Projects.Projects, WithWebhook(cfg.Installations, cfg.WebhookSecret))
 	uiMux := http.NewServeMux()
 	(&ui{cfg: cfg}).routes(uiMux)
 	protected := http.NewCrossOriginProtection().Handler(withSession(uiMux, cfg))

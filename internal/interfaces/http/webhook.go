@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"infra-guy/internal/application/installation"
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
@@ -40,46 +41,141 @@ func (a *api) webhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	id := project.ID(r.PathValue("id"))
-	p, err := a.projects.Get(r.Context(), id)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	if p == nil {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	if !validSignature(p.Snapshot().WebhookSecret, r.Header.Get("X-Hub-Signature-256"), body) {
+
+	if a.webhookSecret == "" || !validSignature(a.webhookSecret, r.Header.Get("X-Hub-Signature-256"), body) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+
 	event := r.Header.Get("X-GitHub-Event")
 	if event == "ping" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	var req runapp.OpenRequest
-	var ok bool
-	switch event {
-	case "pull_request":
-		req, ok = pullRequestOpen(id, body)
-	case "push":
-		req, ok = pushOpen(id, p.Snapshot().DefaultBranch, body)
+	var env struct {
+		Action       string `json:"action"`
+		Installation struct {
+			ID          int64   `json:"id"`
+			Suspended   bool    `json:"suspended"`
+			SuspendedAt *string `json:"suspended_at"`
+			Account     struct {
+				ID    int64  `json:"id"`
+				Login string `json:"login"`
+				Type  string `json:"type"`
+			} `json:"account"`
+		} `json:"installation"`
+		Repository struct {
+			ID       int64  `json:"id"`
+			Name     string `json:"name"`
+			FullName string `json:"full_name"`
+			Owner    struct {
+				Login string `json:"login"`
+			} `json:"owner"`
+		} `json:"repository"`
 	}
-	if !ok {
+	if err := json.Unmarshal(body, &env); err != nil {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if _, err := a.open.Open(r.Context(), req); err != nil {
-		if errors.Is(err, runapp.ErrDuplicate) {
-			w.WriteHeader(http.StatusOK)
+
+	if env.Installation.ID != 0 && a.installations != nil {
+		ev := installation.InstallationEvent{
+			Action:         env.Action,
+			InstallationID: env.Installation.ID,
+			AccountID:      env.Installation.Account.ID,
+			AccountLogin:   env.Installation.Account.Login,
+			AccountType:    env.Installation.Account.Type,
+			Suspended:      env.Installation.Suspended || (env.Installation.SuspendedAt != nil && *env.Installation.SuspendedAt != ""),
+		}
+		if err := a.installations.Apply(r.Context(), event, ev); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+	}
+
+	if event == "installation" || a.installations == nil || env.Installation.ID == 0 {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	inst, err := a.installations.Installation(r.Context(), env.Installation.ID)
+	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	if inst == nil || !inst.Active {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if env.Repository.ID == 0 {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	matched, err := a.projects.FindByRepo(r.Context(), inst.TenantID, env.Repository.ID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	ownerLogin := env.Repository.Owner.Login
+	repoName := env.Repository.Name
+	if ownerLogin == "" && strings.Contains(env.Repository.FullName, "/") {
+		parts := strings.Split(env.Repository.FullName, "/")
+		ownerLogin = parts[0]
+		if repoName == "" {
+			repoName = parts[1]
+		}
+	}
+	if ownerLogin != "" && repoName != "" && (event == "push" || event == "pull_request" || (event == "repository" && env.Action == "renamed")) {
+		for i, p := range matched {
+			snap := p.Snapshot()
+			if snap.Repo.Owner != ownerLogin || snap.Repo.Name != repoName {
+				snap.Repo.Owner = ownerLogin
+				snap.Repo.Name = repoName
+				updated := project.Restore(snap)
+				if err := a.projects.Save(r.Context(), updated); err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				matched[i] = updated
+			}
+		}
+	}
+
+	switch event {
+	case "push":
+		for _, p := range matched {
+			req, ok := pushOpen(p.Snapshot().ID, p.Snapshot().DefaultBranch, body)
+			if !ok {
+				continue
+			}
+			if _, err := a.open.Open(r.Context(), req); err != nil {
+				if errors.Is(err, runapp.ErrDuplicate) {
+					continue
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+	case "pull_request":
+		for _, p := range matched {
+			req, ok := pullRequestOpen(p.Snapshot().ID, body)
+			if !ok {
+				continue
+			}
+			if _, err := a.open.Open(r.Context(), req); err != nil {
+				if errors.Is(err, runapp.ErrDuplicate) {
+					continue
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
