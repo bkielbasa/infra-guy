@@ -1266,8 +1266,12 @@ func TestPoliciesUIAndApprovalEnforcement(t *testing.T) {
 		t.Fatalf("GET /policies = %d: %s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, `href="/policies"`) || !strings.Contains(body, `id="policy-rego"`) || !strings.Contains(body, `id="policy-input-json"`) || !strings.Contains(body, "Test Policy") || !strings.Contains(body, "package infraguy.approval") {
+	if !strings.Contains(body, `href="/policies"`) || !strings.Contains(body, `id="policy-rego"`) || !strings.Contains(body, `data-code-editor="rego"`) || !strings.Contains(body, `id="policy-input-json"`) || !strings.Contains(body, `data-code-editor="json"`) || !strings.Contains(body, `/static/editor.js`) || !strings.Contains(body, "Test Policy") || !strings.Contains(body, "package infraguy.approval") {
 		t.Fatalf("GET /policies missing editor/tester elements: %s", body)
+	}
+	rrStatic := getUI(t, h, "/static/editor.js")
+	if rrStatic.Code != http.StatusOK || !strings.Contains(rrStatic.Body.String(), "highlightRego") {
+		t.Fatalf("GET /static/editor.js = %d: %s", rrStatic.Code, rrStatic.Body.String())
 	}
 
 	// 2. POST /policies/test evaluates Rego against input JSON (allowed, denied, and invalid Rego)

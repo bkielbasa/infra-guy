@@ -14,7 +14,7 @@
     <label>Description</label>
     <input type="text" name="description" value="{{.Description}}">
     <label>Rego policy</label>
-    <textarea id="policy-rego" name="rego" rows="14" required>{{.Rego}}</textarea>
+    <textarea id="policy-rego" name="rego" rows="14" data-code-editor="rego" required>{{.Rego}}</textarea>
     <div class="actions">
       <button type="submit" class="btn-trigger">Save policy</button>
       <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
@@ -25,7 +25,7 @@
 <div class="panel">
   <h2>Online Policy Editor &amp; Tester</h2>
   <label>Policy Input JSON (paste from a Run or edit below)</label>
-  <textarea id="policy-input-json" name="input_json" rows="14">{{.SampleInputJSON}}</textarea>
+  <textarea id="policy-input-json" name="input_json" rows="14" data-code-editor="json">{{.SampleInputJSON}}</textarea>
   <div class="actions">
     <button type="button" onclick="runPolicyTest()">Test Policy</button>
   </div>

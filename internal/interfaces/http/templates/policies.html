@@ -27,7 +27,7 @@
     <label>Description</label>
     <input type="text" name="description" placeholder="Optional description">
     <label>Rego policy</label>
-    <textarea id="policy-rego" name="rego" rows="14" required>{{.DefaultRego}}</textarea>
+    <textarea id="policy-rego" name="rego" rows="14" data-code-editor="rego" required>{{.DefaultRego}}</textarea>
     <div class="actions">
       <button type="submit" class="btn-trigger">Create policy</button>
       <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
@@ -35,7 +35,7 @@
   </form>
 
   <label>Sample Policy Input JSON (plan, current_user, project)</label>
-  <textarea id="policy-input-json" name="input_json" rows="14">{{.SampleInputJSON}}</textarea>
+  <textarea id="policy-input-json" name="input_json" rows="14" data-code-editor="json">{{.SampleInputJSON}}</textarea>
   <div id="policy-test-result" class="meta"></div>
 </div>
 

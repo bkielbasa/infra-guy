@@ -252,3 +252,106 @@ summary:hover { color: #fff; }
   font-size: 13px;
 }
 .inline { display: inline; }
+
+.code-editor {
+  position: relative;
+  width: 100%;
+  max-width: 880px;
+  padding-left: 44px;
+  border: 1px solid #3a4254;
+  border-radius: 8px;
+  background: #0c0e14;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.code-editor:focus-within {
+  outline: 2px solid rgba(139, 124, 247, 0.55);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+.code-editor-gutter {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 44px;
+  user-select: none;
+  background: #12151f;
+  color: #5e6778;
+  border-right: 1px solid var(--line);
+  padding: 12px 8px;
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13.5px;
+  line-height: 1.55;
+  overflow: hidden;
+}
+.code-editor-gutter span {
+  display: block;
+}
+.code-editor-body {
+  position: relative;
+  min-height: 260px;
+  overflow: hidden;
+}
+.code-editor-highlight,
+.code-editor-body textarea {
+  margin: 0;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 0;
+  width: 100%;
+  max-width: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13.5px;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow: auto;
+  box-sizing: border-box;
+}
+.code-editor-highlight {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: transparent;
+  color: #d7deea;
+  z-index: 1;
+}
+.code-editor-highlight code {
+  font: inherit;
+  color: inherit;
+  background: none;
+  padding: 0;
+}
+.code-editor-body textarea {
+  position: relative;
+  display: block;
+  z-index: 2;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+  resize: vertical;
+  min-height: 260px;
+}
+.code-editor-body textarea:focus {
+  outline: none;
+  border: 0;
+}
+.code-editor-body textarea::selection {
+  background: rgba(139, 124, 247, 0.35);
+  color: transparent;
+}
+
+.tok-keyword { color: #c792ea; font-weight: 600; }
+.tok-builtin { color: #82aaff; }
+.tok-func { color: #89ddff; }
+.tok-key { color: #82aaff; }
+.tok-string { color: #c3e88d; }
+.tok-number { color: #f78c6c; }
+.tok-bool { color: #ff9cac; }
+.tok-op { color: #89ddff; }
+.tok-punct { color: #94a3b8; }
+.tok-comment { color: #636d83; font-style: italic; }
+
