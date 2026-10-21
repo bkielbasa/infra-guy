@@ -69,6 +69,10 @@ type TokenSource interface {
 	InstallationToken(ctx context.Context, tenantID string) (string, error)
 }
 
+type ContextResolver interface {
+	ResolveForProject(ctx context.Context, projectID project.ID) (map[string]string, map[string][]byte, error)
+}
+
 type Worker struct {
 	WorkerID        string
 	Queue           Queue
@@ -78,6 +82,7 @@ type Worker struct {
 	Checkout        Checkout
 	Executor        Executor
 	Tokens          TokenSource
+	Contexts        ContextResolver
 	WorkDir         string
 	InternalBaseURL string
 	Now             func() time.Time
@@ -208,6 +213,19 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		return w.completeAndCleanup(ctx, job)
 	}
 
+	var ctxEnv map[string]string
+	var ctxFiles map[string][]byte
+	if w.Contexts != nil {
+		var cerr error
+		ctxEnv, ctxFiles, cerr = w.Contexts.ResolveForProject(ctx, ps.ID)
+		if cerr != nil {
+			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, cerr.Error()); ferr != nil {
+				return ferr
+			}
+			return w.completeAndCleanup(ctx, job)
+		}
+	}
+
 	timeout := StepTimeout(job.Step)
 	if w.Timeout != nil {
 		timeout = w.Timeout(job.Step)
@@ -217,7 +235,8 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	res, err := w.Executor.Run(stepCtx, Request{
 		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID), RunID: string(job.RunID),
 		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: token,
-		Step: job.Step, PlanFile: rs.PlanFile,
+		TerraformVersion: ps.TerraformVersion, Step: job.Step, PlanFile: rs.PlanFile,
+		Env: ctxEnv, Files: ctxFiles,
 	})
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
 		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "step timed out"); ferr != nil {

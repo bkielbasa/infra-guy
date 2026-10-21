@@ -503,3 +503,78 @@ func TestExecuteTokenErrorFailsBeforeClone(t *testing.T) {
 		t.Fatalf("completed jobs %#v, want [3]", fx.queue.completed)
 	}
 }
+
+type fakeContextResolver struct {
+	env   map[string]string
+	files map[string][]byte
+	err   error
+}
+
+func (f fakeContextResolver) ResolveForProject(context.Context, project.ID) (map[string]string, map[string][]byte, error) {
+	return f.env, f.files, f.err
+}
+
+func TestTickPassesTerraformVersionAndResolvedContexts(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	if err := p.SetTerraformVersion("1.10.5"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := run.Open(run.OpenInput{
+		ID: "run-ctx", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerManual, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{res: Result{ExitCode: 0, Version: "1.10.5"}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 9, RunID: "run-ctx", Step: run.StepInit}}, exec)
+	fx.w.Contexts = fakeContextResolver{
+		env:   map[string]string{"TF_VAR_env": "prod"},
+		files: map[string][]byte{".kube/config": []byte("k8s-data")},
+	}
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.exec.req.TerraformVersion != "1.10.5" {
+		t.Fatalf("TerraformVersion = %q, want 1.10.5", fx.exec.req.TerraformVersion)
+	}
+	if fx.exec.req.Env["TF_VAR_env"] != "prod" || string(fx.exec.req.Files[".kube/config"]) != "k8s-data" {
+		t.Fatalf("executor req env=%v files=%v", fx.exec.req.Env, fx.exec.req.Files)
+	}
+}
+
+func TestTickContextResolutionErrorFailsWithoutExecutor(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-ctx-err", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerManual, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{res: Result{ExitCode: 0}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 10, RunID: "run-ctx-err", Step: run.StepInit}}, exec)
+	fx.w.Contexts = fakeContextResolver{
+		err: errors.New("decrypt failed"),
+	}
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.exec.called {
+		t.Fatal("executor should not be called on context resolution error")
+	}
+	saved, err := fx.runs.Get(ctx, "run-ctx-err")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := saved.Snapshot()
+	if snap.Status != run.StatusFailed {
+		t.Fatalf("status %s, want failed", snap.Status)
+	}
+	if snap.Error != "decrypt failed" {
+		t.Fatalf("error %q, want decrypt failed", snap.Error)
+	}
+	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 10 {
+		t.Fatalf("completed jobs %#v, want [10]", fx.queue.completed)
+	}
+}
