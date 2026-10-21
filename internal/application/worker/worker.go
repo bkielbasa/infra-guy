@@ -37,8 +37,11 @@ type Job struct {
 
 type Request struct {
 	WorkDir, InternalBaseURL, ProjectID, RunID, StateToken, WorkingDirectory, GitHubToken string
+	TerraformVersion                                                                      string
 	Step                                                                                  run.StepName
 	PlanFile                                                                              []byte
+	Env                                                                                   map[string]string
+	Files                                                                                 map[string][]byte
 }
 
 type Result struct {

@@ -1,6 +1,8 @@
 package terraform
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -62,11 +64,12 @@ func TestCommandEnvDropsPlatformSecrets(t *testing.T) {
 	t.Setenv("GITHUB_APP_WEBHOOK_SECRET", "wh-secret")
 	t.Setenv("GITHUB_APP_CLIENT_ID", "Iv1.abc")
 	t.Setenv("GITHUB_APP_CLIENT_SECRET", "client-secret")
+	t.Setenv("CONTEXT_ENCRYPTION_KEY", "enc-secret")
 	t.Setenv("TF_LOG", "TRACE")
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("SOME_GH_COPY", "ghp_project_token")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
-	env := strings.Join(commandEnv("ghp_project_token"), "\n")
+	env := strings.Join(commandEnv("ghp_project_token", "/tmp/isolated-home", nil), "\n")
 	for _, banned := range []string{
 		"DATABASE_URL=",
 		"POSTGRES_PASSWORD=",
@@ -78,6 +81,7 @@ func TestCommandEnvDropsPlatformSecrets(t *testing.T) {
 		"GITHUB_APP_WEBHOOK_SECRET=",
 		"GITHUB_APP_CLIENT_ID=",
 		"GITHUB_APP_CLIENT_SECRET=",
+		"CONTEXT_ENCRYPTION_KEY=",
 		"TF_LOG=",
 		"GIT_TRACE=",
 		"ghp_project_token",
@@ -181,5 +185,105 @@ func TestRunOverridesDeclaredBackend(t *testing.T) {
 				t.Fatalf("declared backend still active: %s", state)
 			}
 		})
+	}
+}
+
+type staticBinary string
+
+func (s staticBinary) Ensure(context.Context, string) (string, error) {
+	return string(s), nil
+}
+
+func TestVersionCatalogParsesAndFallsBack(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"versions":{"0.15.0":{},"1.9.8":{},"1.10.5":{},"1.11.0-beta1":{},"1.8.5":{}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	cat := &VersionCatalog{URL: srv.URL, Client: srv.Client(), TTL: time.Hour}
+	got := cat.List(context.Background())
+	if len(got) != 3 || got[0] != "1.10.5" || got[1] != "1.9.8" || got[2] != "1.8.5" {
+		t.Fatalf("catalog got %v", got)
+	}
+
+	offline := &VersionCatalog{URL: "http://127.0.0.1:1"}
+	fb := offline.List(context.Background())
+	if len(fb) == 0 || fb[0] != FallbackVersions[0] {
+		t.Fatalf("fallback got %v", fb)
+	}
+}
+
+func TestInstallerDownloadsAndCachesBinary(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		fw, err := zw.Create("terraform")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = fw.Write([]byte("#!/bin/sh\necho '{\"terraform_version\":\"1.8.5\"}'\n"))
+		_ = zw.Close()
+		_, _ = w.Write(buf.Bytes())
+	}))
+	t.Cleanup(srv.Close)
+
+	inst := &Installer{CacheDir: t.TempDir(), BaseURL: srv.URL, Client: srv.Client()}
+	bin1, err := inst.Ensure(context.Background(), "1.8.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin2, err := inst.Ensure(context.Background(), "1.8.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bin1 != bin2 || hits != 1 {
+		t.Fatalf("expected cached binary with 1 hit, got hits=%d bin1=%q bin2=%q", hits, bin1, bin2)
+	}
+}
+
+func TestExecutorMaterializesHomeFilesAndContextEnv(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(t.TempDir(), "fake-terraform")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"version\" ]; then echo '{\"terraform_version\":\"1.10.5\"}'; exit 0; fi\n" +
+		"echo \"ENV_FOO=$TF_VAR_foo\"\n" +
+		"echo \"HOME_DIR=$HOME\"\n" +
+		"cat \"$HOME/.kube/config\"\n"
+	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := Executor{Binary: staticBinary(fakeBin)}
+	res, err := e.Run(context.Background(), Request{
+		WorkDir:          dir,
+		InternalBaseURL:  "http://127.0.0.1:8080",
+		ProjectID:        "p1",
+		RunID:            "r1",
+		StateToken:       "tok",
+		Step:             run.StepInit,
+		TerraformVersion: "1.10.5",
+		Env:              map[string]string{"TF_VAR_foo": "bar-val", "DATABASE_URL": "evil"},
+		Files:            map[string][]byte{".kube/config": []byte("kubeconfig-payload\n")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d: %s", res.ExitCode, res.Logs)
+	}
+	if !strings.Contains(res.Logs, "ENV_FOO=bar-val") || !strings.Contains(res.Logs, "kubeconfig-payload") {
+		t.Fatalf("missing injected env or file in logs: %s", res.Logs)
+	}
+	if res.Version != "1.10.5" {
+		t.Fatalf("version = %q, want 1.10.5", res.Version)
+	}
+	info, err := os.Stat(filepath.Join(dir, ".home", ".kube", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("secret file mode = %v, want 0600", info.Mode().Perm())
 	}
 }
