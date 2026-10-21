@@ -8,6 +8,16 @@
     <input type="text" name="branch" value="{{.Branch}}">
     <label>Working directory</label>
     <input type="text" name="workdir" value="{{.Workdir}}">
+    <label>Terraform version</label>
+    <select name="terraform_version">
+      {{range .Versions}}<option value="{{.}}"{{if eq . $.TerraformVersion}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+    {{if .Contexts}}
+    <label>Contexts</label>
+    {{range .Contexts}}
+    <label class="check"><input type="checkbox" name="context_ids" value="{{.ID}}"{{if .Attached}} checked{{end}}> {{.Name}}</label>
+    {{end}}
+    {{end}}
     <div class="actions">
       <button type="submit">Save</button>
     </div>

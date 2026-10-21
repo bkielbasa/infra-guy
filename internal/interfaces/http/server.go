@@ -10,6 +10,7 @@ import (
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
+	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/application/worker"
 	"infra-guy/internal/domain/project"
 )
@@ -22,10 +23,16 @@ type commitLookup interface {
 	Lookup(ctx context.Context, repo project.SourceRepo, token, sha string) (message, author string, err error)
 }
 
+type VersionLister interface {
+	List(ctx context.Context) []string
+}
+
 type ServerConfig struct {
 	Projects      *projectapp.Service
 	Runs          *runapp.Service
 	States        *stateapp.Service
+	Contexts      *tfcontextapp.Service
+	Versions      VersionLister
 	Checkout      brancher
 	Lookup        commitLookup
 	Tokens        worker.TokenSource

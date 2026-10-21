@@ -1,0 +1,28 @@
+{{define "contexts"}}
+<div class="panel">
+  <div class="headline">
+    <h1>Contexts</h1>
+  </div>
+  <form method="post" action="/contexts">
+    <label>New context name</label>
+    <div class="actions">
+      <input type="text" name="name" placeholder="e.g. aws-prod" required>
+      <button type="submit">Create context</button>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Entries</th><th>Updated</th></tr>
+    </thead>
+    <tbody>
+      {{range .Contexts}}
+      <tr>
+        <td><a href="/contexts/{{.ID}}">{{.Name}}</a></td>
+        <td>{{.EntryCount}}</td>
+        <td>{{.UpdatedAt}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}

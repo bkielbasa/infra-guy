@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -22,9 +23,11 @@ import (
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
+	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/application/worker"
 	"infra-guy/internal/domain/tenant"
 	"infra-guy/internal/domain/user"
+	"infra-guy/internal/infrastructure/crypto"
 	"infra-guy/internal/infrastructure/git"
 	"infra-guy/internal/infrastructure/github"
 	"infra-guy/internal/infrastructure/postgres"
@@ -101,6 +104,26 @@ func main() {
 	queue := postgres.NewQueue(pool)
 	now := func() time.Time { return time.Now().UTC() }
 
+	var encryptionSecret []byte
+	if rawKey := os.Getenv("CONTEXT_ENCRYPTION_KEY"); rawKey != "" {
+		encryptionSecret = []byte(rawKey)
+	} else {
+		pemBytes, err := os.ReadFile(keyPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		encryptionSecret = append([]byte("infra-guy-context-v1:"), pemBytes...)
+	}
+	sealer, err := crypto.NewSealer(encryptionSecret)
+	if err != nil {
+		log.Fatal(err)
+	}
+	contextRepo := postgres.NewContextRepo(pool, sealer)
+	contextSvc := &tfcontextapp.Service{Contexts: contextRepo, Now: now, NewID: newID}
+
+	tfInstaller := &terraform.Installer{CacheDir: filepath.Join(workDir, "bin")}
+	tfCatalog := &terraform.VersionCatalog{}
+
 	gh := &github.Client{
 		AppID:        appID,
 		Key:          appKey,
@@ -115,8 +138,9 @@ func main() {
 	w := &worker.Worker{
 		WorkerID: workerID(), Queue: postgres.WorkerQueue{Queue: queue},
 		Projects: projects, Runs: runs, Service: runSvc,
-		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{}},
+		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{Binary: tfInstaller}},
 		Tokens:          tokenSource,
+		Contexts:        contextSvc,
 		WorkDir:         workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
 	}
 	workerCtx, stopWorker := context.WithCancel(context.Background())
@@ -130,6 +154,8 @@ func main() {
 		Projects:      &projectapp.Service{Projects: projects, Now: now, NewID: newID},
 		Runs:          runSvc,
 		States:        &stateapp.Service{Projects: projects, States: states, Now: now},
+		Contexts:      contextSvc,
+		Versions:      tfCatalog,
 		Checkout:      git.Checkout{},
 		Lookup:        git.CommitLookup{},
 		Tokens:        tokenSource,

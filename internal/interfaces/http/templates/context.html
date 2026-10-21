@@ -1,0 +1,48 @@
+{{define "context"}}
+<nav class="crumb"><a href="/contexts">Contexts</a> / {{.Name}}</nav>
+<div class="panel">
+  <div class="headline">
+    <h1>{{.Name}}</h1>
+    <form method="post" action="/contexts/{{.ID}}/delete" class="inline">
+      <button type="submit" class="btn-danger">Delete context</button>
+    </form>
+  </div>
+  <table>
+    <thead>
+      <tr><th>Kind</th><th>Key / Path</th><th>Value</th><th></th></tr>
+    </thead>
+    <tbody>
+      {{range .Entries}}
+      <tr>
+        <td><span class="pill">{{.Kind}}</span></td>
+        <td><code>{{.Key}}</code></td>
+        <td>{{if .Secret}}••••••••{{else}}{{.Value}}{{end}}</td>
+        <td>
+          <form method="post" action="/contexts/{{$.ID}}/entries/{{.ID}}/delete" class="inline">
+            <button type="submit" class="btn-danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+<div class="panel">
+  <h2>Add or update entry</h2>
+  <form method="post" action="/contexts/{{.ID}}/entries">
+    <label>Kind</label>
+    <select name="kind" required>
+      <option value="plain_env">Environment variable (plain)</option>
+      <option value="secret_env">Environment variable (secret)</option>
+      <option value="secret_file">Mounted file in $HOME (secret)</option>
+    </select>
+    <label>Key or relative path in $HOME (e.g. TF_VAR_region or .kube/config)</label>
+    <input type="text" name="key" required>
+    <label>Value</label>
+    <textarea name="value" rows="4" required></textarea>
+    <div class="actions">
+      <button type="submit">Save entry</button>
+    </div>
+  </form>
+</div>
+{{end}}

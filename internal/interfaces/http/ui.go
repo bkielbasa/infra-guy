@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"errors"
 	"fmt"
@@ -15,9 +16,12 @@ import (
 	"infra-guy/internal/application/installation"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
+	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/state"
+	"infra-guy/internal/domain/tfcontext"
+	"infra-guy/internal/infrastructure/terraform"
 )
 
 //go:embed templates/*.html static/*
@@ -99,6 +103,12 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /runs/{id}/changes", u.changes)
 	mux.HandleFunc("POST /runs/{id}/confirm", u.confirm)
 	mux.HandleFunc("POST /runs/{id}/cancel", u.cancel)
+	mux.HandleFunc("GET /contexts", u.contexts)
+	mux.HandleFunc("POST /contexts", u.createContext)
+	mux.HandleFunc("GET /contexts/{id}", u.contextDetails)
+	mux.HandleFunc("POST /contexts/{id}/entries", u.upsertContextEntry)
+	mux.HandleFunc("POST /contexts/{id}/entries/{entryID}/delete", u.deleteContextEntry)
+	mux.HandleFunc("POST /contexts/{id}/delete", u.deleteContext)
 	mux.Handle("GET /static/", http.FileServer(http.FS(content)))
 }
 
@@ -189,7 +199,12 @@ func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	u.page(w, "New project", "new_project", map[string]any{"Repos": repos})
+	u.page(w, "New project", "new_project", map[string]any{
+		"Repos":          repos,
+		"Versions":       u.versions(r.Context()),
+		"DefaultVersion": project.DefaultTerraformVersion,
+		"Contexts":       u.contextChoices(r.Context(), tenantID, ""),
+	})
 }
 
 func (u *ui) create(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +248,16 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if err := u.cfg.Projects.SetTerraformVersion(r.Context(), p.Snapshot().ID, r.FormValue("terraform_version")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if u.cfg.Contexts != nil {
+		if err := u.cfg.Contexts.SetProjectContexts(r.Context(), tenantID, p.Snapshot().ID, parseContextIDs(r.Form["context_ids"])); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	http.Redirect(w, r, "/projects/"+string(p.Snapshot().ID), http.StatusSeeOther)
 }
@@ -298,6 +323,9 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 	u.page(w, ps.Name+" details", "details", map[string]any{
 		"ID": string(ps.ID), "Name": ps.Name, "AutoApprove": ps.AutoApprove,
 		"Branch": ps.DefaultBranch, "Workdir": ps.WorkingDirectory,
+		"TerraformVersion": ps.TerraformVersion,
+		"Versions":         u.versions(r.Context()),
+		"Contexts":         u.contextChoices(r.Context(), ps.TenantID, ps.ID),
 	})
 }
 
@@ -313,10 +341,17 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 	id := p.Snapshot().ID
 	if _, err := u.cfg.Projects.Update(r.Context(), projectapp.UpdateInput{
 		ID: id, Name: p.Snapshot().Name, Branch: r.FormValue("branch"), Workdir: r.FormValue("workdir"),
-		AutoApprove: r.FormValue("auto_approve") == "on",
+		TerraformVersion: r.FormValue("terraform_version"),
+		AutoApprove:      r.FormValue("auto_approve") == "on",
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if u.cfg.Contexts != nil {
+		if err := u.cfg.Contexts.SetProjectContexts(r.Context(), p.Snapshot().TenantID, id, parseContextIDs(r.Form["context_ids"])); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	http.Redirect(w, r, "/projects/"+string(id)+"/details", http.StatusSeeOther)
 }
@@ -556,9 +591,16 @@ func (u *ui) runView(r *http.Request, ps project.Snapshot, rs run.Snapshot, pane
 }
 
 func projectMeta(ps project.Snapshot, latest *run.Snapshot, hist []state.HistoryEntry) metaView {
-	m := metaView{Repo: ps.Repo.String(), Workdir: ps.WorkingDirectory, Branch: ps.DefaultBranch}
+	m := metaView{
+		TerraformVersion: ps.TerraformVersion,
+		Repo:             ps.Repo.String(),
+		Workdir:          ps.WorkingDirectory,
+		Branch:           ps.DefaultBranch,
+	}
 	if latest != nil {
-		m.TerraformVersion = latest.TerraformVersion
+		if latest.TerraformVersion != "" {
+			m.TerraformVersion = latest.TerraformVersion
+		}
 		m.SHA = shortSHA(latest.SHA)
 		if latest.Branch != "" {
 			m.Branch = latest.Branch
@@ -811,4 +853,242 @@ func fmtTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format("2006-01-02 15:04")
+}
+
+type contextChoice struct {
+	ID       string
+	Name     string
+	Attached bool
+}
+
+type contextRow struct {
+	ID         string
+	Name       string
+	EntryCount int
+	UpdatedAt  string
+}
+
+type contextEntryRow struct {
+	ID        string
+	Kind      string
+	Key       string
+	Value     string
+	Secret    bool
+	UpdatedAt string
+}
+
+func (u *ui) versions(ctx context.Context) []string {
+	if u.cfg.Versions != nil {
+		if list := u.cfg.Versions.List(ctx); len(list) > 0 {
+			return list
+		}
+	}
+	return terraform.FallbackVersions
+}
+
+func (u *ui) contextChoices(ctx context.Context, tenantID string, projectID project.ID) []contextChoice {
+	if u.cfg.Contexts == nil || tenantID == "" {
+		return nil
+	}
+	all, err := u.cfg.Contexts.List(ctx, tenantID)
+	if err != nil {
+		return nil
+	}
+	attached := make(map[tfcontext.ID]bool)
+	if projectID != "" {
+		if list, err := u.cfg.Contexts.ListByProject(ctx, projectID); err == nil {
+			for _, c := range list {
+				attached[c.Snapshot().ID] = true
+			}
+		}
+	}
+	out := make([]contextChoice, 0, len(all))
+	for _, c := range all {
+		cs := c.Snapshot()
+		out = append(out, contextChoice{
+			ID:       string(cs.ID),
+			Name:     cs.Name,
+			Attached: attached[cs.ID],
+		})
+	}
+	return out
+}
+
+func parseContextIDs(raw []string) []tfcontext.ID {
+	out := make([]tfcontext.ID, 0, len(raw))
+	for _, id := range raw {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			out = append(out, tfcontext.ID(id))
+		}
+	}
+	return out
+}
+
+func (u *ui) contexts(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	var rows []contextRow
+	if u.cfg.Contexts != nil {
+		items, err := u.cfg.Contexts.List(r.Context(), tenantID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		rows = make([]contextRow, 0, len(items))
+		for _, c := range items {
+			cs := c.Snapshot()
+			rows = append(rows, contextRow{
+				ID:         string(cs.ID),
+				Name:       cs.Name,
+				EntryCount: len(cs.Entries),
+				UpdatedAt:  fmtTime(cs.UpdatedAt),
+			})
+		}
+	}
+	u.page(w, "Contexts", "contexts", map[string]any{"Contexts": rows})
+}
+
+func (u *ui) createContext(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Contexts == nil {
+		http.Error(w, "contexts service not configured", http.StatusInternalServerError)
+		return
+	}
+	c, err := u.cfg.Contexts.Create(r.Context(), tenantID, r.FormValue("name"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/contexts/"+string(c.Snapshot().ID), http.StatusSeeOther)
+}
+
+func (u *ui) contextDetails(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Contexts == nil {
+		http.NotFound(w, r)
+		return
+	}
+	c, err := u.cfg.Contexts.Get(r.Context(), tenantID, tfcontext.ID(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if c == nil {
+		http.NotFound(w, r)
+		return
+	}
+	cs := c.Snapshot()
+	entries := make([]contextEntryRow, 0, len(cs.Entries))
+	for _, e := range cs.Entries {
+		val := e.Value
+		if e.Secret {
+			val = ""
+		}
+		entries = append(entries, contextEntryRow{
+			ID:        e.ID,
+			Kind:      string(e.Kind),
+			Key:       e.Key,
+			Value:     val,
+			Secret:    e.Secret,
+			UpdatedAt: fmtTime(e.UpdatedAt),
+		})
+	}
+	u.page(w, cs.Name, "context", map[string]any{
+		"ID":      string(cs.ID),
+		"Name":    cs.Name,
+		"Entries": entries,
+	})
+}
+
+func (u *ui) upsertContextEntry(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Contexts == nil {
+		http.Error(w, "contexts service not configured", http.StatusInternalServerError)
+		return
+	}
+	id := tfcontext.ID(r.PathValue("id"))
+	err := u.cfg.Contexts.UpsertEntry(
+		r.Context(), tenantID, id,
+		tfcontext.EntryKind(r.FormValue("kind")),
+		r.FormValue("key"),
+		r.FormValue("value"),
+	)
+	if err != nil {
+		if errors.Is(err, tfcontextapp.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/contexts/"+string(id), http.StatusSeeOther)
+}
+
+func (u *ui) deleteContextEntry(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Contexts == nil {
+		http.Error(w, "contexts service not configured", http.StatusInternalServerError)
+		return
+	}
+	id := tfcontext.ID(r.PathValue("id"))
+	err := u.cfg.Contexts.DeleteEntry(r.Context(), tenantID, id, r.PathValue("entryID"))
+	if err != nil {
+		if errors.Is(err, tfcontextapp.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/contexts/"+string(id), http.StatusSeeOther)
+}
+
+func (u *ui) deleteContext(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Contexts == nil {
+		http.Error(w, "contexts service not configured", http.StatusInternalServerError)
+		return
+	}
+	id := tfcontext.ID(r.PathValue("id"))
+	if err := u.cfg.Contexts.Delete(r.Context(), tenantID, id); err != nil {
+		if errors.Is(err, tfcontextapp.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/contexts", http.StatusSeeOther)
 }

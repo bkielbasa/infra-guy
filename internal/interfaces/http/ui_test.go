@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,12 @@ import (
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
+	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/state"
 	"infra-guy/internal/domain/tenant"
+	"infra-guy/internal/domain/tfcontext"
 	"infra-guy/internal/domain/user"
 )
 
@@ -912,4 +915,230 @@ func (f *uiGitHub) Slug(context.Context) (string, error) {
 		return "infra-guy", nil
 	}
 	return f.slug, nil
+}
+
+type stubVersions struct {
+	list []string
+}
+
+func (s stubVersions) List(context.Context) []string {
+	return s.list
+}
+
+type uiMemContexts struct {
+	items    map[tfcontext.ID]*tfcontext.Context
+	attached map[project.ID][]tfcontext.ID
+}
+
+func newUIMemContexts() *uiMemContexts {
+	return &uiMemContexts{
+		items:    map[tfcontext.ID]*tfcontext.Context{},
+		attached: map[project.ID][]tfcontext.ID{},
+	}
+}
+
+func (m *uiMemContexts) Create(_ context.Context, c *tfcontext.Context) error {
+	m.items[c.Snapshot().ID] = tfcontext.Restore(c.Snapshot())
+	return nil
+}
+
+func (m *uiMemContexts) Get(_ context.Context, id tfcontext.ID, decryptSecrets bool) (*tfcontext.Context, error) {
+	c, ok := m.items[id]
+	if !ok {
+		return nil, nil
+	}
+	s := c.Snapshot()
+	if !decryptSecrets {
+		for i := range s.Entries {
+			if s.Entries[i].Secret {
+				s.Entries[i].Value = ""
+			}
+		}
+	}
+	return tfcontext.Restore(s), nil
+}
+
+func (m *uiMemContexts) ListByTenant(_ context.Context, tenantID string) ([]*tfcontext.Context, error) {
+	var out []*tfcontext.Context
+	for _, c := range m.items {
+		if c.Snapshot().TenantID == tenantID {
+			cp, _ := m.Get(context.Background(), c.Snapshot().ID, false)
+			out = append(out, cp)
+		}
+	}
+	return out, nil
+}
+
+func (m *uiMemContexts) Delete(_ context.Context, id tfcontext.ID) error {
+	delete(m.items, id)
+	return nil
+}
+
+func (m *uiMemContexts) UpsertEntry(_ context.Context, contextID tfcontext.ID, entry tfcontext.Entry) error {
+	c := m.items[contextID]
+	s := c.Snapshot()
+	replaced := false
+	for i := range s.Entries {
+		if s.Entries[i].Kind == entry.Kind && s.Entries[i].Key == entry.Key {
+			s.Entries[i] = entry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.Entries = append(s.Entries, entry)
+	}
+	m.items[contextID] = tfcontext.Restore(s)
+	return nil
+}
+
+func (m *uiMemContexts) DeleteEntry(_ context.Context, contextID tfcontext.ID, entryID string) error {
+	c := m.items[contextID]
+	s := c.Snapshot()
+	var kept []tfcontext.Entry
+	for _, e := range s.Entries {
+		if e.ID != entryID {
+			kept = append(kept, e)
+		}
+	}
+	s.Entries = kept
+	m.items[contextID] = tfcontext.Restore(s)
+	return nil
+}
+
+func (m *uiMemContexts) SetProjectContexts(_ context.Context, projectID project.ID, contextIDs []tfcontext.ID) error {
+	m.attached[projectID] = append([]tfcontext.ID(nil), contextIDs...)
+	return nil
+}
+
+func (m *uiMemContexts) ListByProject(_ context.Context, projectID project.ID, decryptSecrets bool) ([]*tfcontext.Context, error) {
+	var out []*tfcontext.Context
+	for _, id := range m.attached[projectID] {
+		c, _ := m.Get(context.Background(), id, decryptSecrets)
+		if c != nil {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func TestProjectTerraformVersionAndContextsUI(t *testing.T) {
+	p := listProject(t)
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+	proj, runsSvc, st := uiServices(projects, runs, states)
+	ctxRepo := newUIMemContexts()
+	seq := 0
+	ctxSvc := &tfcontextapp.Service{
+		Contexts: ctxRepo,
+		Now:      time.Now,
+		NewID: func() string {
+			seq++
+			return fmt.Sprintf("ctx-%d", seq)
+		},
+	}
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+		repos: map[int64][]installation.Repo{100: {{ID: 101, Owner: "operator", Name: "my-infra"}}},
+	}
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st, Contexts: ctxSvc,
+		Versions:      stubVersions{list: []string{"1.10.5", "1.9.8"}},
+		Checkout:      &stubTip{sha: "abc1234"},
+		Lookup:        &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// 1. Create a context
+	rr := postUI(t, h, "/contexts", strings.NewReader("name=prod-secrets"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("create context %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// 1b. GET /contexts lists the created context
+	rr = getUI(t, h, "/contexts")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "prod-secrets") {
+		t.Fatalf("contexts list %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// 2. Add plain_env, secret_env, and secret_file entries
+	rr = postUI(t, h, "/contexts/ctx-1/entries", strings.NewReader("kind=plain_env&key=TF_VAR_env&value=prod"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("add plain_env %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = postUI(t, h, "/contexts/ctx-1/entries", strings.NewReader("kind=secret_env&key=AWS_SECRET_ACCESS_KEY&value=super-secret-value"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("add secret_env %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = postUI(t, h, "/contexts/ctx-1/entries", strings.NewReader("kind=secret_file&key=.kube/config&value=kube-secret-content"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("add secret_file %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// 3. GET /contexts/ctx-1 shows plain value, masks secrets
+	rr = getUI(t, h, "/contexts/ctx-1")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || !strings.Contains(body, "TF_VAR_env") || !strings.Contains(body, "prod") {
+		t.Fatalf("context page missing plain entry: %s", body)
+	}
+	if strings.Contains(body, "super-secret-value") || strings.Contains(body, "kube-secret-content") {
+		t.Fatalf("context page leaked secret plaintext: %s", body)
+	}
+
+	// 4. Create project with terraform_version=1.10.5 and context_ids=ctx-1
+	rr = postUI(t, h, "/projects", strings.NewReader("name=test&repo_id=101&branch=main&workdir=infra&terraform_version=1.10.5&context_ids=ctx-1"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("create project %d: %s", rr.Code, rr.Body.String())
+	}
+	created := projects.items["new-p"]
+	if created.Snapshot().TerraformVersion != "1.10.5" {
+		t.Fatalf("created version = %q, want 1.10.5", created.Snapshot().TerraformVersion)
+	}
+	attached, _ := ctxSvc.ListByProject(context.Background(), "new-p")
+	if len(attached) != 1 || attached[0].Snapshot().ID != "ctx-1" {
+		t.Fatalf("attached contexts = %#v", attached)
+	}
+
+	// 5. Update project details (terraform_version and context_ids)
+	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=infra&terraform_version=1.10.5&context_ids=ctx-1"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("update project %d: %s", rr.Code, rr.Body.String())
+	}
+	if projects.items["p1"].Snapshot().TerraformVersion != "1.10.5" {
+		t.Fatalf("updated p1 version = %q", projects.items["p1"].Snapshot().TerraformVersion)
+	}
+
+	// 6. Verify /projects/p1/details and /projects/p1 render version and contexts
+	rr = getUI(t, h, "/projects/p1/details")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "1.10.5") || !strings.Contains(rr.Body.String(), "prod-secrets") {
+		t.Fatalf("project details %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = getUI(t, h, "/projects/p1")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "1.10.5") {
+		t.Fatalf("project page meta version %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// 7. Delete entry and delete context
+	rr = postUI(t, h, "/contexts/ctx-1/entries/ctx-2/delete", nil)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("delete entry %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = postUI(t, h, "/contexts/ctx-1/delete", nil)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("delete context %d: %s", rr.Code, rr.Body.String())
+	}
+	if got, _ := ctxSvc.Get(context.Background(), "ten", "ctx-1"); got != nil {
+		t.Fatalf("expected ctx-1 deleted, got %v", got)
+	}
 }

@@ -37,7 +37,21 @@ a:hover { text-decoration: underline; }
 .topbar {
   display: flex;
   align-items: center;
+  gap: 24px;
   margin-bottom: 28px;
+}
+
+.topnav {
+  display: flex;
+  gap: 16px;
+}
+.topnav a {
+  color: var(--muted);
+  font-weight: 500;
+}
+.topnav a:hover {
+  color: var(--text);
+  text-decoration: none;
 }
 
 .brand {
@@ -174,7 +188,7 @@ td:last-child, th:last-child { padding-right: 0; text-align: right; }
 .group .sub { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
 
 label { display: block; margin: 14px 0 6px; font-weight: 600; color: var(--text); }
-input[type="text"], input[type="password"], input[type="url"] {
+input[type="text"], input[type="password"], input[type="url"], select, textarea {
   width: 100%;
   max-width: 560px;
   padding: 10px 12px;
@@ -184,7 +198,10 @@ input[type="text"], input[type="password"], input[type="url"] {
   color: var(--text);
   font: inherit;
 }
-input:focus {
+textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+input:focus, select:focus, textarea:focus {
   outline: 2px solid rgba(139, 124, 247, 0.55);
   outline-offset: 1px;
   border-color: var(--accent);
