@@ -84,6 +84,9 @@ type runPolicyEvalView struct {
 
 type historyView struct {
 	ID, StatusLabel, StatusClass, ApprovedBy, QueuedAt string
+	ApprovedByList                                     string
+	ApprovalCount                                      int
+	CanApprove                                         bool
 	Poll, Terminal, Unconfirmed, Confirmed, Cancelled  bool
 	Queued                                             bool
 	Apply, Plan, Init                                  *stepView
@@ -113,12 +116,14 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /projects/{id}/force-unlock", u.forceUnlock)
 	mux.HandleFunc("POST /projects/{id}/delete", u.delete)
 	mux.HandleFunc("GET /projects/{id}/runs/{runID}", u.runPage)
+	mux.HandleFunc("POST /projects/{id}/runs/{runID}/approve", u.approve)
 	mux.HandleFunc("POST /projects/{id}/runs/{runID}/confirm", u.confirm)
 	mux.HandleFunc("POST /projects/{id}/runs/{runID}/cancel", u.cancel)
 	mux.HandleFunc("GET /runs/{id}", u.runPage)
 	mux.HandleFunc("GET /runs/{id}/headline", u.runHeadline)
 	mux.HandleFunc("GET /runs/{id}/history", u.history)
 	mux.HandleFunc("GET /runs/{id}/changes", u.changes)
+	mux.HandleFunc("POST /runs/{id}/approve", u.approve)
 	mux.HandleFunc("POST /runs/{id}/confirm", u.confirm)
 	mux.HandleFunc("POST /runs/{id}/cancel", u.cancel)
 	mux.HandleFunc("GET /contexts", u.contexts)
@@ -521,7 +526,7 @@ func (u *ui) runPage(w http.ResponseWriter, r *http.Request) {
 	ps := p.Snapshot()
 	evalView := u.evaluateRunPolicy(r, ps, rs)
 	var panel bytes.Buffer
-	if err := pages.ExecuteTemplate(&panel, "history", historyFrom(rs, evalView)); err != nil {
+	if err := pages.ExecuteTemplate(&panel, "history", historyFrom(rs, evalView, u.actor(r))); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -547,7 +552,7 @@ func (u *ui) history(w http.ResponseWriter, r *http.Request) {
 	rs := rn.Snapshot()
 	ps := p.Snapshot()
 	evalView := u.evaluateRunPolicy(r, ps, rs)
-	u.fragment(w, "history", historyFrom(rs, evalView))
+	u.fragment(w, "history", historyFrom(rs, evalView, u.actor(r)))
 }
 
 func (u *ui) changes(w http.ResponseWriter, r *http.Request) {
@@ -559,6 +564,29 @@ func (u *ui) changes(w http.ResponseWriter, r *http.Request) {
 	u.fragment(w, "changes", map[string]any{
 		"Delta": template.HTML(delta(s)), "PlanText": s.PlanText,
 	})
+}
+
+func (u *ui) approve(w http.ResponseWriter, r *http.Request) {
+	rn, _, err := u.loadRun(w, r)
+	if err != nil {
+		return
+	}
+	id := rn.Snapshot().ID
+	info := u.userInfo(r)
+	if err := u.cfg.Runs.Approve(r.Context(), id, run.Approval{
+		UserID: info.ID,
+		Login:  firstNonEmpty(info.Login, u.actor(r)),
+		Role:   info.Role,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", "/runs/"+string(id))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/runs/"+string(id), http.StatusSeeOther)
 }
 
 func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
@@ -573,7 +601,7 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "policy service not configured", http.StatusInternalServerError)
 			return
 		}
-		res, err := u.cfg.Policies.EvaluateForRun(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps))
+		res, err := u.cfg.Policies.EvaluateForRun(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
 		if err != nil {
 			http.Error(w, "Policy evaluation failed: "+err.Error(), http.StatusForbidden)
 			return
@@ -826,14 +854,27 @@ func toRunRow(s run.Snapshot) runRow {
 	}
 }
 
-func historyFrom(s run.Snapshot, evalView *runPolicyEvalView) historyView {
+func historyFrom(s run.Snapshot, evalView *runPolicyEvalView, currentLogin string) historyView {
+	approvers := make([]string, 0, len(s.Approvals))
+	alreadyApproved := false
+	for _, a := range s.Approvals {
+		approvers = append(approvers, a.Login)
+		if currentLogin != "" && strings.EqualFold(a.Login, currentLogin) {
+			alreadyApproved = true
+		}
+	}
 	h := historyView{
 		ID: string(s.ID), Poll: !s.Status.Terminal(), StatusLabel: s.Status.Label(), StatusClass: statusClass(s.Status),
 		Terminal: s.Status.Terminal(), Unconfirmed: s.Status == run.StatusNeedsApproval,
-		Confirmed:  s.ApprovedBy != "" && s.Status != run.StatusCancelled,
-		Cancelled:  s.Status == run.StatusCancelled,
-		ApprovedBy: s.ApprovedBy, Queued: true, QueuedAt: fmtTime(s.CreatedAt),
-		PolicyEval: evalView,
+		Confirmed:      s.ApprovedBy != "" && s.Status != run.StatusCancelled,
+		Cancelled:      s.Status == run.StatusCancelled,
+		ApprovedBy:     s.ApprovedBy,
+		ApprovedByList: strings.Join(approvers, ", "),
+		ApprovalCount:  len(s.Approvals),
+		CanApprove:     s.Status == run.StatusNeedsApproval && !alreadyApproved,
+		Queued:         true,
+		QueuedAt:       fmtTime(s.CreatedAt),
+		PolicyEval:     evalView,
 	}
 	for _, st := range s.Steps {
 		sv := &stepView{Open: st.Status == run.StepRunning, Logs: st.Logs}
@@ -1261,6 +1302,13 @@ const defaultSampleInputJSON = `{
       }
     ]
   },
+  "approvals": [
+    {
+      "id": "usr-1",
+      "login": "alice",
+      "role": "admin"
+    }
+  ],
   "current_user": {
     "id": "usr-1",
     "login": "alice",
@@ -1328,12 +1376,29 @@ func projectInfoFrom(ps project.Snapshot) policyapp.ProjectInfo {
 	}
 }
 
+func approvalsInfoFrom(approvals []run.Approval) []policyapp.ApprovalInfo {
+	out := make([]policyapp.ApprovalInfo, 0, len(approvals))
+	for _, a := range approvals {
+		var ts string
+		if !a.ApprovedAt.IsZero() {
+			ts = a.ApprovedAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, policyapp.ApprovalInfo{
+			ID:         a.UserID,
+			Login:      a.Login,
+			Role:       a.Role,
+			ApprovedAt: ts,
+		})
+	}
+	return out
+}
+
 func (u *ui) buildPolicyInputJSON(r *http.Request, ps project.Snapshot, rs run.Snapshot) string {
 	svc := u.cfg.Policies
 	if svc == nil {
 		svc = &policyapp.Service{}
 	}
-	_, pretty, err := svc.BuildInput(rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps))
+	_, pretty, err := svc.BuildInput(rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
 	if err != nil {
 		return "{}"
 	}
@@ -1349,7 +1414,7 @@ func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snap
 	if polName == "" {
 		polName = ps.ApprovalPolicyID
 	}
-	res, err := u.cfg.Policies.EvaluateForRun(r.Context(), ps.TenantID, polID, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps))
+	res, err := u.cfg.Policies.EvaluateForRun(r.Context(), ps.TenantID, polID, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
 	if err != nil {
 		return &runPolicyEvalView{
 			PolicyID:   ps.ApprovalPolicyID,

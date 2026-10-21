@@ -15,7 +15,9 @@
     {{if .Cancelled}}
     <li>Cancelled by {{.ApprovedBy}}</li>
     {{else if .Confirmed}}
-    <li>Confirmed by {{.ApprovedBy}}</li>
+    <li>Confirmed by {{.ApprovedBy}}{{if .ApprovedByList}} (approved by {{.ApprovedByList}}){{end}}</li>
+    {{else if .ApprovedByList}}
+    <li>Approved by {{.ApprovedByList}} ({{.ApprovalCount}})</li>
     {{end}}
     {{if .Plan}}
     <li>
@@ -39,6 +41,13 @@
   </ol>
   {{if .Unconfirmed}}
   <div class="actions">
+    {{if .CanApprove}}
+    <form method="post" action="/runs/{{.ID}}/approve" class="inline">
+      <button type="submit">Approve{{if .ApprovalCount}} ({{.ApprovalCount}}){{end}}</button>
+    </form>
+    {{else}}
+    <button type="button" disabled>Approved ({{.ApprovalCount}})</button>
+    {{end}}
     {{if and .PolicyEval (not .PolicyEval.Allowed)}}
     <button type="button" class="btn-trigger" disabled>Approval blocked by policy</button>
     {{else}}

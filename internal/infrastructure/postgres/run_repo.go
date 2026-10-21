@@ -57,6 +57,9 @@ func (r *RunRepo) InsertIfAbsent(ctx context.Context, in *run.Run) (bool, error)
 		if err := upsertSteps(ctx, tx, s); err != nil {
 			return false, err
 		}
+		if err := upsertApprovals(ctx, tx, s); err != nil {
+			return false, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
@@ -95,6 +98,9 @@ func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 	if err := upsertSteps(ctx, tx, s); err != nil {
 		return err
 	}
+	if err := upsertApprovals(ctx, tx, s); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -111,6 +117,11 @@ func (r *RunRepo) Get(ctx context.Context, id run.ID) (*run.Run, error) {
 		return nil, err
 	}
 	s.Steps = steps
+	approvals, err := r.loadApprovals(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s.Approvals = approvals
 	return run.Restore(s), nil
 }
 
@@ -139,6 +150,11 @@ func (r *RunRepo) ListByProject(ctx context.Context, projectID run.ProjectID) ([
 			return nil, err
 		}
 		s.Steps = steps
+		approvals, err := r.loadApprovals(ctx, s.ID)
+		if err != nil {
+			return nil, err
+		}
+		s.Approvals = approvals
 		rebuilt = append(rebuilt, run.Restore(s))
 	}
 	return rebuilt, nil
@@ -179,6 +195,44 @@ func upsertSteps(ctx context.Context, tx pgx.Tx, s run.Snapshot) error {
 				started_at = EXCLUDED.started_at,
 				finished_at = EXCLUDED.finished_at`,
 			s.ID, st.Name, st.Position, st.Status, st.Logs, st.ExitCode, st.StartedAt, st.FinishedAt,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *RunRepo) loadApprovals(ctx context.Context, id run.ID) ([]run.Approval, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT user_id, user_login, user_role, approved_at
+		FROM run_approvals WHERE run_id = $1 ORDER BY approved_at ASC, user_login ASC`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var approvals []run.Approval
+	for rows.Next() {
+		var a run.Approval
+		var approvedAt time.Time
+		if err := rows.Scan(&a.UserID, &a.Login, &a.Role, &approvedAt); err != nil {
+			return nil, err
+		}
+		a.ApprovedAt = utcTime(approvedAt)
+		approvals = append(approvals, a)
+	}
+	return approvals, rows.Err()
+}
+
+func upsertApprovals(ctx context.Context, tx pgx.Tx, s run.Snapshot) error {
+	for _, a := range s.Approvals {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO run_approvals (run_id, user_id, user_login, user_role, approved_at)
+			VALUES ($1,$2,$3,$4,$5)
+			ON CONFLICT (run_id, user_login) DO UPDATE SET
+				user_id = EXCLUDED.user_id,
+				user_role = EXCLUDED.user_role,
+				approved_at = EXCLUDED.approved_at`,
+			s.ID, a.UserID, a.Login, a.Role, a.ApprovedAt,
 		); err != nil {
 			return err
 		}

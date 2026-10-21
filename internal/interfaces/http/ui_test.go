@@ -1431,7 +1431,74 @@ deny contains "Cannot destroy S3 buckets" if {
 		t.Fatalf("expected r-allow ApprovedBy=operator, got %q", runs.items["r-allow"].Snapshot().ApprovedBy)
 	}
 
-	// 9. Detach policy from project and delete policy
+	// 9. Multi-person approval policy (requires > 2 approvals)
+	quorumRego := `package infraguy.approval
+import rego.v1
+default allow := false
+allow if {
+	count(deny) == 0
+}
+deny contains "Requires approval from more than 2 people" if {
+	count(input.approvals) <= 2
+}
+`
+	rrCreateQuorum := postUI(t, h, "/policies", strings.NewReader(url.Values{
+		"name": {"quorum-3"},
+		"rego": {quorumRego},
+	}.Encode()))
+	if rrCreateQuorum.Code != http.StatusSeeOther || rrCreateQuorum.Header().Get("Location") != "/policies/pol-3" {
+		t.Fatalf("POST /policies (quorum-3) = %d: %s", rrCreateQuorum.Code, rrCreateQuorum.Body.String())
+	}
+	rrAssignQuorum := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id=pol-3"))
+	if rrAssignQuorum.Code != http.StatusSeeOther {
+		t.Fatalf("assign quorum-3 = %d", rrAssignQuorum.Code)
+	}
+
+	quorumSnap := needsApprovalSnap("r-quorum")
+	quorumSnap.PlanJSON = []byte(`{"format_version":"1.2"}`)
+	runs.items["r-quorum"] = run.Restore(quorumSnap)
+
+	// 0 approvals -> Denied
+	if rr0 := postUI(t, h, "/runs/r-quorum/confirm", nil); rr0.Code != http.StatusForbidden || !strings.Contains(rr0.Body.String(), "Requires approval from more than 2 people") {
+		t.Fatalf("expected 403 Forbidden with 0 approvals, got %d: %s", rr0.Code, rr0.Body.String())
+	}
+
+	// 1st approval (operator via HTTP POST /runs/r-quorum/approve)
+	if rrApp1 := postUI(t, h, "/runs/r-quorum/approve", nil); rrApp1.Code != http.StatusSeeOther {
+		t.Fatalf("POST /runs/r-quorum/approve = %d: %s", rrApp1.Code, rrApp1.Body.String())
+	}
+	// Duplicate approval by same user is idempotent
+	if rrAppDup := postUI(t, h, "/runs/r-quorum/approve", nil); rrAppDup.Code != http.StatusSeeOther {
+		t.Fatalf("duplicate approve = %d", rrAppDup.Code)
+	}
+	if len(runs.items["r-quorum"].Snapshot().Approvals) != 1 {
+		t.Fatalf("expected 1 approval after duplicate, got %d", len(runs.items["r-quorum"].Snapshot().Approvals))
+	}
+	if rr1 := postUI(t, h, "/runs/r-quorum/confirm", nil); rr1.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden with 1 approval, got %d", rr1.Code)
+	}
+
+	// 2nd approval (bob) -> still <= 2 approvals, so Confirm is still blocked
+	if err := runsSvc.Approve(context.Background(), "r-quorum", run.Approval{UserID: "u-bob", Login: "bob", Role: "member"}); err != nil {
+		t.Fatalf("approve bob: %v", err)
+	}
+	if rr2 := postUI(t, h, "/runs/r-quorum/confirm", nil); rr2.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden with 2 approvals, got %d", rr2.Code)
+	}
+
+	// 3rd approval (charlie) -> > 2 approvals, now Allowed and Confirm succeeds!
+	if err := runsSvc.Approve(context.Background(), "r-quorum", run.Approval{UserID: "u-charlie", Login: "charlie", Role: "member"}); err != nil {
+		t.Fatalf("approve charlie: %v", err)
+	}
+	rrQuorumPage := getUI(t, h, "/runs/r-quorum")
+	if rrQuorumPage.Code != http.StatusOK || !strings.Contains(rrQuorumPage.Body.String(), "Allowed") || !strings.Contains(rrQuorumPage.Body.String(), "Approved by operator, bob, charlie (3)") {
+		t.Fatalf("expected Allowed and 3 approvals on /runs/r-quorum, got %d: %s", rrQuorumPage.Code, rrQuorumPage.Body.String())
+	}
+	if rr3 := postUI(t, h, "/runs/r-quorum/confirm", nil); rr3.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 See Other with 3 approvals, got %d: %s", rr3.Code, rr3.Body.String())
+	}
+
+	// 10. Detach policy from project and delete policies
 	rrDetach := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id="))
 	if rrDetach.Code != http.StatusSeeOther || projects.items["p1"].Snapshot().ApprovalPolicyID != "" {
 		t.Fatalf("detach policy = %d, ApprovalPolicyID=%q", rrDetach.Code, projects.items["p1"].Snapshot().ApprovalPolicyID)

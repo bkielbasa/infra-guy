@@ -47,6 +47,13 @@ type UserInfo struct {
 	Role  string `json:"role"`
 }
 
+type ApprovalInfo struct {
+	ID         string `json:"id"`
+	Login      string `json:"login"`
+	Role       string `json:"role"`
+	ApprovedAt string `json:"approved_at,omitempty"`
+}
+
 type ProjectInfo struct {
 	ID               string `json:"id"`
 	Name             string `json:"name"`
@@ -174,7 +181,7 @@ func (s *Service) TestRego(ctx context.Context, regoCode string, rawJSON []byte)
 	return s.engine().Evaluate(ctx, regoCode, inputMap)
 }
 
-func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo) (map[string]any, string, error) {
+func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo, approvals ...[]ApprovalInfo) (map[string]any, string, error) {
 	var planObj any = map[string]any{}
 	trimmed := bytes.TrimSpace(planJSON)
 	if len(trimmed) > 0 {
@@ -200,9 +207,26 @@ func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo) (map[st
 		"terraform_version": p.TerraformVersion,
 		"auto_approve":      p.AutoApprove,
 	}
+	var flatApprovals []ApprovalInfo
+	for _, list := range approvals {
+		flatApprovals = append(flatApprovals, list...)
+	}
+	approvalMaps := make([]map[string]any, 0, len(flatApprovals))
+	for _, a := range flatApprovals {
+		entry := map[string]any{
+			"id":    a.ID,
+			"login": a.Login,
+			"role":  a.Role,
+		}
+		if a.ApprovedAt != "" {
+			entry["approved_at"] = a.ApprovedAt
+		}
+		approvalMaps = append(approvalMaps, entry)
+	}
 
 	displayPayload := map[string]any{
 		"plan":         planObj,
+		"approvals":    approvalMaps,
 		"current_user": userMap,
 		"project":      projectMap,
 	}
@@ -213,16 +237,19 @@ func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo) (map[st
 
 	evalInput := map[string]any{
 		"plan":         planObj,
+		"approvals":    approvalMaps,
+		"reviews":      map[string]any{"approvals": approvalMaps},
 		"current_user": userMap,
 		"project":      projectMap,
 		"input": map[string]any{
-			"plan": planObj,
+			"plan":      planObj,
+			"approvals": approvalMaps,
 		},
 	}
 	return evalInput, string(prettyBytes), nil
 }
 
-func (s *Service) EvaluateApproval(ctx context.Context, tenantID string, policyID policy.ID, planJSON []byte, u UserInfo, p ProjectInfo) (*ApprovalDecision, error) {
+func (s *Service) EvaluateApproval(ctx context.Context, tenantID string, policyID policy.ID, planJSON []byte, u UserInfo, p ProjectInfo, approvals ...[]ApprovalInfo) (*ApprovalDecision, error) {
 	if strings.TrimSpace(string(policyID)) == "" {
 		return &ApprovalDecision{
 			Allowed: true,
@@ -233,7 +260,7 @@ func (s *Service) EvaluateApproval(ctx context.Context, tenantID string, policyI
 	if err != nil {
 		return nil, err
 	}
-	inputMap, _, err := s.BuildInput(planJSON, u, p)
+	inputMap, _, err := s.BuildInput(planJSON, u, p, approvals...)
 	if err != nil {
 		return nil, err
 	}
@@ -249,8 +276,8 @@ func (s *Service) EvaluateApproval(ctx context.Context, tenantID string, policyI
 	}, nil
 }
 
-func (s *Service) EvaluateForRun(ctx context.Context, tenantID string, policyID policy.ID, planJSON []byte, u UserInfo, p ProjectInfo) (*RunPolicyDecision, error) {
-	return s.EvaluateApproval(ctx, tenantID, policyID, planJSON, u, p)
+func (s *Service) EvaluateForRun(ctx context.Context, tenantID string, policyID policy.ID, planJSON []byte, u UserInfo, p ProjectInfo, approvals ...[]ApprovalInfo) (*RunPolicyDecision, error) {
+	return s.EvaluateApproval(ctx, tenantID, policyID, planJSON, u, p, approvals...)
 }
 
 func ensurePlanAliases(inputMap map[string]any) {

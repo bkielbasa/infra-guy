@@ -3,6 +3,7 @@ package run
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -119,6 +120,13 @@ type OpenInput struct {
 	Now         time.Time
 }
 
+type Approval struct {
+	UserID     string
+	Login      string
+	Role       string
+	ApprovedAt time.Time
+}
+
 type Snapshot struct {
 	ID               ID
 	ProjectID        ProjectID
@@ -144,6 +152,7 @@ type Snapshot struct {
 	Error            string
 	ApprovedBy       string
 	ApprovedAt       *time.Time
+	Approvals        []Approval
 	CreatedAt        time.Time
 	StartedAt        *time.Time
 	FinishedAt       *time.Time
@@ -173,6 +182,7 @@ func Open(in OpenInput) (*Run, error) {
 
 func Restore(s Snapshot) *Run {
 	s.Steps = append([]Step(nil), s.Steps...)
+	s.Approvals = append([]Approval(nil), s.Approvals...)
 	s.PlanFile = append([]byte(nil), s.PlanFile...)
 	s.PlanJSON = append([]byte(nil), s.PlanJSON...)
 	return &Run{s: s}
@@ -181,6 +191,7 @@ func Restore(s Snapshot) *Run {
 func (r *Run) Snapshot() Snapshot {
 	out := r.s
 	out.Steps = append([]Step(nil), r.s.Steps...)
+	out.Approvals = append([]Approval(nil), r.s.Approvals...)
 	out.PlanFile = append([]byte(nil), r.s.PlanFile...)
 	out.PlanJSON = append([]byte(nil), r.s.PlanJSON...)
 	return out
@@ -270,6 +281,36 @@ func (r *Run) CompleteStep(name StepName, result StepResult, now time.Time) (Dec
 	default:
 		return Decision{}, fmt.Errorf("unknown step %s", name)
 	}
+}
+
+func (r *Run) Approve(a Approval, now time.Time) error {
+	if r.s.Status != StatusNeedsApproval {
+		return ErrNotUnconfirmed
+	}
+	login := strings.TrimSpace(a.Login)
+	userID := strings.TrimSpace(a.UserID)
+	if login == "" && userID == "" {
+		return fmt.Errorf("approver login or id required")
+	}
+	if login == "" {
+		login = userID
+	}
+	for _, existing := range r.s.Approvals {
+		if strings.EqualFold(existing.Login, login) || (userID != "" && existing.UserID == userID) {
+			return nil
+		}
+	}
+	ts := a.ApprovedAt
+	if ts.IsZero() {
+		ts = now
+	}
+	r.s.Approvals = append(r.s.Approvals, Approval{
+		UserID:     userID,
+		Login:      login,
+		Role:       strings.TrimSpace(a.Role),
+		ApprovedAt: ts.UTC(),
+	})
+	return nil
 }
 
 func (r *Run) Confirm(actor string, now time.Time) (Decision, error) {

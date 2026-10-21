@@ -112,14 +112,15 @@ func (e *Evaluator) Evaluate(ctx context.Context, code string, rawInput map[stri
 }
 
 func normalizeInput(rawInput map[string]any) map[string]any {
-	inputMap := make(map[string]any, len(rawInput)+2)
+	inputMap := make(map[string]any, len(rawInput)+3)
 	for k, v := range rawInput {
 		inputMap[k] = v
 	}
 
 	planVal, hasPlan := inputMap["plan"]
+	approvalsVal, hasApprovals := inputMap["approvals"]
 	if nested, ok := inputMap["input"].(map[string]any); ok {
-		nestedCopy := make(map[string]any, len(nested)+1)
+		nestedCopy := make(map[string]any, len(nested)+2)
 		for k, v := range nested {
 			nestedCopy[k] = v
 		}
@@ -130,13 +131,35 @@ func normalizeInput(rawInput map[string]any) map[string]any {
 		} else if _, exists := nestedCopy["plan"]; !exists {
 			nestedCopy["plan"] = planVal
 		}
+		if !hasApprovals {
+			if nestedApprovals, exists := nestedCopy["approvals"]; exists {
+				approvalsVal = nestedApprovals
+				hasApprovals = true
+			}
+		}
+		if !hasApprovals || approvalsVal == nil {
+			approvalsVal = []any{}
+		}
+		inputMap["approvals"] = approvalsVal
+		nestedCopy["approvals"] = approvalsVal
 		inputMap["input"] = nestedCopy
 	} else if hasPlan {
-		inputMap["input"] = map[string]any{"plan": planVal}
+		if !hasApprovals || approvalsVal == nil {
+			approvalsVal = []any{}
+		}
+		inputMap["approvals"] = approvalsVal
+		inputMap["input"] = map[string]any{"plan": planVal, "approvals": approvalsVal}
 	} else {
 		emptyPlan := map[string]any{}
+		if !hasApprovals || approvalsVal == nil {
+			approvalsVal = []any{}
+		}
 		inputMap["plan"] = emptyPlan
-		inputMap["input"] = map[string]any{"plan": emptyPlan}
+		inputMap["approvals"] = approvalsVal
+		inputMap["input"] = map[string]any{"plan": emptyPlan, "approvals": approvalsVal}
+	}
+	if _, hasReviews := inputMap["reviews"]; !hasReviews {
+		inputMap["reviews"] = map[string]any{"approvals": inputMap["approvals"]}
 	}
 
 	return inputMap

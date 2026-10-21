@@ -88,6 +88,21 @@ func (s *Service) enqueue(ctx context.Context, id run.ID, step run.StepName) err
 	return err
 }
 
+func (s *Service) Approve(ctx context.Context, id run.ID, a run.Approval) error {
+	r, err := s.Runs.Get(ctx, id)
+	if err != nil || r == nil {
+		return fmt.Errorf("run %s not found", id)
+	}
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	if err := r.Approve(a, now); err != nil {
+		return err
+	}
+	return s.Runs.Save(ctx, r)
+}
+
 func (s *Service) Confirm(ctx context.Context, id run.ID, actor string) error {
 	r, err := s.Runs.Get(ctx, id)
 	if err != nil || r == nil {
