@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -14,9 +15,11 @@ import (
 	"time"
 
 	"infra-guy/internal/application/installation"
+	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
+	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/state"
@@ -71,11 +74,20 @@ type stepView struct {
 	Logs string
 }
 
+type runPolicyEvalView struct {
+	PolicyID   string
+	PolicyName string
+	Allowed    bool
+	Deny       []string
+	Error      string
+}
+
 type historyView struct {
 	ID, StatusLabel, StatusClass, ApprovedBy, QueuedAt string
 	Poll, Terminal, Unconfirmed, Confirmed, Cancelled  bool
 	Queued                                             bool
 	Apply, Plan, Init                                  *stepView
+	PolicyEval                                         *runPolicyEvalView
 }
 
 func (u *ui) routes(mux *http.ServeMux) {
@@ -84,6 +96,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /github/setup", u.githubSetup)
 	mux.HandleFunc("POST /github/tenant", u.githubTenant)
 	mux.HandleFunc("GET /{$}", u.list)
+	mux.HandleFunc("GET /projects", u.list)
 	mux.HandleFunc("GET /projects/new", u.newProject)
 	mux.HandleFunc("POST /projects", u.create)
 	mux.HandleFunc("GET /projects/{id}", u.project)
@@ -93,10 +106,14 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /projects/{id}/tabs/state", u.tabState)
 	mux.HandleFunc("GET /projects/{id}/details", u.details)
 	mux.HandleFunc("POST /projects/{id}", u.update)
+	mux.HandleFunc("POST /projects/{id}/policy", u.updateProjectPolicy)
 	mux.HandleFunc("POST /projects/{id}/lock", u.lock)
 	mux.HandleFunc("POST /projects/{id}/trigger", u.trigger)
 	mux.HandleFunc("POST /projects/{id}/force-unlock", u.forceUnlock)
 	mux.HandleFunc("POST /projects/{id}/delete", u.delete)
+	mux.HandleFunc("GET /projects/{id}/runs/{runID}", u.runPage)
+	mux.HandleFunc("POST /projects/{id}/runs/{runID}/confirm", u.confirm)
+	mux.HandleFunc("POST /projects/{id}/runs/{runID}/cancel", u.cancel)
 	mux.HandleFunc("GET /runs/{id}", u.runPage)
 	mux.HandleFunc("GET /runs/{id}/headline", u.runHeadline)
 	mux.HandleFunc("GET /runs/{id}/history", u.history)
@@ -109,6 +126,12 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /contexts/{id}/entries", u.upsertContextEntry)
 	mux.HandleFunc("POST /contexts/{id}/entries/{entryID}/delete", u.deleteContextEntry)
 	mux.HandleFunc("POST /contexts/{id}/delete", u.deleteContext)
+	mux.HandleFunc("GET /policies", u.policies)
+	mux.HandleFunc("POST /policies", u.createPolicy)
+	mux.HandleFunc("POST /policies/test", u.testPolicy)
+	mux.HandleFunc("GET /policies/{id}", u.policyDetails)
+	mux.HandleFunc("POST /policies/{id}", u.updatePolicy)
+	mux.HandleFunc("POST /policies/{id}/delete", u.deletePolicy)
 	mux.Handle("GET /static/", http.FileServer(http.FS(content)))
 }
 
@@ -173,7 +196,10 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, row)
 	}
-	u.page(w, "Projects", "projects", map[string]any{"Projects": rows})
+	u.page(w, "Projects", "projects", map[string]any{
+		"Projects": rows,
+		"Policies": u.policyChoices(r.Context(), tenantID, ""),
+	})
 }
 
 func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +230,7 @@ func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
 		"Versions":       u.versions(r.Context()),
 		"DefaultVersion": project.DefaultTerraformVersion,
 		"Contexts":       u.contextChoices(r.Context(), tenantID, ""),
+		"Policies":       u.policyChoices(r.Context(), tenantID, ""),
 	})
 }
 
@@ -216,6 +243,13 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 	if !ok || tenantID == "" {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
+	}
+	policyID := strings.TrimSpace(r.FormValue("approval_policy_id"))
+	if policyID != "" && u.cfg.Policies != nil {
+		if _, err := u.cfg.Policies.Get(r.Context(), tenantID, policy.ID(policyID)); err != nil {
+			http.Error(w, "invalid approval_policy_id", http.StatusBadRequest)
+			return
+		}
 	}
 	rawRepoID := r.FormValue("repo_id")
 	repoID, err := strconv.ParseInt(rawRepoID, 10, 64)
@@ -252,6 +286,12 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 	if err := u.cfg.Projects.SetTerraformVersion(r.Context(), p.Snapshot().ID, r.FormValue("terraform_version")); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if policyID != "" {
+		if err := u.cfg.Projects.UpdateApprovalPolicy(r.Context(), p.Snapshot().ID, policyID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if u.cfg.Contexts != nil {
 		if err := u.cfg.Contexts.SetProjectContexts(r.Context(), tenantID, p.Snapshot().ID, parseContextIDs(r.Form["context_ids"])); err != nil {
@@ -324,8 +364,10 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 		"ID": string(ps.ID), "Name": ps.Name, "AutoApprove": ps.AutoApprove,
 		"Branch": ps.DefaultBranch, "Workdir": ps.WorkingDirectory,
 		"TerraformVersion": ps.TerraformVersion,
+		"ApprovalPolicyID": ps.ApprovalPolicyID,
 		"Versions":         u.versions(r.Context()),
 		"Contexts":         u.contextChoices(r.Context(), ps.TenantID, ps.ID),
+		"Policies":         u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
 	})
 }
 
@@ -338,22 +380,59 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	id := p.Snapshot().ID
+	ps := p.Snapshot()
+	id := ps.ID
+	policyID := strings.TrimSpace(r.FormValue("approval_policy_id"))
+	if policyID != "" && u.cfg.Policies != nil {
+		if _, err := u.cfg.Policies.Get(r.Context(), ps.TenantID, policy.ID(policyID)); err != nil {
+			http.Error(w, "invalid approval_policy_id", http.StatusBadRequest)
+			return
+		}
+	}
 	if _, err := u.cfg.Projects.Update(r.Context(), projectapp.UpdateInput{
-		ID: id, Name: p.Snapshot().Name, Branch: r.FormValue("branch"), Workdir: r.FormValue("workdir"),
+		ID: id, Name: ps.Name, Branch: r.FormValue("branch"), Workdir: r.FormValue("workdir"),
 		TerraformVersion: r.FormValue("terraform_version"),
 		AutoApprove:      r.FormValue("auto_approve") == "on",
+		ApprovalPolicyID: policyID,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := u.cfg.Projects.UpdateApprovalPolicy(r.Context(), id, policyID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if u.cfg.Contexts != nil {
-		if err := u.cfg.Contexts.SetProjectContexts(r.Context(), p.Snapshot().TenantID, id, parseContextIDs(r.Form["context_ids"])); err != nil {
+		if err := u.cfg.Contexts.SetProjectContexts(r.Context(), ps.TenantID, id, parseContextIDs(r.Form["context_ids"])); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
 	http.Redirect(w, r, "/projects/"+string(id)+"/details", http.StatusSeeOther)
+}
+
+func (u *ui) updateProjectPolicy(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	policyID := strings.TrimSpace(r.FormValue("approval_policy_id"))
+	if policyID != "" && u.cfg.Policies != nil {
+		if _, err := u.cfg.Policies.Get(r.Context(), ps.TenantID, policy.ID(policyID)); err != nil {
+			http.Error(w, "invalid approval_policy_id", http.StatusBadRequest)
+			return
+		}
+	}
+	if err := u.cfg.Projects.UpdateApprovalPolicy(r.Context(), ps.ID, policyID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID), http.StatusSeeOther)
 }
 
 func (u *ui) lock(w http.ResponseWriter, r *http.Request) {
@@ -438,12 +517,14 @@ func (u *ui) runPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rs := rn.Snapshot()
+	ps := p.Snapshot()
+	evalView := u.evaluateRunPolicy(r, ps, rs)
 	var panel bytes.Buffer
-	if err := pages.ExecuteTemplate(&panel, "history", historyFrom(rs)); err != nil {
+	if err := pages.ExecuteTemplate(&panel, "history", historyFrom(rs, evalView)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	u.page(w, runTitle(rs), "run", u.runView(r, p.Snapshot(), rs, template.HTML(panel.String())))
+	u.page(w, runTitle(rs), "run", u.runView(r, ps, rs, evalView, template.HTML(panel.String())))
 }
 
 func (u *ui) runHeadline(w http.ResponseWriter, r *http.Request) {
@@ -451,15 +532,21 @@ func (u *ui) runHeadline(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	u.fragment(w, "run_headline", u.runView(r, p.Snapshot(), rn.Snapshot(), ""))
+	rs := rn.Snapshot()
+	ps := p.Snapshot()
+	evalView := u.evaluateRunPolicy(r, ps, rs)
+	u.fragment(w, "run_headline", u.runView(r, ps, rs, evalView, ""))
 }
 
 func (u *ui) history(w http.ResponseWriter, r *http.Request) {
-	rn, _, err := u.loadRun(w, r)
+	rn, p, err := u.loadRun(w, r)
 	if err != nil {
 		return
 	}
-	u.fragment(w, "history", historyFrom(rn.Snapshot()))
+	rs := rn.Snapshot()
+	ps := p.Snapshot()
+	evalView := u.evaluateRunPolicy(r, ps, rs)
+	u.fragment(w, "history", historyFrom(rs, evalView))
 }
 
 func (u *ui) changes(w http.ResponseWriter, r *http.Request) {
@@ -474,10 +561,32 @@ func (u *ui) changes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := u.loadRun(w, r); err != nil {
+	rn, p, err := u.loadRun(w, r)
+	if err != nil {
 		return
 	}
-	id := run.ID(r.PathValue("id"))
+	rs := rn.Snapshot()
+	ps := p.Snapshot()
+	if ps.ApprovalPolicyID != "" {
+		if u.cfg.Policies == nil {
+			http.Error(w, "policy service not configured", http.StatusInternalServerError)
+			return
+		}
+		res, err := u.cfg.Policies.EvaluateForRun(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps))
+		if err != nil {
+			http.Error(w, "Policy evaluation failed: "+err.Error(), http.StatusForbidden)
+			return
+		}
+		if !res.Allowed {
+			msg := "Approval denied by policy"
+			if len(res.Deny) > 0 {
+				msg += ": " + strings.Join(res.Deny, "; ")
+			}
+			http.Error(w, msg, http.StatusForbidden)
+			return
+		}
+	}
+	id := rs.ID
 	if err := u.cfg.Runs.Confirm(r.Context(), id, u.actor(r)); err != nil {
 		if errors.Is(err, run.ErrActiveConflict) {
 			http.Error(w, "Another run for this commit is queued or running; it must finish before this run can be confirmed.", http.StatusConflict)
@@ -494,10 +603,11 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) cancel(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := u.loadRun(w, r); err != nil {
+	rn, _, err := u.loadRun(w, r)
+	if err != nil {
 		return
 	}
-	id := run.ID(r.PathValue("id"))
+	id := rn.Snapshot().ID
 	if err := u.cfg.Runs.Cancel(r.Context(), id, u.actor(r)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -540,13 +650,24 @@ func (u *ui) loadProject(w http.ResponseWriter, r *http.Request) (*project.Proje
 	return p, runs, nil
 }
 
+func (u *ui) runID(r *http.Request) run.ID {
+	if rid := r.PathValue("runID"); rid != "" {
+		return run.ID(rid)
+	}
+	return run.ID(r.PathValue("id"))
+}
+
 func (u *ui) loadRun(w http.ResponseWriter, r *http.Request) (*run.Run, *project.Project, error) {
-	rn, err := u.cfg.Runs.Get(r.Context(), run.ID(r.PathValue("id")))
+	rn, err := u.cfg.Runs.Get(r.Context(), u.runID(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return nil, nil, err
 	}
 	if rn == nil {
+		http.NotFound(w, r)
+		return nil, nil, fmt.Errorf("not found")
+	}
+	if r.PathValue("runID") != "" && r.PathValue("id") != "" && string(rn.Snapshot().ProjectID) != r.PathValue("id") {
 		http.NotFound(w, r)
 		return nil, nil, fmt.Errorf("not found")
 	}
@@ -575,18 +696,23 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 		"ID": string(ps.ID), "Name": ps.Name, "Locked": ps.Locked,
 		"LatestLabel": latestLabel(latest), "LatestClass": latestClass(latest),
 		"Meta": projectMeta(ps, latest, hist), "Empty": len(runs) == 0,
-		"Panel": panel,
-		"Poll":  anyNonTerminal(runs),
+		"Panel":              panel,
+		"Poll":               anyNonTerminal(runs),
+		"ApprovalPolicyID":   ps.ApprovalPolicyID,
+		"ApprovalPolicyName": u.policyName(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
+		"Policies":           u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
 	}
 }
 
-func (u *ui) runView(r *http.Request, ps project.Snapshot, rs run.Snapshot, panel template.HTML) map[string]any {
+func (u *ui) runView(r *http.Request, ps project.Snapshot, rs run.Snapshot, evalView *runPolicyEvalView, panel template.HTML) map[string]any {
 	hist, _ := u.cfg.States.History(r.Context(), string(ps.ID))
 	return map[string]any{
 		"ID": string(rs.ID), "ProjectID": string(ps.ID), "ProjectName": ps.Name,
 		"Title": runTitle(rs), "Status": rs.Status.Label(), "StatusClass": statusClass(rs.Status),
 		"Meta": runMeta(ps, rs, hist), "ChangesLabel": template.HTML(changesLabel(rs)), "Panel": panel,
-		"Poll": !rs.Status.Terminal(),
+		"Poll":            !rs.Status.Terminal(),
+		"PolicyEval":      evalView,
+		"PolicyInputJSON": u.buildPolicyInputJSON(r, ps, rs),
 	}
 }
 
@@ -702,13 +828,14 @@ func toRunRow(s run.Snapshot) runRow {
 	}
 }
 
-func historyFrom(s run.Snapshot) historyView {
+func historyFrom(s run.Snapshot, evalView *runPolicyEvalView) historyView {
 	h := historyView{
 		ID: string(s.ID), Poll: !s.Status.Terminal(), StatusLabel: s.Status.Label(), StatusClass: statusClass(s.Status),
 		Terminal: s.Status.Terminal(), Unconfirmed: s.Status == run.StatusNeedsApproval,
 		Confirmed:  s.ApprovedBy != "" && s.Status != run.StatusCancelled,
 		Cancelled:  s.Status == run.StatusCancelled,
 		ApprovedBy: s.ApprovedBy, Queued: true, QueuedAt: fmtTime(s.CreatedAt),
+		PolicyEval: evalView,
 	}
 	for _, st := range s.Steps {
 		sv := &stepView{Open: st.Status == run.StepRunning, Logs: st.Logs}
@@ -1092,3 +1219,358 @@ func (u *ui) deleteContext(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/contexts", http.StatusSeeOther)
 }
+
+type policyChoice struct {
+	ID       string
+	Name     string
+	Selected bool
+}
+
+type policyRow struct {
+	ID          string
+	Name        string
+	Description string
+	UpdatedAt   string
+}
+
+const defaultSampleRego = `package infraguy.approval
+
+import rego.v1
+
+default allow := false
+
+allow if {
+    count(deny) == 0
+}
+
+deny contains "Destroying resources is not allowed without policy override" if {
+    some rc in input.plan.resource_changes
+    "delete" in rc.change.actions
+}
+`
+
+const defaultSampleInputJSON = `{
+  "plan": {
+    "format_version": "1.2",
+    "terraform_version": "1.8.5",
+    "resource_changes": [
+      {
+        "address": "aws_s3_bucket.logs",
+        "type": "aws_s3_bucket",
+        "change": {
+          "actions": ["create"]
+        }
+      }
+    ]
+  },
+  "current_user": {
+    "id": "usr-1",
+    "login": "alice",
+    "role": "admin"
+  },
+  "project": {
+    "id": "proj-1",
+    "name": "production-vpc",
+    "repo_owner": "acme",
+    "repo_name": "infra",
+    "working_directory": "envs/prod",
+    "terraform_version": "1.8.5",
+    "auto_approve": false
+  }
+}`
+
+func (u *ui) policyChoices(ctx context.Context, tenantID string, selectedID policy.ID) []policyChoice {
+	if u.cfg.Policies == nil || tenantID == "" {
+		return nil
+	}
+	all, err := u.cfg.Policies.List(ctx, tenantID)
+	if err != nil {
+		return nil
+	}
+	out := make([]policyChoice, 0, len(all))
+	for _, p := range all {
+		ps := p.Snapshot()
+		out = append(out, policyChoice{
+			ID:       string(ps.ID),
+			Name:     ps.Name,
+			Selected: ps.ID == selectedID,
+		})
+	}
+	return out
+}
+
+func (u *ui) policyName(ctx context.Context, tenantID string, policyID policy.ID) string {
+	if u.cfg.Policies == nil || tenantID == "" || policyID == "" {
+		return ""
+	}
+	p, err := u.cfg.Policies.Get(ctx, tenantID, policyID)
+	if err != nil || p == nil {
+		return ""
+	}
+	return p.Snapshot().Name
+}
+
+func (u *ui) userInfo(r *http.Request) policyapp.UserInfo {
+	userID, login, _, role, ok := PrincipalFrom(r.Context())
+	if !ok {
+		return policyapp.UserInfo{Login: u.actor(r)}
+	}
+	return policyapp.UserInfo{ID: userID, Login: login, Role: role}
+}
+
+func projectInfoFrom(ps project.Snapshot) policyapp.ProjectInfo {
+	return policyapp.ProjectInfo{
+		ID:               string(ps.ID),
+		Name:             ps.Name,
+		RepoOwner:        ps.Repo.Owner,
+		RepoName:         ps.Repo.Name,
+		WorkingDirectory: ps.WorkingDirectory,
+		TerraformVersion: ps.TerraformVersion,
+		AutoApprove:      ps.AutoApprove,
+	}
+}
+
+func (u *ui) buildPolicyInputJSON(r *http.Request, ps project.Snapshot, rs run.Snapshot) string {
+	svc := u.cfg.Policies
+	if svc == nil {
+		svc = &policyapp.Service{}
+	}
+	_, pretty, err := svc.BuildInput(rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps))
+	if err != nil {
+		return "{}"
+	}
+	return pretty
+}
+
+func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snapshot) *runPolicyEvalView {
+	if rs.Status != run.StatusNeedsApproval || ps.ApprovalPolicyID == "" || u.cfg.Policies == nil {
+		return nil
+	}
+	polID := policy.ID(ps.ApprovalPolicyID)
+	polName := u.policyName(r.Context(), ps.TenantID, polID)
+	if polName == "" {
+		polName = ps.ApprovalPolicyID
+	}
+	res, err := u.cfg.Policies.EvaluateForRun(r.Context(), ps.TenantID, polID, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps))
+	if err != nil {
+		return &runPolicyEvalView{
+			PolicyID:   ps.ApprovalPolicyID,
+			PolicyName: polName,
+			Allowed:    false,
+			Deny:       []string{"Policy evaluation error: " + err.Error()},
+		}
+	}
+	return &runPolicyEvalView{
+		PolicyID:   string(res.PolicyID),
+		PolicyName: firstNonEmpty(res.PolicyName, polName),
+		Allowed:    res.Allowed,
+		Deny:       res.Deny,
+	}
+}
+
+func (u *ui) policies(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	var rows []policyRow
+	if u.cfg.Policies != nil {
+		items, err := u.cfg.Policies.List(r.Context(), tenantID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		rows = make([]policyRow, 0, len(items))
+		for _, p := range items {
+			ps := p.Snapshot()
+			rows = append(rows, policyRow{
+				ID:          string(ps.ID),
+				Name:        ps.Name,
+				Description: ps.Description,
+				UpdatedAt:   fmtTime(ps.UpdatedAt),
+			})
+		}
+	}
+	u.page(w, "Policies", "policies", map[string]any{
+		"Policies":        rows,
+		"SampleRego":      defaultSampleRego,
+		"SampleInputJSON": defaultSampleInputJSON,
+	})
+}
+
+func (u *ui) createPolicy(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Policies == nil {
+		http.Error(w, "policies service not configured", http.StatusInternalServerError)
+		return
+	}
+	p, err := u.cfg.Policies.Create(r.Context(), policyapp.CreateInput{
+		TenantID:    tenantID,
+		Name:        r.FormValue("name"),
+		Description: r.FormValue("description"),
+		Rego:        r.FormValue("rego"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/policies/"+string(p.Snapshot().ID), http.StatusSeeOther)
+}
+
+func (u *ui) testPolicy(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Policies == nil {
+		http.Error(w, "policies service not configured", http.StatusInternalServerError)
+		return
+	}
+	var regoSrc, inputStr string
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "application/json") {
+		var payload struct {
+			Rego      string          `json:"rego"`
+			InputJSON string          `json:"input_json"`
+			Input     json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid JSON request body: " + err.Error()})
+			return
+		}
+		regoSrc = payload.Rego
+		if payload.InputJSON != "" {
+			inputStr = payload.InputJSON
+		} else if len(payload.Input) > 0 {
+			inputStr = string(payload.Input)
+		}
+	} else {
+		if err := r.ParseForm(); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		regoSrc = r.FormValue("rego")
+		inputStr = r.FormValue("input_json")
+		if inputStr == "" {
+			inputStr = r.FormValue("input")
+		}
+	}
+	res, err := u.cfg.Policies.TestRego(r.Context(), regoSrc, []byte(inputStr))
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+	deny := res.Deny
+	if deny == nil {
+		deny = []string{}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"allowed": res.Allowed,
+		"deny":    deny,
+	})
+}
+
+func (u *ui) policyDetails(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Policies == nil {
+		http.NotFound(w, r)
+		return
+	}
+	p, err := u.cfg.Policies.Get(r.Context(), tenantID, policy.ID(r.PathValue("id")))
+	if err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if p == nil {
+		http.NotFound(w, r)
+		return
+	}
+	ps := p.Snapshot()
+	u.page(w, ps.Name, "policy", map[string]any{
+		"ID":              string(ps.ID),
+		"Name":            ps.Name,
+		"Description":     ps.Description,
+		"Rego":            ps.Rego,
+		"UpdatedAt":       fmtTime(ps.UpdatedAt),
+		"SampleInputJSON": defaultSampleInputJSON,
+	})
+}
+
+func (u *ui) updatePolicy(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Policies == nil {
+		http.Error(w, "policies service not configured", http.StatusInternalServerError)
+		return
+	}
+	id := policy.ID(r.PathValue("id"))
+	if _, err := u.cfg.Policies.Update(r.Context(), policyapp.UpdateInput{
+		ID:          id,
+		TenantID:    tenantID,
+		Name:        r.FormValue("name"),
+		Description: r.FormValue("description"),
+		Rego:        r.FormValue("rego"),
+	}); err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/policies/"+string(id), http.StatusSeeOther)
+}
+
+func (u *ui) deletePolicy(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Policies == nil {
+		http.Error(w, "policies service not configured", http.StatusInternalServerError)
+		return
+	}
+	id := policy.ID(r.PathValue("id"))
+	if err := u.cfg.Policies.Delete(r.Context(), tenantID, id); err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "Cannot delete policy (detach it from any projects first): "+err.Error(), http.StatusConflict)
+		return
+	}
+	http.Redirect(w, r, "/policies", http.StatusSeeOther)
+}
+

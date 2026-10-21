@@ -1,0 +1,64 @@
+{{define "policy"}}
+<nav class="crumb"><a href="/policies">Policies</a> / {{.Name}}</nav>
+<div class="panel">
+  <div class="headline">
+    <h1>{{.Name}}</h1>
+    <form method="post" action="/policies/{{.ID}}/delete" class="inline">
+      <button type="submit" class="btn-danger">Delete policy</button>
+    </form>
+  </div>
+
+  <form method="post" action="/policies/{{.ID}}">
+    <label>Policy name</label>
+    <input type="text" name="name" value="{{.Name}}" required>
+    <label>Description</label>
+    <input type="text" name="description" value="{{.Description}}">
+    <label>Rego policy</label>
+    <textarea id="policy-rego" name="rego" rows="14" required>{{.Rego}}</textarea>
+    <div class="actions">
+      <button type="submit" class="btn-trigger">Save policy</button>
+      <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
+    </div>
+  </form>
+</div>
+
+<div class="panel">
+  <h2>Online Policy Editor &amp; Tester</h2>
+  <label>Policy Input JSON (paste from a Run or edit below)</label>
+  <textarea id="policy-input-json" name="input_json" rows="14">{{.SampleInputJSON}}</textarea>
+  <div class="actions">
+    <button type="button" onclick="runPolicyTest()">Test Policy</button>
+  </div>
+  <div id="policy-test-result" class="meta"></div>
+</div>
+
+<script>
+async function runPolicyTest() {
+  const rego = document.getElementById('policy-rego').value;
+  const inputJSON = document.getElementById('policy-input-json').value;
+  const resultEl = document.getElementById('policy-test-result');
+  resultEl.textContent = 'Evaluating...';
+  try {
+    const resp = await fetch('/policies/test', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rego: rego, input_json: inputJSON})
+    });
+    const data = await resp.json();
+    if (data.error) {
+      resultEl.innerHTML = '<span class="pill pill-failed">Error</span> <span>' + data.error + '</span>';
+      return;
+    }
+    let html = data.allowed
+      ? '<span class="pill pill-finished">Allowed</span>'
+      : '<span class="pill pill-failed">Denied</span>';
+    if (data.deny && data.deny.length > 0) {
+      html += ' <span>' + data.deny.join('; ') + '</span>';
+    }
+    resultEl.innerHTML = html;
+  } catch (err) {
+    resultEl.innerHTML = '<span class="pill pill-failed">Error</span> <span>' + err + '</span>';
+  }
+}
+</script>
+{{end}}

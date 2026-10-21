@@ -2,27 +2,32 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	authapp "infra-guy/internal/application/auth"
 	"infra-guy/internal/application/installation"
+	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
+	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/state"
 	"infra-guy/internal/domain/tenant"
 	"infra-guy/internal/domain/tfcontext"
 	"infra-guy/internal/domain/user"
+	"infra-guy/internal/infrastructure/opa"
 )
 
 type memRuns struct {
@@ -1140,5 +1145,290 @@ func TestProjectTerraformVersionAndContextsUI(t *testing.T) {
 	}
 	if got, _ := ctxSvc.Get(context.Background(), "ten", "ctx-1"); got != nil {
 		t.Fatalf("expected ctx-1 deleted, got %v", got)
+	}
+}
+
+type uiMemPolicies struct {
+	items    map[policy.ID]*policy.Policy
+	projects *memProjects
+}
+
+func newUIMemPolicies(projects *memProjects) *uiMemPolicies {
+	return &uiMemPolicies{
+		items:    map[policy.ID]*policy.Policy{},
+		projects: projects,
+	}
+}
+
+func (m *uiMemPolicies) Insert(_ context.Context, p *policy.Policy) error {
+	for _, existing := range m.items {
+		if existing.TenantID() == p.TenantID() && existing.Name() == p.Name() {
+			return policy.ErrDuplicateName
+		}
+	}
+	m.items[p.ID()] = policy.Restore(p.Snapshot())
+	return nil
+}
+
+func (m *uiMemPolicies) Update(_ context.Context, p *policy.Policy) error {
+	if _, ok := m.items[p.ID()]; !ok {
+		return policy.ErrNotFound
+	}
+	for id, existing := range m.items {
+		if id != p.ID() && existing.TenantID() == p.TenantID() && existing.Name() == p.Name() {
+			return policy.ErrDuplicateName
+		}
+	}
+	m.items[p.ID()] = policy.Restore(p.Snapshot())
+	return nil
+}
+
+func (m *uiMemPolicies) Delete(_ context.Context, id policy.ID) error {
+	if _, ok := m.items[id]; !ok {
+		return policy.ErrNotFound
+	}
+	if m.projects != nil {
+		for _, proj := range m.projects.items {
+			if proj.Snapshot().ApprovalPolicyID == string(id) {
+				return errors.New("policy is attached to project")
+			}
+		}
+	}
+	delete(m.items, id)
+	return nil
+}
+
+func (m *uiMemPolicies) Get(_ context.Context, id policy.ID) (*policy.Policy, error) {
+	p, ok := m.items[id]
+	if !ok {
+		return nil, nil
+	}
+	return policy.Restore(p.Snapshot()), nil
+}
+
+func (m *uiMemPolicies) ListByTenant(_ context.Context, tenantID string) ([]*policy.Policy, error) {
+	var out []*policy.Policy
+	for _, p := range m.items {
+		if p.TenantID() == tenantID {
+			out = append(out, policy.Restore(p.Snapshot()))
+		}
+	}
+	return out, nil
+}
+
+func TestPoliciesUIAndApprovalEnforcement(t *testing.T) {
+	p := listProject(t)
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+
+	polRepo := newUIMemPolicies(projects)
+	polSeq := 0
+	polSvc := &policyapp.Service{
+		Policies: polRepo,
+		Engine:   opa.NewEvaluator(),
+		Now:      time.Now,
+		NewID: func() string {
+			polSeq++
+			return fmt.Sprintf("pol-%d", polSeq)
+		},
+	}
+
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+		repos: map[int64][]installation.Repo{100: {{ID: 101, Owner: "operator", Name: "my-infra"}}},
+	}
+	h := NewServer(ServerConfig{
+		Projects:      projSvc,
+		Runs:          runsSvc,
+		States:        stSvc,
+		Policies:      polSvc,
+		Versions:      stubVersions{list: []string{"1.10.5"}},
+		Checkout:      &stubTip{sha: "abc1234"},
+		Lookup:        &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// 1. GET /policies renders the list and Online Policy Editor & Tester
+	rr := getUI(t, h, "/policies")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /policies = %d: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `href="/policies"`) || !strings.Contains(body, `id="policy-rego"`) || !strings.Contains(body, `id="policy-input-json"`) || !strings.Contains(body, "Test Policy") {
+		t.Fatalf("GET /policies missing editor/tester elements: %s", body)
+	}
+
+	// 2. POST /policies/test evaluates Rego against input JSON (allowed, denied, and invalid Rego)
+	denyRego := `package infraguy.approval
+import rego.v1
+default allow := false
+allow if { count(deny) == 0 }
+deny contains "Cannot destroy S3 buckets" if {
+	some rc in input.plan.resource_changes
+	rc.type == "aws_s3_bucket"
+	"delete" in rc.change.actions
+}
+`
+	testPayloadAllowed, _ := json.Marshal(map[string]any{
+		"rego":       denyRego,
+		"input_json": `{"plan":{"resource_changes":[{"type":"aws_s3_bucket","change":{"actions":["create"]}}]}}`,
+	})
+	reqAllow := httptest.NewRequest(http.MethodPost, "/policies/test", strings.NewReader(string(testPayloadAllowed)))
+	reqAllow.Header.Set("Content-Type", "application/json")
+	reqAllow.AddCookie(&http.Cookie{Name: "session", Value: uiSessionID})
+	rrAllow := httptest.NewRecorder()
+	h.ServeHTTP(rrAllow, reqAllow)
+	if rrAllow.Code != http.StatusOK {
+		t.Fatalf("POST /policies/test (allowed) = %d: %s", rrAllow.Code, rrAllow.Body.String())
+	}
+	var allowResp struct {
+		Allowed bool     `json:"allowed"`
+		Deny    []string `json:"deny"`
+	}
+	if err := json.Unmarshal(rrAllow.Body.Bytes(), &allowResp); err != nil || !allowResp.Allowed || len(allowResp.Deny) != 0 {
+		t.Fatalf("unexpected allow response: %s (err=%v)", rrAllow.Body.String(), err)
+	}
+
+	testPayloadDenied, _ := json.Marshal(map[string]any{
+		"rego":       denyRego,
+		"input_json": `{"plan":{"resource_changes":[{"type":"aws_s3_bucket","change":{"actions":["delete"]}}]}}`,
+	})
+	reqDeny := httptest.NewRequest(http.MethodPost, "/policies/test", strings.NewReader(string(testPayloadDenied)))
+	reqDeny.Header.Set("Content-Type", "application/json")
+	reqDeny.AddCookie(&http.Cookie{Name: "session", Value: uiSessionID})
+	rrDeny := httptest.NewRecorder()
+	h.ServeHTTP(rrDeny, reqDeny)
+	if rrDeny.Code != http.StatusOK {
+		t.Fatalf("POST /policies/test (denied) = %d: %s", rrDeny.Code, rrDeny.Body.String())
+	}
+	var denyResp struct {
+		Allowed bool     `json:"allowed"`
+		Deny    []string `json:"deny"`
+	}
+	if err := json.Unmarshal(rrDeny.Body.Bytes(), &denyResp); err != nil || denyResp.Allowed || len(denyResp.Deny) != 1 || denyResp.Deny[0] != "Cannot destroy S3 buckets" {
+		t.Fatalf("unexpected deny response: %s (err=%v)", rrDeny.Body.String(), err)
+	}
+
+	// Invalid Rego returns 400 with JSON error
+	rrBadRego := postUI(t, h, "/policies/test", strings.NewReader(url.Values{
+		"rego":       {"package infraguy.approval\nthis is not valid rego {{{"},
+		"input_json": {"{}"},
+	}.Encode()))
+	if rrBadRego.Code != http.StatusBadRequest || !strings.Contains(rrBadRego.Body.String(), `"error"`) {
+		t.Fatalf("POST /policies/test invalid rego = %d: %s", rrBadRego.Code, rrBadRego.Body.String())
+	}
+
+	// 3. POST /policies creates a new policy (and rejects invalid Rego)
+	rrInvalidCreate := postUI(t, h, "/policies", strings.NewReader(url.Values{
+		"name": {"broken"},
+		"rego": {"not valid rego"},
+	}.Encode()))
+	if rrInvalidCreate.Code != http.StatusBadRequest {
+		t.Fatalf("POST /policies invalid rego = %d, want 400", rrInvalidCreate.Code)
+	}
+
+	rrCreate := postUI(t, h, "/policies", strings.NewReader(url.Values{
+		"name": {"no-s3-delete"},
+		"rego": {denyRego},
+	}.Encode()))
+	if rrCreate.Code != http.StatusSeeOther || rrCreate.Header().Get("Location") != "/policies/pol-2" {
+		t.Fatalf("POST /policies = %d (loc=%q): %s", rrCreate.Code, rrCreate.Header().Get("Location"), rrCreate.Body.String())
+	}
+
+	// 4. GET /policies/pol-2 renders policy editor and tester
+	rrPol := getUI(t, h, "/policies/pol-2")
+	if rrPol.Code != http.StatusOK || !strings.Contains(rrPol.Body.String(), "no-s3-delete") || !strings.Contains(rrPol.Body.String(), "Cannot destroy S3 buckets") {
+		t.Fatalf("GET /policies/pol-2 = %d: %s", rrPol.Code, rrPol.Body.String())
+	}
+
+	// 5. Assign policy to project via POST /projects/p1/policy
+	rrAssign := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id=pol-2"))
+	if rrAssign.Code != http.StatusSeeOther {
+		t.Fatalf("POST /projects/p1/policy = %d: %s", rrAssign.Code, rrAssign.Body.String())
+	}
+	if projects.items["p1"].Snapshot().ApprovalPolicyID != "pol-2" {
+		t.Fatalf("expected p1 ApprovalPolicyID=pol-2, got %q", projects.items["p1"].Snapshot().ApprovalPolicyID)
+	}
+
+	// 6. Deleting a policy attached to a project fails with 409 Conflict
+	rrDelAttached := postUI(t, h, "/policies/pol-2/delete", nil)
+	if rrDelAttached.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict deleting attached policy, got %d: %s", rrDelAttached.Code, rrDelAttached.Body.String())
+	}
+
+	// 7. Run with destructive S3 change is denied in UI and blocked on POST confirm (403 Forbidden)
+	denySnap := needsApprovalSnap("r-deny")
+	denySnap.PlanJSON = []byte(`{"resource_changes":[{"address":"aws_s3_bucket.main","type":"aws_s3_bucket","change":{"actions":["delete"]}}]}`)
+	runs.items["r-deny"] = run.Restore(denySnap)
+
+	rrRunDeny := getUI(t, h, "/runs/r-deny")
+	runDenyBody := rrRunDeny.Body.String()
+	if rrRunDeny.Code != http.StatusOK {
+		t.Fatalf("GET /runs/r-deny = %d: %s", rrRunDeny.Code, runDenyBody)
+	}
+	if !strings.Contains(runDenyBody, "Cannot destroy S3 buckets") || !strings.Contains(runDenyBody, "Denied") || !strings.Contains(runDenyBody, "Approval blocked by policy") {
+		t.Fatalf("expected Denied status, deny message, and disabled button on /runs/r-deny, got: %s", runDenyBody)
+	}
+	if !strings.Contains(runDenyBody, "Policy Input JSON (for Policy Tester)") || !strings.Contains(runDenyBody, "Copy Policy Input JSON") || !strings.Contains(runDenyBody, "aws_s3_bucket.main") {
+		t.Fatalf("expected Policy Input JSON collapsible section on /runs/r-deny, got: %s", runDenyBody)
+	}
+
+	// Confirm via /runs/r-deny/confirm -> 403 Forbidden
+	rrConfirmDeny := postUI(t, h, "/runs/r-deny/confirm", nil)
+	if rrConfirmDeny.Code != http.StatusForbidden || !strings.Contains(rrConfirmDeny.Body.String(), "Cannot destroy S3 buckets") {
+		t.Fatalf("expected 403 Forbidden on /runs/r-deny/confirm, got %d: %s", rrConfirmDeny.Code, rrConfirmDeny.Body.String())
+	}
+	if runs.items["r-deny"].Snapshot().Status != run.StatusNeedsApproval {
+		t.Fatalf("expected r-deny to remain needs_approval, got %s", runs.items["r-deny"].Snapshot().Status)
+	}
+
+	// Confirm via /projects/p1/runs/r-deny/confirm -> 403 Forbidden
+	rrConfirmDenyProj := postUI(t, h, "/projects/p1/runs/r-deny/confirm", nil)
+	if rrConfirmDenyProj.Code != http.StatusForbidden || !strings.Contains(rrConfirmDenyProj.Body.String(), "Cannot destroy S3 buckets") {
+		t.Fatalf("expected 403 Forbidden on /projects/p1/runs/r-deny/confirm, got %d: %s", rrConfirmDenyProj.Code, rrConfirmDenyProj.Body.String())
+	}
+
+	// 8. Run with safe S3 create is allowed in UI and confirmed on POST confirm (303 See Other)
+	allowSnap := needsApprovalSnap("r-allow")
+	allowSnap.PlanJSON = []byte(`{"resource_changes":[{"address":"aws_s3_bucket.logs","type":"aws_s3_bucket","change":{"actions":["create"]}}]}`)
+	runs.items["r-allow"] = run.Restore(allowSnap)
+
+	rrRunAllow := getUI(t, h, "/projects/p1/runs/r-allow")
+	runAllowBody := rrRunAllow.Body.String()
+	if rrRunAllow.Code != http.StatusOK || !strings.Contains(runAllowBody, "Allowed") || strings.Contains(runAllowBody, "Approval blocked by policy") {
+		t.Fatalf("expected Allowed status on /projects/p1/runs/r-allow, got %d: %s", rrRunAllow.Code, runAllowBody)
+	}
+
+	rrConfirmAllow := postUI(t, h, "/projects/p1/runs/r-allow/confirm", nil)
+	if rrConfirmAllow.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 See Other on /projects/p1/runs/r-allow/confirm, got %d: %s", rrConfirmAllow.Code, rrConfirmAllow.Body.String())
+	}
+	if runs.items["r-allow"].Snapshot().ApprovedBy != "operator" {
+		t.Fatalf("expected r-allow ApprovedBy=operator, got %q", runs.items["r-allow"].Snapshot().ApprovedBy)
+	}
+
+	// 9. Detach policy from project and delete policy
+	rrDetach := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id="))
+	if rrDetach.Code != http.StatusSeeOther || projects.items["p1"].Snapshot().ApprovalPolicyID != "" {
+		t.Fatalf("detach policy = %d, ApprovalPolicyID=%q", rrDetach.Code, projects.items["p1"].Snapshot().ApprovalPolicyID)
+	}
+	rrDel := postUI(t, h, "/policies/pol-2/delete", nil)
+	if rrDel.Code != http.StatusSeeOther || rrDel.Header().Get("Location") != "/policies" {
+		t.Fatalf("delete policy = %d: %s", rrDel.Code, rrDel.Body.String())
+	}
+	if _, err := polSvc.Get(context.Background(), "ten", "pol-2"); !errors.Is(err, policy.ErrNotFound) {
+		t.Fatalf("expected pol-2 to be deleted, err=%v", err)
 	}
 }
