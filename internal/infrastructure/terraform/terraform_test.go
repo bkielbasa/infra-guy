@@ -45,7 +45,7 @@ func TestPlanAndApplyStartWithInit(t *testing.T) {
 	if init := commands(run.StepInit); len(init) != 1 || init[0][0] != "init" {
 		t.Fatalf("init commands %#v", init)
 	}
-	if plan := commands(run.StepPlan); plan[1][0] != "plan" || plan[2][0] != "show" {
+	if plan := commands(run.StepPlan); len(plan) != 4 || plan[1][0] != "plan" || plan[2][0] != "show" || plan[3][0] != "show" || plan[3][1] != "-json" {
 		t.Fatalf("plan commands %#v", plan)
 	}
 	if apply := commands(run.StepApply); apply[1][0] != "apply" {
@@ -285,5 +285,46 @@ func TestExecutorMaterializesHomeFilesAndContextEnv(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("secret file mode = %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestExecutorPlanCapturesPlanJSONWithoutPollutingLogs(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(t.TempDir(), "fake-terraform")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"version\" ]; then echo '{\"terraform_version\":\"1.9.8\"}'; exit 0; fi\n" +
+		"if [ \"$1\" = \"init\" ]; then echo 'Initialized!'; exit 0; fi\n" +
+		"if [ \"$1\" = \"plan\" ]; then echo 'binary-plan' > tfplan; echo 'Planned!'; exit 0; fi\n" +
+		"if [ \"$1\" = \"show\" ] && [ \"$2\" = \"-no-color\" ]; then echo 'Plan: 1 to add, 0 to change, 0 to destroy.'; exit 0; fi\n" +
+		"if [ \"$1\" = \"show\" ] && [ \"$2\" = \"-json\" ]; then echo '{\"format_version\":\"1.2\",\"resource_changes\":[{\"type\":\"google_service_account\"}]}'; exit 0; fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	e := Executor{Binary: staticBinary(fakeBin)}
+	res, err := e.Run(context.Background(), Request{
+		WorkDir:          dir,
+		InternalBaseURL:  "http://127.0.0.1:8080",
+		ProjectID:        "p1",
+		RunID:            "r1",
+		StateToken:       "tok",
+		Step:             run.StepPlan,
+		TerraformVersion: "1.9.8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d: %s", res.ExitCode, res.Logs)
+	}
+	if strings.TrimSpace(res.PlanText) != "Plan: 1 to add, 0 to change, 0 to destroy." {
+		t.Fatalf("PlanText = %q", res.PlanText)
+	}
+	if string(res.PlanJSON) != `{"format_version":"1.2","resource_changes":[{"type":"google_service_account"}]}` {
+		t.Fatalf("PlanJSON = %q", string(res.PlanJSON))
+	}
+	if strings.Contains(res.Logs, `"format_version"`) {
+		t.Fatalf("raw JSON leaked into human logs: %s", res.Logs)
 	}
 }

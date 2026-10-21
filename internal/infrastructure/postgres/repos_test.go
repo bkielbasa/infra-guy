@@ -158,11 +158,27 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	}
 
 	opened.SetTerraformVersion("1.9.0")
+	if err := opened.BeginStep(run.StepInit, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opened.CompleteStep(run.StepInit, run.StepResult{}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.BeginStep(run.StepPlan, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opened.CompleteStep(run.StepPlan, run.StepResult{
+		PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n",
+		PlanFile: []byte("tfplan-bytes"),
+		PlanJSON: []byte(`{"format_version":"1.2"}`),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
 	if err := runs.Save(ctx, opened); err != nil {
 		t.Fatal(err)
 	}
 	savedRun, err := runs.Get(ctx, opened.Snapshot().ID)
-	if err != nil || savedRun == nil || savedRun.Snapshot().TerraformVersion != "1.9.0" {
+	if err != nil || savedRun == nil || savedRun.Snapshot().TerraformVersion != "1.9.0" || string(savedRun.Snapshot().PlanJSON) != `{"format_version":"1.2"}` {
 		t.Fatalf("save/get: %v %#v", err, savedRun)
 	}
 

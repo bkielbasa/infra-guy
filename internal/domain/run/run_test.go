@@ -68,11 +68,15 @@ func TestPlanOnlyFinishesPlanned(t *testing.T) {
 	beginStep(t, r, StepInit, now)
 	completeStep(t, r, StepInit, StepResult{}, now)
 	beginStep(t, r, StepPlan, now)
-	d, err := r.CompleteStep(StepPlan, StepResult{PlanText: "Plan: 2 to add, 0 to change, 0 to destroy.\n", PlanFile: []byte("bin")}, now)
+	d, err := r.CompleteStep(StepPlan, StepResult{
+		PlanText: "Plan: 2 to add, 0 to change, 0 to destroy.\n",
+		PlanFile: []byte("bin"),
+		PlanJSON: []byte(`{"format_version":"1.2"}`),
+	}, now)
 	if err != nil || d.Kind != DecisionFinishPlanned {
 		t.Fatalf("%v %#v", err, d)
 	}
-	if r.Snapshot().Status != StatusPlanned || string(r.Snapshot().PlanFile) != "bin" {
+	if r.Snapshot().Status != StatusPlanned || string(r.Snapshot().PlanFile) != "bin" || string(r.Snapshot().PlanJSON) != `{"format_version":"1.2"}` {
 		t.Fatalf("%#v", r.Snapshot())
 	}
 }

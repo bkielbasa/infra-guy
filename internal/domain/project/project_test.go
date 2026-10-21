@@ -109,3 +109,22 @@ func TestTerraformVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestApprovalPolicyID(t *testing.T) {
+	p := sample(t)
+	if p.ApprovalPolicyID() != "" || p.Snapshot().ApprovalPolicyID != "" {
+		t.Fatalf("expected empty default approval policy id, got %q", p.ApprovalPolicyID())
+	}
+	p.ChangeApprovalPolicy("  pol-123  ")
+	if p.ApprovalPolicyID() != "pol-123" || p.Snapshot().ApprovalPolicyID != "pol-123" {
+		t.Fatalf("expected trimmed policy id pol-123, got %q", p.Snapshot().ApprovalPolicyID)
+	}
+	restored := Restore(p.Snapshot())
+	if restored.ApprovalPolicyID() != "pol-123" {
+		t.Fatalf("restored policy id = %q, want pol-123", restored.ApprovalPolicyID())
+	}
+	p.ChangeApprovalPolicy("   ")
+	if p.ApprovalPolicyID() != "" {
+		t.Fatalf("expected cleared policy id, got %q", p.ApprovalPolicyID())
+	}
+}

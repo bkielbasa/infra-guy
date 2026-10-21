@@ -19,13 +19,13 @@ type RunRepo struct{ pool *pgxpool.Pool }
 func NewRunRepo(pool *pgxpool.Pool) *RunRepo { return &RunRepo{pool: pool} }
 
 const runColumns = `id, project_id, trigger, status, commit_sha, branch, commit_message, author,
-	triggered_by, pr_number, pr_title, plan_only, auto_approve, plan_text, plan_file, add_count,
+	triggered_by, pr_number, pr_title, plan_only, auto_approve, plan_text, plan_file, plan_json, add_count,
 	change_count, destroy_count, summary_present, terraform_version, error, approved_by, approved_at,
 	created_at, started_at, finished_at`
 
 const insertIfAbsentSQL = `
-INSERT INTO runs (id, project_id, trigger, status, commit_sha, branch, commit_message, author, triggered_by, pr_number, pr_title, plan_only, auto_approve, created_at)
-SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+INSERT INTO runs (id, project_id, trigger, status, commit_sha, branch, commit_message, author, triggered_by, pr_number, pr_title, plan_only, auto_approve, plan_text, plan_file, plan_json, created_at)
+SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
 WHERE NOT EXISTS (
   SELECT 1 FROM runs
   WHERE project_id = $2 AND commit_sha = $5 AND trigger = $3
@@ -43,7 +43,7 @@ func (r *RunRepo) InsertIfAbsent(ctx context.Context, in *run.Run) (bool, error)
 
 	tag, err := tx.Exec(ctx, insertIfAbsentSQL,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
-		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.CreatedAt,
+		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.PlanText, s.PlanFile, s.PlanJSON, s.CreatedAt,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -76,13 +76,13 @@ func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 		UPDATE runs SET
 			project_id = $2, trigger = $3, status = $4, commit_sha = $5, branch = $6,
 			commit_message = $7, author = $8, triggered_by = $9, pr_number = $10, pr_title = $11,
-			plan_only = $12, auto_approve = $13, plan_text = $14, plan_file = $15, add_count = $16,
-			change_count = $17, destroy_count = $18, summary_present = $19, terraform_version = $20,
-			error = $21, approved_by = $22, approved_at = $23, created_at = $24, started_at = $25,
-			finished_at = $26
+			plan_only = $12, auto_approve = $13, plan_text = $14, plan_file = $15, plan_json = $16,
+			add_count = $17, change_count = $18, destroy_count = $19, summary_present = $20,
+			terraform_version = $21, error = $22, approved_by = $23, approved_at = $24,
+			created_at = $25, started_at = $26, finished_at = $27
 		WHERE id = $1`,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
-		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.PlanText, s.PlanFile,
+		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.PlanText, s.PlanFile, s.PlanJSON,
 		s.Add, s.Change, s.Destroy, s.SummaryPresent, s.TerraformVersion, s.Error, s.ApprovedBy,
 		s.ApprovedAt, s.CreatedAt, s.StartedAt, s.FinishedAt,
 	); err != nil {
@@ -196,7 +196,7 @@ func scanRun(row runScanner) (run.Snapshot, error) {
 	var started, finished, approved *time.Time
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Trigger, &s.Status, &s.SHA, &s.Branch, &s.Message, &s.Author,
-		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.PlanText, &s.PlanFile,
+		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.PlanText, &s.PlanFile, &s.PlanJSON,
 		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
 		&approved, &created, &started, &finished,
 	)

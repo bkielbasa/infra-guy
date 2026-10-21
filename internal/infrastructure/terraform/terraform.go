@@ -36,6 +36,7 @@ type Result struct {
 	ExitCode                int
 	Logs, PlanText, Version string
 	PlanFile                []byte
+	PlanJSON                []byte
 }
 
 var initArgs = []string{"init", "-input=false", "-no-color"}
@@ -49,6 +50,7 @@ func commands(step run.StepName) [][]string {
 			initArgs,
 			{"plan", "-input=false", "-no-color", "-out=tfplan"},
 			{"show", "-no-color", "tfplan"},
+			{"show", "-json", "tfplan"},
 		}
 	case run.StepApply:
 		return [][]string{initArgs, {"apply", "-input=false", "-no-color", "tfplan"}}
@@ -106,22 +108,31 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 	env := commandEnv(req.GitHubToken, homeDir, req.Env)
 	var logs strings.Builder
 	var planText string
+	var planJSON []byte
 	for _, args := range cmds {
+		showJSON := len(args) >= 2 && args[0] == "show" && args[1] == "-json"
 		out, err := commandBin(ctx, bin, dir, env, args...).CombinedOutput()
-		logs.Write(out)
+		if !showJSON {
+			logs.Write(out)
+		}
 		if err != nil {
+			if showJSON {
+				logs.Write(out)
+			}
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
 				return Result{ExitCode: ee.ExitCode(), Logs: logs.String()}, nil
 			}
 			return Result{}, err
 		}
-		if args[0] == "show" {
+		if showJSON {
+			planJSON = []byte(strings.TrimSpace(string(out)))
+		} else if args[0] == "show" {
 			planText = string(out)
 		}
 	}
 
-	res := Result{ExitCode: 0, Logs: logs.String(), PlanText: planText}
+	res := Result{ExitCode: 0, Logs: logs.String(), PlanText: planText, PlanJSON: planJSON}
 	if req.Step == run.StepPlan {
 		plan, err := os.ReadFile(filepath.Join(dir, "tfplan"))
 		if err != nil {

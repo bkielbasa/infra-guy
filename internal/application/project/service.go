@@ -20,12 +20,25 @@ type Service struct {
 	NewID    func() string
 }
 
+type CreateInput struct {
+	TenantID         string
+	Name             string
+	Repo             project.SourceRepo
+	GitHubRepoID     int64
+	Branch           string
+	Workdir          string
+	TerraformVersion string
+	ApprovalPolicyID string
+	AutoApprove      bool
+}
+
 type UpdateInput struct {
 	ID               project.ID
 	Name             string
 	Branch           string
 	Workdir          string
 	TerraformVersion string
+	ApprovalPolicyID string
 	AutoApprove      bool
 }
 
@@ -94,11 +107,30 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*project.Project,
 			return nil, err
 		}
 	}
+	if in.ApprovalPolicyID != "" {
+		p.ChangeApprovalPolicy(in.ApprovalPolicyID)
+	}
 	p.SetAutoApprove(in.AutoApprove)
 	if err := s.Projects.Save(ctx, p); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+func (s *Service) UpdateApprovalPolicy(ctx context.Context, id project.ID, policyID string) error {
+	p, err := s.Projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %s not found", id)
+	}
+	p.ChangeApprovalPolicy(policyID)
+	return s.Projects.Save(ctx, p)
+}
+
+func (s *Service) SetApprovalPolicyID(ctx context.Context, id project.ID, policyID string) error {
+	return s.UpdateApprovalPolicy(ctx, id, policyID)
 }
 
 func (s *Service) SetTerraformVersion(ctx context.Context, id project.ID, version string) error {

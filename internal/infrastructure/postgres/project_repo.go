@@ -18,13 +18,16 @@ type ProjectRepo struct{ pool *pgxpool.Pool }
 func NewProjectRepo(pool *pgxpool.Pool) *ProjectRepo { return &ProjectRepo{pool: pool} }
 
 const projectColumns = `id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-	terraform_version, auto_approve, locked, state_token, active_run_id, created_at, updated_at`
+	terraform_version, COALESCE(approval_policy_id, ''), auto_approve, locked, state_token, active_run_id, created_at, updated_at`
 
 func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	s := p.Snapshot()
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO projects (`+projectColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		INSERT INTO projects (
+			id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
+			terraform_version, approval_policy_id, auto_approve, locked, state_token, active_run_id, created_at, updated_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''),$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (id) DO UPDATE SET
 			tenant_id = EXCLUDED.tenant_id,
 			github_repo_id = EXCLUDED.github_repo_id,
@@ -34,15 +37,24 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			default_branch = EXCLUDED.default_branch,
 			working_directory = EXCLUDED.working_directory,
 			terraform_version = EXCLUDED.terraform_version,
+			approval_policy_id = EXCLUDED.approval_policy_id,
 			auto_approve = EXCLUDED.auto_approve,
 			state_token = EXCLUDED.state_token,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
-		firstNonEmptyVersion(s.TerraformVersion), s.AutoApprove, s.Locked, s.StateToken, s.ActiveRunID,
+		firstNonEmptyVersion(s.TerraformVersion), s.ApprovalPolicyID, s.AutoApprove, s.Locked, s.StateToken, s.ActiveRunID,
 		s.CreatedAt, s.UpdatedAt,
 	)
 	return err
+}
+
+func (r *ProjectRepo) Insert(ctx context.Context, p *project.Project) error {
+	return r.Save(ctx, p)
+}
+
+func (r *ProjectRepo) Update(ctx context.Context, p *project.Project) error {
+	return r.Save(ctx, p)
 }
 
 func firstNonEmptyVersion(v string) string {
@@ -109,7 +121,7 @@ func scanProject(row projectScanner) (*project.Project, error) {
 	var created, updated time.Time
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.GitHubRepoID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
-		&s.TerraformVersion, &s.AutoApprove, &s.Locked, &s.StateToken, &s.ActiveRunID,
+		&s.TerraformVersion, &s.ApprovalPolicyID, &s.AutoApprove, &s.Locked, &s.StateToken, &s.ActiveRunID,
 		&created, &updated,
 	); err != nil {
 		return nil, err

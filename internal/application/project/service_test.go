@@ -105,6 +105,18 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	if projects.items["p1"].Snapshot().TerraformVersion != "1.9.8" {
 		t.Fatalf("SetTerraformVersion = %q, want 1.9.8", projects.items["p1"].Snapshot().TerraformVersion)
 	}
+	if err := svc.UpdateApprovalPolicy(ctx, "p1", "  pol-99  "); err != nil {
+		t.Fatal(err)
+	}
+	if projects.items["p1"].Snapshot().ApprovalPolicyID != "pol-99" {
+		t.Fatalf("UpdateApprovalPolicy = %q, want pol-99", projects.items["p1"].Snapshot().ApprovalPolicyID)
+	}
+	if err := svc.UpdateApprovalPolicy(ctx, "p1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if projects.items["p1"].Snapshot().ApprovalPolicyID != "" {
+		t.Fatalf("UpdateApprovalPolicy clear = %q, want empty", projects.items["p1"].Snapshot().ApprovalPolicyID)
+	}
 	if err := svc.SetLocked(ctx, "p1", true); err != nil || !projects.items["p1"].Snapshot().Locked {
 		t.Fatalf("lock: %v", err)
 	}
