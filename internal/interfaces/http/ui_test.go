@@ -11,6 +11,7 @@ import (
 	"time"
 
 	authapp "infra-guy/internal/application/auth"
+	"infra-guy/internal/application/installation"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
@@ -89,18 +90,25 @@ func uiHandler(t *testing.T, projects *memProjects, runs *memRuns, states *memSt
 		login = "operator"
 	}
 	proj, runsSvc, st := uiServices(projects, runs, states)
+	store := newUIIdentity(login, "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: login,
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
 	return NewServer(ServerConfig{
 		Projects: proj, Runs: runsSvc, States: st,
 		Checkout: stubTip{sha: "abc1234"}, Lookup: stubLookup{},
 		PublicBaseURL: "http://localhost:8080",
 		Auth: &authapp.Service{
-			Store: newUIIdentity(login, "ten"),
-			GitHub: &uiGitHub{
-				slug: "infra-guy", userID: 4, login: login,
-				membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
-			},
+			Store: store,
+			GitHub: gh,
 			Now: time.Now, NewID: func() string { return "id-1" },
 			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store,
+			GitHub: gh,
+			Now: time.Now, NewID: func() string { return "inst-1" },
 		},
 	})
 }
@@ -117,6 +125,9 @@ func getUI(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder
 func postUI(t *testing.T, h http.Handler, path string, body io.Reader) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, body)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
 	req.AddCookie(&http.Cookie{Name: "session", Value: uiSessionID})
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -501,6 +512,9 @@ func TestGitHubCallbackSetsSecureCookie(t *testing.T) {
 			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "user-1" },
 			PublicBaseURL: "https://infra.example", ClientID: "cid",
 		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/github/callback?state=st&code=code", nil)
 	rr := httptest.NewRecorder()
@@ -519,6 +533,92 @@ func TestGitHubCallbackSetsSecureCookie(t *testing.T) {
 	}
 }
 
+func TestNewProjectPickerAndCreate(t *testing.T) {
+	p := listProject(t)
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	proj, runsSvc, st := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+		repos: map[int64][]installation.Repo{
+			100: {
+				{ID: 101, Owner: "operator", Name: "my-infra"},
+				{ID: 102, Owner: "operator", Name: "my-app"},
+			},
+		},
+	}
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		Checkout: stubTip{sha: "abc1234"}, Lookup: stubLookup{},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// 1. GET /projects/new with active installation renders repo select options
+	rr := getUI(t, h, "/projects/new")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get /projects/new code=%d: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `<select name="repo_id" required>`) || !strings.Contains(body, `<option value="101">operator/my-infra</option>`) {
+		t.Fatalf("expected repo options in /projects/new, got %s", body)
+	}
+
+	// 2. GET /projects/new when not installed shows Install GitHub App link without form
+	noInstStore := newUIIdentity("operator", "ten-no-inst")
+	noInstStore.installations = nil
+	hNoInst := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		Checkout: stubTip{sha: "abc1234"}, Lookup: stubLookup{},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: noInstStore, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: noInstStore, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+	rrNoInst := getUI(t, hNoInst, "/projects/new")
+	if rrNoInst.Code != http.StatusOK {
+		t.Fatalf("get /projects/new without install code=%d: %s", rrNoInst.Code, rrNoInst.Body.String())
+	}
+	bodyNoInst := rrNoInst.Body.String()
+	if !strings.Contains(bodyNoInst, "Install GitHub App") || strings.Contains(bodyNoInst, "<form") {
+		t.Fatalf("expected Install GitHub App link without form, got %s", bodyNoInst)
+	}
+
+	// 3. POST /projects with invalid repo_id returns 400
+	rrBad := postUI(t, h, "/projects", strings.NewReader("name=test&repo_id=999&branch=main"))
+	if rrBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown repo_id, got %d", rrBad.Code)
+	}
+
+	// 4. POST /projects with valid repo_id creates project
+	rrCreate := postUI(t, h, "/projects", strings.NewReader("name=test&repo_id=101&branch=main&workdir=infra&auto_approve=on"))
+	if rrCreate.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d %s", rrCreate.Code, rrCreate.Body.String())
+	}
+	created := projects.items["new-p"]
+	if created == nil {
+		t.Fatal("expected project new-p to be created")
+	}
+	snap := created.Snapshot()
+	if snap.GitHubRepoID != 101 || snap.Repo.Owner != "operator" || snap.Repo.Name != "my-infra" || snap.TenantID != "ten" || !snap.AutoApprove {
+		t.Fatalf("unexpected project created: %+v", snap)
+	}
+}
+
 func uiWithAuth(t *testing.T, projects *memProjects, store *uiIdentity, gh *uiGitHub) http.Handler {
 	t.Helper()
 	proj, runsSvc, st := uiServices(projects, &memRuns{items: map[run.ID]*run.Run{}}, &memStates{items: map[string]*state.State{}})
@@ -529,6 +629,9 @@ func uiWithAuth(t *testing.T, projects *memProjects, store *uiIdentity, gh *uiGi
 		Auth: &authapp.Service{
 			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
 			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
 		},
 	})
 }
@@ -542,12 +645,21 @@ type uiIdentity struct {
 }
 
 func newUIIdentity(login, tenantID string) *uiIdentity {
-	return &uiIdentity{sessions: map[string]authapp.Session{
-		uiSessionID: {
-			ID: uiSessionID, UserID: "user-1", TenantID: tenantID, Role: "admin",
-			Login: login, AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour),
+	var installs []tenant.Installation
+	if tenantID != "" {
+		installs = append(installs, tenant.Installation{
+			ID: "inst-" + tenantID, TenantID: tenantID, AccountLogin: login, AccountType: "user", GitHubInstallationID: 100, Active: true,
+		})
+	}
+	return &uiIdentity{
+		sessions: map[string]authapp.Session{
+			uiSessionID: {
+				ID: uiSessionID, UserID: "user-1", TenantID: tenantID, Role: "admin",
+				Login: login, AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour),
+			},
 		},
-	}}
+		installations: installs,
+	}
 }
 
 func (m *uiIdentity) UpsertUser(_ context.Context, u user.User, _ time.Time) (user.User, error) {
@@ -635,6 +747,25 @@ func (m *uiIdentity) ConsumeOAuthState(_ context.Context, state string, now time
 	return !exp.Before(now), nil
 }
 
+func (m *uiIdentity) InstallationByGitHubID(_ context.Context, githubInstallationID int64) (*tenant.Installation, error) {
+	for i := range m.installations {
+		if m.installations[i].GitHubInstallationID == githubInstallationID {
+			in := m.installations[i]
+			return &in, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *uiIdentity) DeactivateInstallation(_ context.Context, githubInstallationID int64, _ time.Time) error {
+	for i := range m.installations {
+		if m.installations[i].GitHubInstallationID == githubInstallationID {
+			m.installations[i].Active = false
+		}
+	}
+	return nil
+}
+
 type uiGitHub struct {
 	userID           int64
 	login            string
@@ -645,6 +776,14 @@ type uiGitHub struct {
 	accountID        int64
 	accountLogin     string
 	accountType      string
+	repos            map[int64][]installation.Repo
+}
+
+func (f *uiGitHub) ListRepos(ctx context.Context, installationID int64) ([]installation.Repo, error) {
+	if f.repos == nil {
+		return nil, nil
+	}
+	return f.repos[installationID], nil
 }
 
 func (f *uiGitHub) Exchange(context.Context, string) (string, error) { return "token", nil }

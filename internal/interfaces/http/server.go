@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	authapp "infra-guy/internal/application/auth"
+	"infra-guy/internal/application/installation"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
@@ -28,6 +29,7 @@ type ServerConfig struct {
 	Lookup        commitLookup
 	PublicBaseURL string
 	Auth          *authapp.Service
+	Installations *installation.Service
 }
 
 func NewServer(cfg ServerConfig) http.Handler {

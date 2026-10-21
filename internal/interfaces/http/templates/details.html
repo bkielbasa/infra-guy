@@ -3,13 +3,6 @@
 <div class="panel">
   <h1>Details</h1>
   <form method="post" action="/projects/{{.ID}}">
-    <label>Webhook URL</label>
-    <input type="url" value="{{.WebhookURL}}" readonly>
-    <label>Webhook secret</label>
-    <input type="text" value="{{.Secret}}" readonly>
-    <label class="check"><input type="checkbox" name="rotate_secret"> Rotate secret</label>
-    <label>GitHub token</label>
-    <input type="password" name="token" placeholder="leave blank to keep" autocomplete="off">
     <label class="check"><input type="checkbox" name="auto_approve"{{if .AutoApprove}} checked{{end}}> Auto-approve</label>
     <label>Default branch</label>
     <input type="text" name="branch" value="{{.Branch}}">

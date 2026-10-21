@@ -18,6 +18,7 @@ import (
 	"time"
 
 	authapp "infra-guy/internal/application/auth"
+	"infra-guy/internal/application/installation"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
@@ -87,6 +88,7 @@ func main() {
 	}()
 
 	gh := githubAppClient()
+	identStore := identityAdapter{store: postgres.NewIdentityStore(pool)}
 	h := httpapi.NewServer(httpapi.ServerConfig{
 		Projects: &projectapp.Service{Projects: projects, Now: now, NewID: newID},
 		Runs:     runSvc,
@@ -94,8 +96,12 @@ func main() {
 		Checkout: git.Checkout{}, Lookup: git.CommitLookup{},
 		PublicBaseURL: public,
 		Auth: &authapp.Service{
-			Store: identityAdapter{store: postgres.NewIdentityStore(pool)}, GitHub: gh,
+			Store: identStore, GitHub: gh,
 			Now: now, NewID: newID, PublicBaseURL: public, ClientID: gh.ClientID,
+		},
+		Installations: &installation.Service{
+			Store: identStore, GitHub: githubAdapter{client: gh},
+			Now: now, NewID: newID,
 		},
 	})
 
@@ -215,6 +221,28 @@ func (a identityAdapter) SaveOAuthState(ctx context.Context, state string, expir
 
 func (a identityAdapter) ConsumeOAuthState(ctx context.Context, state string, now time.Time) (bool, error) {
 	return a.store.ConsumeOAuthState(ctx, state, now)
+}
+
+func (a identityAdapter) InstallationByGitHubID(ctx context.Context, githubInstallationID int64) (*tenant.Installation, error) {
+	return a.store.InstallationByGitHubID(ctx, githubInstallationID)
+}
+
+func (a identityAdapter) DeactivateInstallation(ctx context.Context, githubInstallationID int64, now time.Time) error {
+	return a.store.DeactivateInstallation(ctx, githubInstallationID, now)
+}
+
+type githubAdapter struct{ client *github.Client }
+
+func (g githubAdapter) ListRepos(ctx context.Context, installationID int64) ([]installation.Repo, error) {
+	repos, err := g.client.ListRepos(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]installation.Repo, len(repos))
+	for i, r := range repos {
+		out[i] = installation.Repo{ID: r.ID, Owner: r.Owner, Name: r.Name}
+	}
+	return out, nil
 }
 
 func newID() string {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"infra-guy/internal/application/installation"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
@@ -23,9 +24,6 @@ import (
 var content embed.FS
 
 var pages = template.Must(template.ParseFS(content, "templates/*.html"))
-
-// placeholderRepoID stands in until the repository picker supplies the real value.
-const placeholderRepoID int64 = 1
 
 type ui struct{ cfg ServerConfig }
 
@@ -169,16 +167,33 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
-	u.page(w, "New project", "new_project", nil)
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Installations == nil {
+		u.page(w, "New project", "new_project", nil)
+		return
+	}
+	repos, err := u.cfg.Installations.Repos(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, installation.ErrNotInstalled) {
+			var installURL string
+			if u.cfg.Auth != nil {
+				installURL, _ = u.cfg.Auth.InstallURL(r.Context())
+			}
+			u.page(w, "New project", "new_project", map[string]any{"InstallURL": installURL})
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.page(w, "New project", "new_project", map[string]any{"Repos": repos})
 }
 
 func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	repo, err := project.ParseSourceRepo(r.FormValue("repo"))
-	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -187,7 +202,34 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
 	}
-	p, err := u.cfg.Projects.Create(r.Context(), tenantID, r.FormValue("name"), repo, placeholderRepoID, r.FormValue("branch"), r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
+	rawRepoID := r.FormValue("repo_id")
+	repoID, err := strconv.ParseInt(rawRepoID, 10, 64)
+	if err != nil || repoID <= 0 {
+		http.Error(w, "invalid repo_id", http.StatusBadRequest)
+		return
+	}
+	if u.cfg.Installations == nil {
+		http.Error(w, "installations service not configured", http.StatusInternalServerError)
+		return
+	}
+	repos, err := u.cfg.Installations.Repos(r.Context(), tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var match *installation.Repo
+	for i := range repos {
+		if repos[i].ID == repoID {
+			match = &repos[i]
+			break
+		}
+	}
+	if match == nil {
+		http.Error(w, "repository not found", http.StatusBadRequest)
+		return
+	}
+	sourceRepo := project.SourceRepo{Owner: match.Owner, Name: match.Name}
+	p, err := u.cfg.Projects.Create(r.Context(), tenantID, r.FormValue("name"), sourceRepo, match.ID, r.FormValue("branch"), r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
