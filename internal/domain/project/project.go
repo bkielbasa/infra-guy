@@ -7,9 +7,12 @@ import (
 	"time"
 )
 
+const DefaultTerraformVersion = "1.9.8"
+
 var (
-	ErrBusy              = errors.New("another run is active")
-	ErrActiveRunMismatch = errors.New("active run does not match")
+	ErrBusy                    = errors.New("another run is active")
+	ErrActiveRunMismatch       = errors.New("active run does not match")
+	ErrInvalidTerraformVersion = errors.New("invalid terraform version")
 )
 
 type ID string
@@ -22,6 +25,7 @@ type Snapshot struct {
 	Repo             SourceRepo
 	DefaultBranch    string
 	WorkingDirectory string
+	TerraformVersion string
 	AutoApprove      bool
 	Locked           bool
 	StateToken       string
@@ -38,7 +42,8 @@ func New(id ID, name string, repo SourceRepo, now time.Time) (*Project, error) {
 	}
 	return &Project{s: Snapshot{
 		ID: id, Name: strings.TrimSpace(name), Repo: repo,
-		DefaultBranch: "main", CreatedAt: now, UpdatedAt: now,
+		DefaultBranch: "main", TerraformVersion: DefaultTerraformVersion,
+		CreatedAt: now, UpdatedAt: now,
 	}}, nil
 }
 
@@ -61,6 +66,37 @@ func (p *Project) SetDefaultBranch(branch string) error {
 		return fmt.Errorf("invalid branch")
 	}
 	p.s.DefaultBranch = branch
+	return nil
+}
+
+func ValidateTerraformVersion(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return DefaultTerraformVersion, nil
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return "", ErrInvalidTerraformVersion
+	}
+	for _, part := range parts {
+		if part == "" {
+			return "", ErrInvalidTerraformVersion
+		}
+		for i := 0; i < len(part); i++ {
+			if part[i] < '0' || part[i] > '9' {
+				return "", ErrInvalidTerraformVersion
+			}
+		}
+	}
+	return v, nil
+}
+
+func (p *Project) SetTerraformVersion(raw string) error {
+	v, err := ValidateTerraformVersion(raw)
+	if err != nil {
+		return err
+	}
+	p.s.TerraformVersion = v
 	return nil
 }
 

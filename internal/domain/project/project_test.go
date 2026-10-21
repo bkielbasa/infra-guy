@@ -85,3 +85,27 @@ func TestPlacement(t *testing.T) {
 		t.Fatalf("%#v", p.Snapshot())
 	}
 }
+
+func TestTerraformVersion(t *testing.T) {
+	p := sample(t)
+	if p.Snapshot().TerraformVersion != DefaultTerraformVersion {
+		t.Fatalf("default version = %q, want %q", p.Snapshot().TerraformVersion, DefaultTerraformVersion)
+	}
+	if err := p.SetTerraformVersion("1.10.5"); err != nil {
+		t.Fatal(err)
+	}
+	if p.Snapshot().TerraformVersion != "1.10.5" {
+		t.Fatalf("version = %q, want 1.10.5", p.Snapshot().TerraformVersion)
+	}
+	if err := p.SetTerraformVersion(""); err != nil {
+		t.Fatal(err)
+	}
+	if p.Snapshot().TerraformVersion != DefaultTerraformVersion {
+		t.Fatalf("empty reset = %q, want %q", p.Snapshot().TerraformVersion, DefaultTerraformVersion)
+	}
+	for _, bad := range []string{"latest", "1.9", "v1.9.8", "../1.9.8", "1.9.8-beta1", "1.9.8;id"} {
+		if err := p.SetTerraformVersion(bad); err == nil {
+			t.Fatalf("accepted invalid version %q", bad)
+		}
+	}
+}

@@ -21,11 +21,12 @@ type Service struct {
 }
 
 type UpdateInput struct {
-	ID          project.ID
-	Name        string
-	Branch      string
-	Workdir     string
-	AutoApprove bool
+	ID               project.ID
+	Name             string
+	Branch           string
+	Workdir          string
+	TerraformVersion string
+	AutoApprove      bool
 }
 
 func randomSecret() (string, error) {
@@ -88,11 +89,30 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*project.Project,
 	if err := p.SetWorkingDirectory(in.Workdir); err != nil {
 		return nil, err
 	}
+	if in.TerraformVersion != "" {
+		if err := p.SetTerraformVersion(in.TerraformVersion); err != nil {
+			return nil, err
+		}
+	}
 	p.SetAutoApprove(in.AutoApprove)
 	if err := s.Projects.Save(ctx, p); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+func (s *Service) SetTerraformVersion(ctx context.Context, id project.ID, version string) error {
+	p, err := s.Projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %s not found", id)
+	}
+	if err := p.SetTerraformVersion(version); err != nil {
+		return err
+	}
+	return s.Projects.Save(ctx, p)
 }
 
 func (s *Service) SetLocked(ctx context.Context, id project.ID, locked bool) error {

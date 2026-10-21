@@ -83,12 +83,27 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	if snap.StateToken == "" || snap.DefaultBranch != "main" || snap.WorkingDirectory != "terraform" {
 		t.Fatalf("%#v", snap)
 	}
-	updated, err := svc.Update(ctx, UpdateInput{ID: "p1"})
+	if snap.TerraformVersion != project.DefaultTerraformVersion {
+		t.Fatalf("default terraform version = %q", snap.TerraformVersion)
+	}
+	updated, err := svc.Update(ctx, UpdateInput{ID: "p1", TerraformVersion: "1.10.5"})
 	if err != nil || updated.Snapshot().StateToken != snap.StateToken {
 		t.Fatal(err)
 	}
 	if updated.Snapshot().WorkingDirectory != "" {
 		t.Fatalf("empty workdir must mean repository root, got %q", updated.Snapshot().WorkingDirectory)
+	}
+	if updated.Snapshot().TerraformVersion != "1.10.5" {
+		t.Fatalf("updated terraform version = %q, want 1.10.5", updated.Snapshot().TerraformVersion)
+	}
+	if _, err := svc.Update(ctx, UpdateInput{ID: "p1", TerraformVersion: "bad-ver"}); err == nil {
+		t.Fatal("expected invalid terraform version error")
+	}
+	if err := svc.SetTerraformVersion(ctx, "p1", "1.9.8"); err != nil {
+		t.Fatal(err)
+	}
+	if projects.items["p1"].Snapshot().TerraformVersion != "1.9.8" {
+		t.Fatalf("SetTerraformVersion = %q, want 1.9.8", projects.items["p1"].Snapshot().TerraformVersion)
 	}
 	if err := svc.SetLocked(ctx, "p1", true); err != nil || !projects.items["p1"].Snapshot().Locked {
 		t.Fatalf("lock: %v", err)
