@@ -248,6 +248,7 @@ func TestTickPlanOnlyAdvancesAndDeletesWorkspace(t *testing.T) {
 	beginComplete(t, r, run.StepInit, run.StepResult{}, time.Unix(1, 0).UTC())
 	exec := &fakeExecutor{res: Result{
 		ExitCode: 0, PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.", Version: "1.9.8",
+		PlanJSON: []byte(`{"format_version":"1.2"}`),
 	}}
 	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 3, RunID: "run-1", Step: run.StepPlan}}, exec)
 	fx.exec.onRun = func(ctx context.Context) {
@@ -288,6 +289,9 @@ func TestTickPlanOnlyAdvancesAndDeletesWorkspace(t *testing.T) {
 	}
 	if snap.TerraformVersion != "1.9.8" {
 		t.Fatalf("version %q", snap.TerraformVersion)
+	}
+	if string(snap.PlanJSON) != `{"format_version":"1.2"}` {
+		t.Fatalf("PlanJSON %q", string(snap.PlanJSON))
 	}
 	if fx.co.sha != "abc" {
 		t.Fatalf("cloned sha %q", fx.co.sha)
@@ -695,6 +699,7 @@ func TestExecuteClaimedRunsAndCompletesJob(t *testing.T) {
 	beginComplete(t, r, run.StepInit, run.StepResult{}, time.Unix(1, 0).UTC())
 	exec := &fakeExecutor{res: Result{
 		ExitCode: 0, PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.", Version: "1.9.8",
+		PlanJSON: []byte(`{"format_version":"1.2"}`),
 	}}
 	q := &fakeQueue{
 		get: map[int64]*Job{

@@ -48,6 +48,7 @@ type Result struct {
 	ExitCode                int
 	Logs, PlanText, Version string
 	PlanFile                []byte
+	PlanJSON                []byte
 }
 
 type Queue interface {
@@ -287,7 +288,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		}
 	}
 	if err := w.Service.Advance(ctx, job.RunID, job.Step, run.StepResult{
-		ExitCode: res.ExitCode, Logs: res.Logs, PlanText: res.PlanText, PlanFile: res.PlanFile,
+		ExitCode: res.ExitCode, Logs: res.Logs, PlanText: res.PlanText, PlanFile: res.PlanFile, PlanJSON: res.PlanJSON,
 	}); err != nil {
 		return err
 	}

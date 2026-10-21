@@ -26,12 +26,27 @@ type Snapshot struct {
 	DefaultBranch    string
 	WorkingDirectory string
 	TerraformVersion string
+	ApprovalPolicyID string
 	AutoApprove      bool
 	Locked           bool
 	StateToken       string
 	ActiveRunID      string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+type NewInput struct {
+	ID               ID
+	TenantID         string
+	GitHubRepoID     int64
+	Name             string
+	Repo             SourceRepo
+	DefaultBranch    string
+	WorkingDirectory string
+	TerraformVersion string
+	ApprovalPolicyID string
+	AutoApprove      bool
+	Now              time.Time
 }
 
 type Project struct{ s Snapshot }
@@ -47,9 +62,24 @@ func New(id ID, name string, repo SourceRepo, now time.Time) (*Project, error) {
 	}}, nil
 }
 
-func Restore(s Snapshot) *Project { return &Project{s: s} }
+func Restore(s Snapshot) *Project {
+	s.ApprovalPolicyID = strings.TrimSpace(s.ApprovalPolicyID)
+	return &Project{s: s}
+}
+
+func Rehydrate(s Snapshot) *Project { return Restore(s) }
 
 func (p *Project) Snapshot() Snapshot { return p.s }
+
+func (p *Project) ApprovalPolicyID() string { return p.s.ApprovalPolicyID }
+
+func (p *Project) ChangeApprovalPolicy(policyID string) {
+	p.s.ApprovalPolicyID = strings.TrimSpace(policyID)
+}
+
+func (p *Project) SetApprovalPolicyID(policyID string) {
+	p.ChangeApprovalPolicy(policyID)
+}
 
 func (p *Project) SetWorkingDirectory(raw string) error {
 	dir, err := ParseWorkingDirectory(raw)

@@ -24,6 +24,27 @@
   </nav>
   {{.Panel}}
 </div>
+<div class="panel">
+  <h2>Approval Policy</h2>
+  <p>
+    Current policy:
+    {{if .ApprovalPolicyID}}
+    <a href="/policies/{{.ApprovalPolicyID}}">{{if .ApprovalPolicyName}}{{.ApprovalPolicyName}}{{else}}{{.ApprovalPolicyID}}{{end}}</a>
+    {{else}}
+    None (anyone with project access can approve)
+    {{end}}
+  </p>
+  <form method="post" action="/projects/{{.ID}}/policy">
+    <label>Approval Policy</label>
+    <select name="approval_policy_id">
+      <option value="">None (anyone with project access can approve)</option>
+      {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+    <div class="actions">
+      <button type="submit">Save policy</button>
+    </div>
+  </form>
+</div>
 {{end}}
 
 {{define "project_headline"}}

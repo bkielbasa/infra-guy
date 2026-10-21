@@ -90,6 +90,7 @@ type StepResult struct {
 	Logs     string
 	PlanText string
 	PlanFile []byte
+	PlanJSON []byte
 }
 
 type Step struct {
@@ -134,6 +135,7 @@ type Snapshot struct {
 	AutoApprove      bool
 	PlanText         string
 	PlanFile         []byte
+	PlanJSON         []byte
 	Add              int
 	Change           int
 	Destroy          int
@@ -169,13 +171,23 @@ func Open(in OpenInput) (*Run, error) {
 	}}, nil
 }
 
-func Restore(s Snapshot) *Run { return &Run{s: s} }
+func Restore(s Snapshot) *Run {
+	s.Steps = append([]Step(nil), s.Steps...)
+	s.PlanFile = append([]byte(nil), s.PlanFile...)
+	s.PlanJSON = append([]byte(nil), s.PlanJSON...)
+	return &Run{s: s}
+}
 
 func (r *Run) Snapshot() Snapshot {
 	out := r.s
 	out.Steps = append([]Step(nil), r.s.Steps...)
 	out.PlanFile = append([]byte(nil), r.s.PlanFile...)
+	out.PlanJSON = append([]byte(nil), r.s.PlanJSON...)
 	return out
+}
+
+func (r *Run) PlanJSON() []byte {
+	return append([]byte(nil), r.s.PlanJSON...)
 }
 
 func (r *Run) SetTerraformVersion(v string) { r.s.TerraformVersion = v }
@@ -229,6 +241,9 @@ func (r *Run) CompleteStep(name StepName, result StepResult, now time.Time) (Dec
 	case StepPlan:
 		r.s.PlanText = result.PlanText
 		r.s.PlanFile = append([]byte(nil), result.PlanFile...)
+		if len(result.PlanJSON) > 0 {
+			r.s.PlanJSON = append([]byte(nil), result.PlanJSON...)
+		}
 		sum := ParsePlanSummary(result.PlanText)
 		r.s.SummaryPresent = sum.Present
 		r.s.Add, r.s.Change, r.s.Destroy = sum.Add, sum.Change, sum.Destroy

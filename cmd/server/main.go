@@ -23,6 +23,7 @@ import (
 
 	authapp "infra-guy/internal/application/auth"
 	"infra-guy/internal/application/installation"
+	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
@@ -34,6 +35,7 @@ import (
 	"infra-guy/internal/infrastructure/git"
 	"infra-guy/internal/infrastructure/github"
 	"infra-guy/internal/infrastructure/k8s"
+	"infra-guy/internal/infrastructure/opa"
 	"infra-guy/internal/infrastructure/postgres"
 	"infra-guy/internal/infrastructure/terraform"
 	httpapi "infra-guy/internal/interfaces/http"
@@ -132,6 +134,15 @@ func main() {
 	contextRepo := postgres.NewContextRepo(pool, sealer)
 	contextSvc := &tfcontextapp.Service{Contexts: contextRepo, Now: now, NewID: newID}
 
+	policyRepo := postgres.NewPolicyRepo(pool)
+	opaEngine := &opa.Evaluator{}
+	policySvc := &policyapp.Service{
+		Policies: policyRepo,
+		Engine:   opaEngine,
+		Now:      now,
+		NewID:    newID,
+	}
+
 	tfInstaller := &terraform.Installer{CacheDir: filepath.Join(workDir, "bin")}
 	tfCatalog := &terraform.VersionCatalog{}
 
@@ -197,6 +208,7 @@ func main() {
 		Runs:          runSvc,
 		States:        &stateapp.Service{Projects: projects, States: states, Now: now},
 		Contexts:      contextSvc,
+		Policies:      policySvc,
 		Versions:      tfCatalog,
 		Checkout:      git.Checkout{},
 		Lookup:        git.CommitLookup{},

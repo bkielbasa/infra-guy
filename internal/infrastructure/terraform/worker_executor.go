@@ -21,6 +21,6 @@ func (e WorkerExecutor) Run(ctx context.Context, req worker.Request) (worker.Res
 	})
 	return worker.Result{
 		ExitCode: res.ExitCode, Logs: res.Logs, PlanText: res.PlanText,
-		Version: res.Version, PlanFile: res.PlanFile,
+		Version: res.Version, PlanFile: res.PlanFile, PlanJSON: res.PlanJSON,
 	}, err
 }

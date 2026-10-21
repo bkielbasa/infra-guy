@@ -13,6 +13,7 @@ const sessionCookie = "session"
 type ctxKey struct{}
 
 type principal struct {
+	UserID   string
 	Login    string
 	TenantID string
 	Role     string
@@ -25,6 +26,15 @@ func SessionFrom(ctx context.Context) (login, tenantID, role string, ok bool) {
 		return "", "", "", false
 	}
 	return p.Login, p.TenantID, p.Role, true
+}
+
+// PrincipalFrom returns the signed-in user ID, GitHub login, selected tenant, and role.
+func PrincipalFrom(ctx context.Context) (userID, login, tenantID, role string, ok bool) {
+	p, ok := ctx.Value(ctxKey{}).(principal)
+	if !ok {
+		return "", "", "", "", false
+	}
+	return p.UserID, p.Login, p.TenantID, p.Role, true
 }
 
 func withSession(next http.Handler, cfg ServerConfig) http.Handler {
@@ -56,7 +66,7 @@ func withSession(next http.Handler, cfg ServerConfig) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxKey{}, principal{
-			Login: sess.Login, TenantID: sess.TenantID, Role: sess.Role,
+			UserID: sess.UserID, Login: sess.Login, TenantID: sess.TenantID, Role: sess.Role,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

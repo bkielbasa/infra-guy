@@ -2,7 +2,30 @@
 <nav class="crumb"><a href="/">Projects</a> / <a href="/projects/{{.ProjectID}}">{{.ProjectName}}</a> / {{.Title}}</nav>
 <div class="panel">
   {{template "run_headline" .}}
+  {{if .PolicyEval}}
+  <div class="policy-eval">
+    <strong>Approval Policy:</strong> <a href="/policies/{{.PolicyEval.PolicyID}}">{{.PolicyEval.PolicyName}}</a>
+    {{if .PolicyEval.Allowed}}
+    <span class="pill pill-finished">Allowed</span>
+    {{else}}
+    <span class="pill pill-failed">Denied</span>
+    {{end}}
+    {{if .PolicyEval.Error}}
+    <p class="policy-deny">{{.PolicyEval.Error}}</p>
+    {{end}}
+    {{range .PolicyEval.Deny}}
+    <p class="policy-deny">{{.}}</p>
+    {{end}}
+  </div>
+  {{end}}
   {{.Panel}}
+  <details class="policy-input-details">
+    <summary>Policy Input JSON (for Policy Tester)</summary>
+    <div class="actions">
+      <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('policy-input-json-code').textContent)">Copy Policy Input JSON</button>
+    </div>
+    <pre><code id="policy-input-json-code">{{.PolicyInputJSON}}</code></pre>
+  </details>
 </div>
 {{end}}
 
