@@ -16,7 +16,9 @@ import (
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/state"
 	"infra-guy/internal/domain/tenant"
+	"infra-guy/internal/domain/tfcontext"
 	"infra-guy/internal/domain/user"
+	"infra-guy/internal/infrastructure/crypto"
 )
 
 func TestProjectRunAndStateRoundTrip(t *testing.T) {
@@ -45,6 +47,9 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := p.SetWorkingDirectory("terraform"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetTerraformVersion("1.10.5"); err != nil {
 		t.Fatal(err)
 	}
 	p.SetAutoApprove(true)
@@ -91,6 +96,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	wantP, gotP := p.Snapshot(), gotProject.Snapshot()
 	if gotP.ID != wantP.ID || gotP.Name != wantP.Name || gotP.Repo != wantP.Repo ||
 		gotP.DefaultBranch != wantP.DefaultBranch || gotP.WorkingDirectory != wantP.WorkingDirectory ||
+		gotP.TerraformVersion != "1.10.5" || gotP.TerraformVersion != wantP.TerraformVersion ||
 		gotP.AutoApprove != wantP.AutoApprove || gotP.Locked != wantP.Locked ||
 		gotP.StateToken != wantP.StateToken || gotP.ActiveRunID != wantP.ActiveRunID ||
 		gotP.TenantID != wantP.TenantID || gotP.GitHubRepoID != wantP.GitHubRepoID ||
@@ -549,4 +555,117 @@ func containsInstallation(list []tenant.Installation, githubID int64) bool {
 		}
 	}
 	return false
+}
+
+func TestContextRepoCRUDAndEncryption(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := crypto.NewSealer([]byte("test-encryption-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := NewContextRepo(pool, sealer)
+	projects := NewProjectRepo(pool)
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenantID := "ten-ctx-" + suffix
+	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, name, github_account_id, account_type, created_at, updated_at)
+		VALUES ($1, 'acme', $2, 'organization', now(), now())`, tenantID, time.Now().UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+
+	c1, err := tfcontext.New(tfcontext.ID("ctx-1-"+suffix), tenantID, "base", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := tfcontext.New(tfcontext.ID("ctx-2-"+suffix), tenantID, "override", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Create(ctx, c1); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Create(ctx, c2); err != nil {
+		t.Fatal(err)
+	}
+
+	ePlain, _ := tfcontext.NewEntry("e1-"+suffix, tfcontext.KindPlainEnv, "TF_VAR_env", "staging", now)
+	eSec, _ := tfcontext.NewEntry("e2-"+suffix, tfcontext.KindSecretEnv, "AWS_SECRET_ACCESS_KEY", "s3cr3t", now)
+	eFile, _ := tfcontext.NewEntry("e3-"+suffix, tfcontext.KindSecretFile, "~/.kube/config", "kube-yaml-1", now)
+	for _, e := range []tfcontext.Entry{ePlain, eSec, eFile} {
+		if err := repo.UpsertEntry(ctx, c1.Snapshot().ID, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eOverride, _ := tfcontext.NewEntry("e4-"+suffix, tfcontext.KindPlainEnv, "TF_VAR_env", "production", now)
+	if err := repo.UpsertEntry(ctx, c2.Snapshot().ID, eOverride); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify secret is not stored in value_text in raw SQL
+	var rawText string
+	var rawCipher []byte
+	if err := pool.QueryRow(ctx, `SELECT value_text, value_ciphertext FROM context_entries WHERE id = $1`, eSec.ID).Scan(&rawText, &rawCipher); err != nil {
+		t.Fatal(err)
+	}
+	if rawText != "" || len(rawCipher) == 0 {
+		t.Fatalf("secret stored in plaintext or missing ciphertext: text=%q cipherLen=%d", rawText, len(rawCipher))
+	}
+
+	// Get with decryptSecrets=false masks secret values
+	masked, err := repo.Get(ctx, c1.Snapshot().ID, false)
+	if err != nil || masked == nil {
+		t.Fatalf("get masked: %v", err)
+	}
+	for _, e := range masked.Snapshot().Entries {
+		if e.Secret && e.Value != "" {
+			t.Fatalf("expected masked secret to have empty value, got %q", e.Value)
+		}
+		if !e.Secret && e.Value != "staging" {
+			t.Fatalf("plain value = %q, want staging", e.Value)
+		}
+	}
+
+	// Attach contexts in order [c1, c2] to a project and resolve decrypted
+	srcRepo, _ := project.ParseSourceRepo("bklebasa/infra")
+	p, _ := project.New(project.ID("proj-ctx-"+suffix), "infra", srcRepo, now)
+	_ = p.SetPlacement(tenantID, 100)
+	p.SetStateToken("tok")
+	if err := projects.Save(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetProjectContexts(ctx, p.Snapshot().ID, []tfcontext.ID{c1.Snapshot().ID, c2.Snapshot().ID}); err != nil {
+		t.Fatal(err)
+	}
+	attached, err := repo.ListByProject(ctx, p.Snapshot().ID, true)
+	if err != nil || len(attached) != 2 {
+		t.Fatalf("ListByProject: %v len=%d", err, len(attached))
+	}
+	env, files := tfcontext.Resolve(attached)
+	if env["TF_VAR_env"] != "production" || env["AWS_SECRET_ACCESS_KEY"] != "s3cr3t" || string(files[".kube/config"]) != "kube-yaml-1" {
+		t.Fatalf("resolved env=%v files=%v", env, files)
+	}
+
+	byTenant, err := repo.ListByTenant(ctx, tenantID)
+	if err != nil || len(byTenant) != 2 {
+		t.Fatalf("ListByTenant: %v len=%d", err, len(byTenant))
+	}
+	if err := repo.DeleteEntry(ctx, c1.Snapshot().ID, ePlain.ID); err != nil {
+		t.Fatal(err)
+	}
+	afterEntryDel, err := repo.Get(ctx, c1.Snapshot().ID, false)
+	if err != nil || len(afterEntryDel.Snapshot().Entries) != 2 {
+		t.Fatalf("after DeleteEntry: %v len=%d", err, len(afterEntryDel.Snapshot().Entries))
+	}
+	if err := repo.Delete(ctx, c2.Snapshot().ID); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := repo.Get(ctx, c2.Snapshot().ID, false)
+	if err != nil || deleted != nil {
+		t.Fatalf("after Delete: err=%v got=%#v", err, deleted)
+	}
 }

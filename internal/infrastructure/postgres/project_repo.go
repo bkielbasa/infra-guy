@@ -18,13 +18,13 @@ type ProjectRepo struct{ pool *pgxpool.Pool }
 func NewProjectRepo(pool *pgxpool.Pool) *ProjectRepo { return &ProjectRepo{pool: pool} }
 
 const projectColumns = `id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-	auto_approve, locked, state_token, active_run_id, created_at, updated_at`
+	terraform_version, auto_approve, locked, state_token, active_run_id, created_at, updated_at`
 
 func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	s := p.Snapshot()
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO projects (`+projectColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (id) DO UPDATE SET
 			tenant_id = EXCLUDED.tenant_id,
 			github_repo_id = EXCLUDED.github_repo_id,
@@ -33,15 +33,23 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			repo_name = EXCLUDED.repo_name,
 			default_branch = EXCLUDED.default_branch,
 			working_directory = EXCLUDED.working_directory,
+			terraform_version = EXCLUDED.terraform_version,
 			auto_approve = EXCLUDED.auto_approve,
 			state_token = EXCLUDED.state_token,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
-		s.AutoApprove, s.Locked, s.StateToken, s.ActiveRunID,
+		firstNonEmptyVersion(s.TerraformVersion), s.AutoApprove, s.Locked, s.StateToken, s.ActiveRunID,
 		s.CreatedAt, s.UpdatedAt,
 	)
 	return err
+}
+
+func firstNonEmptyVersion(v string) string {
+	if v == "" {
+		return project.DefaultTerraformVersion
+	}
+	return v
 }
 
 func (r *ProjectRepo) SetLocked(ctx context.Context, id project.ID, locked bool) error {
@@ -101,7 +109,7 @@ func scanProject(row projectScanner) (*project.Project, error) {
 	var created, updated time.Time
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.GitHubRepoID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
-		&s.AutoApprove, &s.Locked, &s.StateToken, &s.ActiveRunID,
+		&s.TerraformVersion, &s.AutoApprove, &s.Locked, &s.StateToken, &s.ActiveRunID,
 		&created, &updated,
 	); err != nil {
 		return nil, err
