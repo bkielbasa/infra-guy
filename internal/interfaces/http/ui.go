@@ -340,12 +340,21 @@ func (u *ui) trigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ps := p.Snapshot()
-	sha, err := u.cfg.Checkout.BranchTip(r.Context(), ps.Repo.CloneURL(), ps.GitHubToken, ps.DefaultBranch)
+	if u.cfg.Tokens == nil {
+		http.Error(w, "GitHub App is not installed", http.StatusBadGateway)
+		return
+	}
+	token, err := u.cfg.Tokens.InstallationToken(r.Context(), ps.TenantID)
+	if err != nil {
+		http.Error(w, "GitHub App is not installed", http.StatusBadGateway)
+		return
+	}
+	sha, err := u.cfg.Checkout.BranchTip(r.Context(), ps.Repo.CloneURL(), token, ps.DefaultBranch)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	msg, author, err := u.cfg.Lookup.Lookup(r.Context(), ps.Repo, ps.GitHubToken, sha)
+	msg, author, err := u.cfg.Lookup.Lookup(r.Context(), ps.Repo, token, sha)
 	if err != nil {
 		msg, author = "", ""
 	}

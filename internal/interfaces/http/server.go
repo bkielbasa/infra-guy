@@ -10,6 +10,7 @@ import (
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
+	"infra-guy/internal/application/worker"
 	"infra-guy/internal/domain/project"
 )
 
@@ -27,6 +28,7 @@ type ServerConfig struct {
 	States        *stateapp.Service
 	Checkout      brancher
 	Lookup        commitLookup
+	Tokens        worker.TokenSource
 	PublicBaseURL string
 	Auth          *authapp.Service
 	Installations *installation.Service

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,6 +124,12 @@ func (e *fakeExecutor) Run(ctx context.Context, req Request) (Result, error) {
 
 func testNow() time.Time { return time.Unix(50, 0).UTC() }
 
+type tokenSourceFunc func(ctx context.Context, tenantID string) (string, error)
+
+func (f tokenSourceFunc) InstallationToken(ctx context.Context, tenantID string) (string, error) {
+	return f(ctx, tenantID)
+}
+
 func testProject(t *testing.T) *project.Project {
 	t.Helper()
 	repo, err := project.ParseSourceRepo("bklebasa/infra")
@@ -133,7 +140,9 @@ func testProject(t *testing.T) *project.Project {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.SetGitHubToken("gh-token")
+	if err := p.SetPlacement("ten-1", 1); err != nil {
+		t.Fatal(err)
+	}
 	p.SetStateToken("state-token")
 	return p
 }
@@ -179,6 +188,12 @@ func newFixture(t *testing.T, r *run.Run, p *project.Project, q *fakeQueue, exec
 		WorkerID: "w1", Queue: q, Projects: projects, Runs: runs, Service: svc,
 		Checkout: co, Executor: exec, WorkDir: work, InternalBaseURL: "http://127.0.0.1:8759",
 		Now: testNow,
+		Tokens: tokenSourceFunc(func(ctx context.Context, tenantID string) (string, error) {
+			if tenantID != "ten-1" {
+				t.Fatalf("tenant %s", tenantID)
+			}
+			return "ghs_install", nil
+		}),
 	}
 	return &fixture{w: w, queue: q, co: co, exec: exec, runs: runs, sched: sched, ws: ws}
 }
@@ -248,14 +263,14 @@ func TestTickPlanOnlyAdvancesAndDeletesWorkspace(t *testing.T) {
 	if fx.co.sha != "abc" {
 		t.Fatalf("cloned sha %q", fx.co.sha)
 	}
-	if fx.co.dest != fx.ws || fx.co.token != "gh-token" || fx.co.url != p.Snapshot().Repo.CloneURL() {
+	if fx.co.dest != fx.ws || fx.co.token != "ghs_install" || fx.co.url != p.Snapshot().Repo.CloneURL() {
 		t.Fatalf("clone dest=%q url=%q token=%q", fx.co.dest, fx.co.url, fx.co.token)
 	}
 	if !fx.exec.called {
 		t.Fatal("executor not called")
 	}
 	if fx.exec.req.WorkDir != fx.ws || fx.exec.req.InternalBaseURL != "http://127.0.0.1:8759" || fx.exec.req.ProjectID != "p1" || fx.exec.req.StateToken != "state-token" || fx.exec.req.Step != run.StepPlan ||
-		fx.exec.req.RunID != "run-1" || fx.exec.req.GitHubToken != "gh-token" {
+		fx.exec.req.RunID != "run-1" || fx.exec.req.GitHubToken != "ghs_install" {
 		t.Fatalf("executor req %#v", fx.exec.req)
 	}
 	if _, err := os.Stat(fx.ws); !os.IsNotExist(err) {
@@ -445,5 +460,46 @@ func TestLoopStopsWhenContextDone(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Loop did not return")
+	}
+}
+
+func TestExecuteTokenErrorFailsBeforeClone(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-1", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 3, RunID: "run-1", Step: run.StepPlan}}, nil)
+	fx.w.Tokens = tokenSourceFunc(func(ctx context.Context, tenantID string) (string, error) {
+		return "", errors.New("installation inactive")
+	})
+
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if fx.co.dest != "" {
+		t.Fatalf("clone was called with dest: %s", fx.co.dest)
+	}
+	if fx.exec.called {
+		t.Fatal("executor was called")
+	}
+
+	saved, err := fx.runs.Get(ctx, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := saved.Snapshot()
+	if snap.Status != run.StatusFailed {
+		t.Fatalf("status %s, want failed", snap.Status)
+	}
+	if snap.Error != "installation inactive" {
+		t.Fatalf("error %q, want installation inactive", snap.Error)
+	}
+	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 3 {
+		t.Fatalf("completed jobs %#v, want [3]", fx.queue.completed)
 	}
 }

@@ -48,7 +48,35 @@ func main() {
 	}
 	public := os.Getenv("PUBLIC_BASE_URL")
 	if public == "" {
-		public = "http://localhost:8080"
+		log.Fatal("PUBLIC_BASE_URL is required")
+	}
+	appIDRaw := os.Getenv("GITHUB_APP_ID")
+	if appIDRaw == "" {
+		log.Fatal("GITHUB_APP_ID is required")
+	}
+	appID, err := strconv.ParseInt(appIDRaw, 10, 64)
+	if err != nil {
+		log.Fatalf("GITHUB_APP_ID: %v", err)
+	}
+	keyPath := os.Getenv("GITHUB_APP_PRIVATE_KEY_FILE")
+	if keyPath == "" {
+		log.Fatal("GITHUB_APP_PRIVATE_KEY_FILE is required")
+	}
+	appKey, err := loadAppKey(keyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	webhookSecret := os.Getenv("GITHUB_APP_WEBHOOK_SECRET")
+	if webhookSecret == "" {
+		log.Fatal("GITHUB_APP_WEBHOOK_SECRET is required")
+	}
+	clientID := os.Getenv("GITHUB_APP_CLIENT_ID")
+	if clientID == "" {
+		log.Fatal("GITHUB_APP_CLIENT_ID is required")
+	}
+	clientSecret := os.Getenv("GITHUB_APP_CLIENT_SECRET")
+	if clientSecret == "" {
+		log.Fatal("GITHUB_APP_CLIENT_SECRET is required")
 	}
 	workDir := os.Getenv("WORK_DIR")
 	if workDir == "" {
@@ -73,12 +101,23 @@ func main() {
 	queue := postgres.NewQueue(pool)
 	now := func() time.Time { return time.Now().UTC() }
 
+	gh := &github.Client{
+		AppID:        appID,
+		Key:          appKey,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+	}
+	tokens := &github.Tokens{Client: gh}
+	identStore := identityAdapter{store: postgres.NewIdentityStore(pool)}
+	tokenSource := tenantTokenSource{store: identStore, tokens: tokens}
+
 	runSvc := &runapp.Service{Projects: projects, Runs: runs, Schedule: queue, Now: now, NewID: newID}
 	w := &worker.Worker{
 		WorkerID: workerID(), Queue: postgres.WorkerQueue{Queue: queue},
 		Projects: projects, Runs: runs, Service: runSvc,
 		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{}},
-		WorkDir: workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
+		Tokens:          tokenSource,
+		WorkDir:         workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
 	}
 	workerCtx, stopWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})
@@ -87,13 +126,13 @@ func main() {
 		w.Loop(workerCtx)
 	}()
 
-	gh := githubAppClient()
-	identStore := identityAdapter{store: postgres.NewIdentityStore(pool)}
 	h := httpapi.NewServer(httpapi.ServerConfig{
-		Projects: &projectapp.Service{Projects: projects, Now: now, NewID: newID},
-		Runs:     runSvc,
-		States:   &stateapp.Service{Projects: projects, States: states, Now: now},
-		Checkout: git.Checkout{}, Lookup: git.CommitLookup{},
+		Projects:      &projectapp.Service{Projects: projects, Now: now, NewID: newID},
+		Runs:          runSvc,
+		States:        &stateapp.Service{Projects: projects, States: states, Now: now},
+		Checkout:      git.Checkout{},
+		Lookup:        git.CommitLookup{},
+		Tokens:        tokenSource,
 		PublicBaseURL: public,
 		Auth: &authapp.Service{
 			Store: identStore, GitHub: gh,
@@ -103,6 +142,7 @@ func main() {
 			Store: identStore, GitHub: githubAdapter{client: gh},
 			Now: now, NewID: newID,
 		},
+		WebhookSecret: webhookSecret,
 	})
 
 	srv := &http.Server{Addr: addr, Handler: h}
@@ -131,25 +171,20 @@ func internalBaseURL(addr string) string {
 	return "http://127.0.0.1:" + port
 }
 
-func githubAppClient() *github.Client {
-	c := &github.Client{
-		ClientID: os.Getenv("GITHUB_APP_CLIENT_ID"), ClientSecret: os.Getenv("GITHUB_APP_CLIENT_SECRET"),
+type tenantTokenSource struct {
+	store  identityAdapter
+	tokens *github.Tokens
+}
+
+func (s tenantTokenSource) InstallationToken(ctx context.Context, tenantID string) (string, error) {
+	in, err := s.store.ActiveInstallation(ctx, tenantID)
+	if err != nil {
+		return "", err
 	}
-	if raw := os.Getenv("GITHUB_APP_ID"); raw != "" {
-		id, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			log.Fatalf("GITHUB_APP_ID: %v", err)
-		}
-		c.AppID = id
+	if in == nil || !in.Active {
+		return "", installation.ErrNotInstalled
 	}
-	if path := os.Getenv("GITHUB_APP_PRIVATE_KEY_FILE"); path != "" {
-		key, err := loadAppKey(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-		c.Key = key
-	}
-	return c
+	return s.tokens.Token(ctx, in.GitHubInstallationID)
 }
 
 func loadAppKey(path string) (*rsa.PrivateKey, error) {

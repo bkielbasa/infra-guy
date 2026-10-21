@@ -62,6 +62,10 @@ type Executor interface {
 	Run(ctx context.Context, req Request) (Result, error)
 }
 
+type TokenSource interface {
+	InstallationToken(ctx context.Context, tenantID string) (string, error)
+}
+
 type Worker struct {
 	WorkerID        string
 	Queue           Queue
@@ -70,6 +74,7 @@ type Worker struct {
 	Service         *runapp.Service
 	Checkout        Checkout
 	Executor        Executor
+	Tokens          TokenSource
 	WorkDir         string
 	InternalBaseURL string
 	Now             func() time.Time
@@ -167,11 +172,26 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	}
 	ps := p.Snapshot()
 	rs := r.Snapshot()
+
+	if w.Tokens == nil {
+		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "missing token source"); ferr != nil {
+			return ferr
+		}
+		return w.completeAndCleanup(ctx, job)
+	}
+	token, err := w.Tokens.InstallationToken(ctx, ps.TenantID)
+	if err != nil {
+		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
+			return ferr
+		}
+		return w.completeAndCleanup(ctx, job)
+	}
+
 	dest := filepath.Join(w.WorkDir, string(job.RunID))
 	if err := os.RemoveAll(dest); err != nil {
 		return err
 	}
-	if err := w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), ps.GitHubToken, rs.SHA); err != nil {
+	if err := w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA); err != nil {
 		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
 			return ferr
 		}
@@ -193,7 +213,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	defer cancel()
 	res, err := w.Executor.Run(stepCtx, Request{
 		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID), RunID: string(job.RunID),
-		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: ps.GitHubToken,
+		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: token,
 		Step: job.Step, PlanFile: rs.PlanFile,
 	})
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {

@@ -62,17 +62,23 @@ type nopSched struct{}
 func (nopSched) Enqueue(context.Context, run.ID, run.StepName) error { return nil }
 
 type stubTip struct {
-	sha string
-	err error
+	sha   string
+	err   error
+	token string
 }
 
-func (s stubTip) BranchTip(context.Context, string, string, string) (string, error) {
+func (s *stubTip) BranchTip(ctx context.Context, cloneURL, token, branch string) (string, error) {
+	s.token = token
 	return s.sha, s.err
 }
 
-type stubLookup struct{ message, author string }
+type stubLookup struct {
+	message, author string
+	token           string
+}
 
-func (s stubLookup) Lookup(context.Context, project.SourceRepo, string, string) (string, string, error) {
+func (s *stubLookup) Lookup(ctx context.Context, repo project.SourceRepo, token, sha string) (string, string, error) {
+	s.token = token
 	return s.message, s.author, nil
 }
 
@@ -83,6 +89,28 @@ func uiServices(projects *memProjects, runs *memRuns, states *memStates) (*proje
 }
 
 const uiSessionID = "sess"
+
+type uiTokenSource struct {
+	store *uiIdentity
+	err   error
+}
+
+func (s uiTokenSource) InstallationToken(ctx context.Context, tenantID string) (string, error) {
+	if s.err != nil {
+		return "", s.err
+	}
+	if s.store == nil {
+		return "ghs_install", nil
+	}
+	in, err := s.store.ActiveInstallation(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	if in == nil || !in.Active {
+		return "", installation.ErrNotInstalled
+	}
+	return "ghs_install", nil
+}
 
 func uiHandler(t *testing.T, projects *memProjects, runs *memRuns, states *memStates, login string) http.Handler {
 	t.Helper()
@@ -97,7 +125,8 @@ func uiHandler(t *testing.T, projects *memProjects, runs *memRuns, states *memSt
 	}
 	return NewServer(ServerConfig{
 		Projects: proj, Runs: runsSvc, States: st,
-		Checkout: stubTip{sha: "abc1234"}, Lookup: stubLookup{},
+		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
 		PublicBaseURL: "http://localhost:8080",
 		Auth: &authapp.Service{
 			Store: store,
@@ -242,6 +271,82 @@ func TestRunPageStateUpdated(t *testing.T) {
 	rr := getUI(t, h, "/runs/r-need")
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "2026-03-04 15:06") {
 		t.Fatalf("run state updated %d %s", rr.Code, rr.Body.Bytes())
+	}
+}
+
+func TestTriggerWithoutInstallationReturns502(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": listProject(t)}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+	proj, runsSvc, st := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	tip := &stubTip{sha: "abc1234"}
+	lookup := &stubLookup{message: "commit msg", author: "author"}
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		Checkout: tip, Lookup: lookup,
+		Tokens:        uiTokenSource{err: errors.New("installation inactive")},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	rr := postUI(t, h, "/projects/p1/trigger", nil)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("trigger without installation returned code %d, want 502", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "GitHub App is not installed") {
+		t.Fatalf("expected body to contain 'GitHub App is not installed', got %q", rr.Body.String())
+	}
+	if len(runs.items) != 0 {
+		t.Fatalf("expected no runs opened, got %d", len(runs.items))
+	}
+}
+
+func TestTriggerPassesInstallationToken(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": listProject(t)}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+	proj, runsSvc, st := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	tip := &stubTip{sha: "abc1234"}
+	lookup := &stubLookup{message: "commit msg", author: "author"}
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		Checkout: tip, Lookup: lookup,
+		Tokens:        uiTokenSource{},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	rr := postUI(t, h, "/projects/p1/trigger", nil)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("trigger returned code %d, want 303: %s", rr.Code, rr.Body.String())
+	}
+	if tip.token != "ghs_install" {
+		t.Fatalf("tip.token = %q, want 'ghs_install'", tip.token)
+	}
+	if lookup.token != "ghs_install" {
+		t.Fatalf("lookup.token = %q, want 'ghs_install'", lookup.token)
 	}
 }
 
@@ -553,7 +658,8 @@ func TestNewProjectPickerAndCreate(t *testing.T) {
 	}
 	h := NewServer(ServerConfig{
 		Projects: proj, Runs: runsSvc, States: st,
-		Checkout: stubTip{sha: "abc1234"}, Lookup: stubLookup{},
+		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
 		PublicBaseURL: "http://localhost:8080",
 		Auth: &authapp.Service{
 			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
@@ -579,7 +685,8 @@ func TestNewProjectPickerAndCreate(t *testing.T) {
 	noInstStore.installations = nil
 	hNoInst := NewServer(ServerConfig{
 		Projects: proj, Runs: runsSvc, States: st,
-		Checkout: stubTip{sha: "abc1234"}, Lookup: stubLookup{},
+		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
+		Tokens:        uiTokenSource{store: noInstStore},
 		PublicBaseURL: "http://localhost:8080",
 		Auth: &authapp.Service{
 			Store: noInstStore, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
@@ -624,7 +731,8 @@ func uiWithAuth(t *testing.T, projects *memProjects, store *uiIdentity, gh *uiGi
 	proj, runsSvc, st := uiServices(projects, &memRuns{items: map[run.ID]*run.Run{}}, &memStates{items: map[string]*state.State{}})
 	return NewServer(ServerConfig{
 		Projects: proj, Runs: runsSvc, States: st,
-		Checkout: stubTip{sha: "abc1234"}, Lookup: stubLookup{},
+		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
 		PublicBaseURL: "http://localhost:8080",
 		Auth: &authapp.Service{
 			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
