@@ -1394,6 +1394,7 @@ func (u *ui) policies(w http.ResponseWriter, r *http.Request) {
 	}
 	u.page(w, "Policies", "policies", map[string]any{
 		"Policies":        rows,
+		"DefaultRego":     defaultSampleRego,
 		"SampleRego":      defaultSampleRego,
 		"SampleInputJSON": defaultSampleInputJSON,
 	})
