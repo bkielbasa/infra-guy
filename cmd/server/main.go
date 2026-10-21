@@ -7,7 +7,9 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,6 +33,7 @@ import (
 	"infra-guy/internal/infrastructure/crypto"
 	"infra-guy/internal/infrastructure/git"
 	"infra-guy/internal/infrastructure/github"
+	"infra-guy/internal/infrastructure/k8s"
 	"infra-guy/internal/infrastructure/postgres"
 	"infra-guy/internal/infrastructure/terraform"
 	httpapi "infra-guy/internal/interfaces/http"
@@ -40,6 +44,11 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	jobID, err := parseJobID(os.Args[1:], os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -94,8 +103,10 @@ func main() {
 		log.Fatal(err)
 	}
 	defer pool.Close()
-	if err := postgres.Migrate(ctx, pool); err != nil {
-		log.Fatal(err)
+	if jobID == 0 {
+		if err := postgres.Migrate(ctx, pool); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	projects := postgres.NewProjectRepo(pool)
@@ -143,6 +154,37 @@ func main() {
 		Contexts:        contextSvc,
 		WorkDir:         workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
 	}
+	if jobID > 0 {
+		if err := w.ExecuteClaimed(ctx, jobID); err != nil {
+			log.Fatalf("execute job %d: %v", jobID, err)
+		}
+		return
+	}
+
+	workerMode := strings.TrimSpace(os.Getenv("WORKER_MODE"))
+	if workerMode == "" {
+		workerMode = "local"
+	}
+	switch workerMode {
+	case "local":
+		w.Dispatcher = nil
+	case "k8s":
+		dispatcher, err := k8s.NewInClusterDispatcher(k8s.Config{
+			Image:              os.Getenv("WORKER_IMAGE"),
+			ImagePullPolicy:    os.Getenv("WORKER_IMAGE_PULL_POLICY"),
+			Namespace:          os.Getenv("WORKER_K8S_NAMESPACE"),
+			ServiceAccountName: os.Getenv("WORKER_SERVICE_ACCOUNT"),
+			EnvSecretName:      os.Getenv("WORKER_ENV_SECRET"),
+			PassThroughEnv:     buildWorkerPassThroughEnv(os.Getenv, w.InternalBaseURL),
+		})
+		if err != nil {
+			log.Fatalf("k8s worker dispatcher: %v", err)
+		}
+		w.Dispatcher = dispatcher
+	default:
+		log.Fatalf("unsupported WORKER_MODE: %s", workerMode)
+	}
+
 	workerCtx, stopWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})
 	go func() {
@@ -189,12 +231,60 @@ func main() {
 	}
 }
 
+func parseJobID(args []string, getenv func(string) string) (int64, error) {
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jobID int64
+	fs.Int64Var(&jobID, "job-id", 0, "execute a single claimed job by ID and exit")
+	if err := fs.Parse(args); err != nil {
+		return 0, err
+	}
+	if jobID == 0 && getenv != nil {
+		if raw := strings.TrimSpace(getenv("WORKER_JOB_ID")); raw != "" {
+			parsed, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("WORKER_JOB_ID: %w", err)
+			}
+			jobID = parsed
+		}
+	}
+	if jobID < 0 {
+		return 0, fmt.Errorf("job-id must be non-negative: %d", jobID)
+	}
+	return jobID, nil
+}
+
 func internalBaseURL(addr string) string {
+	return resolveInternalBaseURL(addr, os.Getenv("INTERNAL_BASE_URL"))
+}
+
+func resolveInternalBaseURL(addr, override string) string {
+	if trimmed := strings.TrimRight(strings.TrimSpace(override), "/"); trimmed != "" {
+		return trimmed
+	}
 	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		log.Fatalf("HTTP_ADDR: %v", err)
 	}
 	return "http://127.0.0.1:" + port
+}
+
+func buildWorkerPassThroughEnv(getenv func(string) string, internalURL string) map[string]string {
+	env := map[string]string{
+		"DATABASE_URL":                getenv("DATABASE_URL"),
+		"PUBLIC_BASE_URL":             getenv("PUBLIC_BASE_URL"),
+		"INTERNAL_BASE_URL":           internalURL,
+		"GITHUB_APP_ID":               getenv("GITHUB_APP_ID"),
+		"GITHUB_APP_PRIVATE_KEY_FILE": getenv("GITHUB_APP_PRIVATE_KEY_FILE"),
+		"GITHUB_APP_WEBHOOK_SECRET":   getenv("GITHUB_APP_WEBHOOK_SECRET"),
+		"GITHUB_APP_CLIENT_ID":        getenv("GITHUB_APP_CLIENT_ID"),
+		"GITHUB_APP_CLIENT_SECRET":    getenv("GITHUB_APP_CLIENT_SECRET"),
+		"WORK_DIR":                    "/work",
+	}
+	if key := getenv("CONTEXT_ENCRYPTION_KEY"); key != "" {
+		env["CONTEXT_ENCRYPTION_KEY"] = key
+	}
+	return env
 }
 
 type tenantTokenSource struct {
