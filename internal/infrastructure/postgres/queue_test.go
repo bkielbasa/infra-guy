@@ -259,10 +259,25 @@ func TestQueueHeartbeatAndComplete(t *testing.T) {
 	if pendingLocked != nil {
 		t.Fatalf("heartbeat on pending set locked_at to %v", pendingLocked)
 	}
+	if gotPending, err := q.Get(ctx, pendingID); err != nil || gotPending != nil {
+		t.Fatalf("Get on pending job = %#v, err = %v; want nil, nil", gotPending, err)
+	}
+	wq := WorkerQueue{Queue: q}
+	if gotPendingW, err := wq.Get(ctx, pendingID); err != nil || gotPendingW != nil {
+		t.Fatalf("WorkerQueue.Get on pending job = %#v, err = %v; want nil, nil", gotPendingW, err)
+	}
 
 	job, err := q.Claim(ctx, "worker-hb", projects)
 	if err != nil || job == nil || job.RunID != runID || job.Step != run.StepPlan {
 		t.Fatalf("claim: job=%#v err=%v", job, err)
+	}
+	gotRunning, err := q.Get(ctx, job.ID)
+	if err != nil || gotRunning == nil || *gotRunning != *job {
+		t.Fatalf("Get on running job = %#v, err = %v; want %#v", gotRunning, err, job)
+	}
+	gotRunningW, err := wq.Get(ctx, job.ID)
+	if err != nil || gotRunningW == nil || gotRunningW.ID != job.ID || gotRunningW.RunID != job.RunID || gotRunningW.Step != job.Step || gotRunningW.Attempts != job.Attempts {
+		t.Fatalf("WorkerQueue.Get on running job = %#v, err = %v; want %#v", gotRunningW, err, job)
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE jobs SET locked_at = now() - interval '1 minute' WHERE id = $1`, job.ID); err != nil {
@@ -281,6 +296,9 @@ func TestQueueHeartbeatAndComplete(t *testing.T) {
 
 	if err := q.Complete(ctx, job.ID); err != nil {
 		t.Fatal(err)
+	}
+	if gotCompleted, err := q.Get(ctx, job.ID); err != nil || gotCompleted != nil {
+		t.Fatalf("Get on completed job = %#v, err = %v; want nil, nil", gotCompleted, err)
 	}
 	var status string
 	var completeLocked *time.Time
