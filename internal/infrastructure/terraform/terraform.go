@@ -93,6 +93,9 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 	}
 
 	homeDir := filepath.Join(req.WorkDir, ".home")
+	if err := os.RemoveAll(homeDir); err != nil {
+		return Result{}, err
+	}
 	if err := os.MkdirAll(homeDir, 0o700); err != nil {
 		return Result{}, err
 	}
