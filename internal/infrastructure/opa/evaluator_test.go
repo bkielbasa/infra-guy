@@ -99,8 +99,8 @@ allow if {
 		if err != nil {
 			t.Fatalf("evaluate bob: %v", err)
 		}
-		if resBob.Allowed {
-			t.Fatalf("expected bob denied, got %+v", resBob)
+		if resBob.Allowed || !resBob.Undecided || resBob.Status != StatusUndecided {
+			t.Fatalf("expected bob undecided (not allowed), got %+v", resBob)
 		}
 	})
 
@@ -194,7 +194,7 @@ deny contains msg if {
 		}
 	})
 
-	t.Run("policy with only deny rules and no allow rule", func(t *testing.T) {
+	t.Run("policy with only deny rules is undecided when no deny matches and denied when deny matches", func(t *testing.T) {
 		code := `
 package infraguy
 
@@ -213,8 +213,8 @@ deny contains "cannot destroy resources" if {
 		if err != nil {
 			t.Fatalf("evaluate safe plan: %v", err)
 		}
-		if !resSafe.Allowed || len(resSafe.Deny) != 0 {
-			t.Fatalf("expected safe plan Allowed=true, got %+v", resSafe)
+		if resSafe.Allowed || !resSafe.Undecided || resSafe.Status != StatusUndecided || len(resSafe.Deny) != 0 {
+			t.Fatalf("expected safe plan without allow rule to be Undecided, got %+v", resSafe)
 		}
 
 		resDestroy, err := ev.Evaluate(ctx, code, map[string]any{
@@ -227,8 +227,47 @@ deny contains "cannot destroy resources" if {
 		if err != nil {
 			t.Fatalf("evaluate destroy plan: %v", err)
 		}
-		if resDestroy.Allowed || len(resDestroy.Deny) != 1 || resDestroy.Deny[0] != "cannot destroy resources" {
+		if resDestroy.Allowed || resDestroy.Undecided || resDestroy.Status != StatusDenied || len(resDestroy.Deny) != 1 || resDestroy.Deny[0] != "cannot destroy resources" {
 			t.Fatalf("expected destroy plan denied, got %+v", resDestroy)
+		}
+	})
+
+	t.Run("policy with allow if count(input.approvals) > 2 is undecided until 3 approvals", func(t *testing.T) {
+		code := `
+package infraguy.approval
+
+import rego.v1
+
+allow if {
+	count(input.approvals) > 2
+}
+`
+		res0, err := ev.Evaluate(ctx, code, map[string]any{})
+		if err != nil {
+			t.Fatalf("evaluate 0 approvals: %v", err)
+		}
+		if res0.Allowed || !res0.Undecided || res0.Status != StatusUndecided {
+			t.Fatalf("expected Undecided with 0 approvals, got %+v", res0)
+		}
+
+		res2, err := ev.Evaluate(ctx, code, map[string]any{
+			"approvals": []any{map[string]any{"login": "a"}, map[string]any{"login": "b"}},
+		})
+		if err != nil {
+			t.Fatalf("evaluate 2 approvals: %v", err)
+		}
+		if res2.Allowed || !res2.Undecided || res2.Status != StatusUndecided {
+			t.Fatalf("expected Undecided with 2 approvals, got %+v", res2)
+		}
+
+		res3, err := ev.Evaluate(ctx, code, map[string]any{
+			"approvals": []any{map[string]any{"login": "a"}, map[string]any{"login": "b"}, map[string]any{"login": "c"}},
+		})
+		if err != nil {
+			t.Fatalf("evaluate 3 approvals: %v", err)
+		}
+		if !res3.Allowed || res3.Undecided || res3.Status != StatusAllowed {
+			t.Fatalf("expected Allowed with 3 approvals, got %+v", res3)
 		}
 	})
 }

@@ -49,7 +49,11 @@
     <button type="button" disabled>Approved ({{.ApprovalCount}})</button>
     {{end}}
     {{if and .PolicyEval (not .PolicyEval.Allowed)}}
+    {{if .PolicyEval.Undecided}}
+    <button type="button" class="btn-trigger" disabled>Approval undecided by policy</button>
+    {{else}}
     <button type="button" class="btn-trigger" disabled>Approval blocked by policy</button>
+    {{end}}
     {{else}}
     <form method="post" action="/runs/{{.ID}}/confirm" hx-post="/runs/{{.ID}}/confirm" hx-target="#run-panel" hx-swap="outerHTML" class="inline">
       <button type="submit" class="btn-trigger">Confirm</button>

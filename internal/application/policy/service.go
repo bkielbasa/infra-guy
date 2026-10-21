@@ -65,10 +65,12 @@ type ProjectInfo struct {
 }
 
 type ApprovalDecision struct {
-	PolicyID   policy.ID `json:"policy_id"`
-	PolicyName string    `json:"policy_name"`
-	Allowed    bool      `json:"allowed"`
-	Deny       []string  `json:"deny"`
+	PolicyID   policy.ID          `json:"policy_id"`
+	PolicyName string             `json:"policy_name"`
+	Status     opa.DecisionStatus `json:"status"`
+	Allowed    bool               `json:"allowed"`
+	Undecided  bool               `json:"undecided"`
+	Deny       []string           `json:"deny"`
 }
 
 type RunPolicyDecision = ApprovalDecision
@@ -252,6 +254,7 @@ func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo, approva
 func (s *Service) EvaluateApproval(ctx context.Context, tenantID string, policyID policy.ID, planJSON []byte, u UserInfo, p ProjectInfo, approvals ...[]ApprovalInfo) (*ApprovalDecision, error) {
 	if strings.TrimSpace(string(policyID)) == "" {
 		return &ApprovalDecision{
+			Status:  opa.StatusAllowed,
 			Allowed: true,
 			Deny:    []string{},
 		}, nil
@@ -271,7 +274,9 @@ func (s *Service) EvaluateApproval(ctx context.Context, tenantID string, policyI
 	return &ApprovalDecision{
 		PolicyID:   pol.ID(),
 		PolicyName: pol.Name(),
+		Status:     res.Status,
 		Allowed:    res.Allowed,
+		Undecided:  res.Undecided,
 		Deny:       res.Deny,
 	}, nil
 }

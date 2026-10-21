@@ -73,7 +73,13 @@ async function runPolicyTest() {
       return;
     }
     const denyText = (data.deny && data.deny.length > 0) ? data.deny.join('; ') : '';
-    setPolicyTestResult(resultEl, data.allowed ? 'pill-finished' : 'pill-failed', data.allowed ? 'Allowed' : 'Denied', denyText);
+    if (data.allowed) {
+      setPolicyTestResult(resultEl, 'pill-finished', 'Allowed', denyText);
+    } else if (data.undecided || data.status === 'undecided') {
+      setPolicyTestResult(resultEl, 'pill-unconfirmed', 'Undecided', denyText);
+    } else {
+      setPolicyTestResult(resultEl, 'pill-failed', 'Denied', denyText);
+    }
   } catch (err) {
     setPolicyTestResult(resultEl, 'pill-failed', 'Error', String(err));
   }

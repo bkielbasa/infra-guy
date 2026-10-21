@@ -77,7 +77,9 @@ type stepView struct {
 type runPolicyEvalView struct {
 	PolicyID   string
 	PolicyName string
+	Status     string
 	Allowed    bool
+	Undecided  bool
 	Deny       []string
 	Error      string
 }
@@ -608,6 +610,9 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 		}
 		if !res.Allowed {
 			msg := "Approval denied by policy"
+			if res.Undecided {
+				msg = "Approval undecided by policy"
+			}
 			if len(res.Deny) > 0 {
 				msg += ": " + strings.Join(res.Deny, "; ")
 			}
@@ -1276,10 +1281,8 @@ const defaultSampleRego = `package infraguy.approval
 
 import rego.v1
 
-default allow := false
-
 allow if {
-    count(deny) == 0
+    count(input.approvals) > 2
 }
 
 deny contains "Destroying resources is not allowed without policy override" if {
@@ -1426,7 +1429,9 @@ func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snap
 	return &runPolicyEvalView{
 		PolicyID:   string(res.PolicyID),
 		PolicyName: firstNonEmpty(res.PolicyName, polName),
+		Status:     string(res.Status),
 		Allowed:    res.Allowed,
+		Undecided:  res.Undecided,
 		Deny:       res.Deny,
 	}
 }
@@ -1545,8 +1550,10 @@ func (u *ui) testPolicy(w http.ResponseWriter, r *http.Request) {
 		deny = []string{}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"allowed": res.Allowed,
-		"deny":    deny,
+		"status":    res.Status,
+		"allowed":   res.Allowed,
+		"undecided": res.Undecided,
+		"deny":      deny,
 	})
 }
 

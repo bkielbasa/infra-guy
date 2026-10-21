@@ -13,9 +13,19 @@ import (
 
 var ErrEmptyPolicy = errors.New("rego policy cannot be empty")
 
+type DecisionStatus string
+
+const (
+	StatusAllowed   DecisionStatus = "allowed"
+	StatusDenied    DecisionStatus = "denied"
+	StatusUndecided DecisionStatus = "undecided"
+)
+
 type EvalResult struct {
-	Allowed bool     `json:"allowed"`
-	Deny    []string `json:"deny"`
+	Status    DecisionStatus `json:"status"`
+	Allowed   bool           `json:"allowed"`
+	Undecided bool           `json:"undecided"`
+	Deny      []string       `json:"deny"`
 }
 
 type Evaluator struct{}
@@ -85,29 +95,27 @@ func (e *Evaluator) Evaluate(ctx context.Context, code string, rawInput map[stri
 	deny := extractDenyMessages(pkgMap["deny"])
 	allowVal, _ := pkgMap["allow"].(bool)
 
-	hasAllowRule := false
-	hasDenyRule := false
-	for _, rule := range module.Rules {
-		switch string(rule.Head.Name) {
-		case "allow":
-			hasAllowRule = true
-		case "deny":
-			hasDenyRule = true
-		}
+	if len(deny) > 0 {
+		return EvalResult{
+			Status:    StatusDenied,
+			Allowed:   false,
+			Undecided: false,
+			Deny:      deny,
+		}, nil
 	}
-
-	var allowed bool
-	if hasAllowRule {
-		allowed = allowVal && len(deny) == 0
-	} else if hasDenyRule {
-		allowed = len(deny) == 0
-	} else {
-		allowed = allowVal && len(deny) == 0
+	if allowVal {
+		return EvalResult{
+			Status:    StatusAllowed,
+			Allowed:   true,
+			Undecided: false,
+			Deny:      deny,
+		}, nil
 	}
-
 	return EvalResult{
-		Allowed: allowed,
-		Deny:    deny,
+		Status:    StatusUndecided,
+		Allowed:   false,
+		Undecided: true,
+		Deny:      deny,
 	}, nil
 }
 

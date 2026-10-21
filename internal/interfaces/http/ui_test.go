@@ -1431,15 +1431,11 @@ deny contains "Cannot destroy S3 buckets" if {
 		t.Fatalf("expected r-allow ApprovedBy=operator, got %q", runs.items["r-allow"].Snapshot().ApprovedBy)
 	}
 
-	// 9. Multi-person approval policy (requires > 2 approvals)
+	// 9. Multi-person approval policy (requires > 2 approvals, undecided until > 2 approvals)
 	quorumRego := `package infraguy.approval
 import rego.v1
-default allow := false
 allow if {
-	count(deny) == 0
-}
-deny contains "Requires approval from more than 2 people" if {
-	count(input.approvals) <= 2
+	count(input.approvals) > 2
 }
 `
 	rrCreateQuorum := postUI(t, h, "/policies", strings.NewReader(url.Values{
@@ -1458,9 +1454,13 @@ deny contains "Requires approval from more than 2 people" if {
 	quorumSnap.PlanJSON = []byte(`{"format_version":"1.2"}`)
 	runs.items["r-quorum"] = run.Restore(quorumSnap)
 
-	// 0 approvals -> Denied
-	if rr0 := postUI(t, h, "/runs/r-quorum/confirm", nil); rr0.Code != http.StatusForbidden || !strings.Contains(rr0.Body.String(), "Requires approval from more than 2 people") {
-		t.Fatalf("expected 403 Forbidden with 0 approvals, got %d: %s", rr0.Code, rr0.Body.String())
+	// 0 approvals -> Undecided in UI and 403 Forbidden on Confirm
+	rrQuorum0 := getUI(t, h, "/runs/r-quorum")
+	if rrQuorum0.Code != http.StatusOK || !strings.Contains(rrQuorum0.Body.String(), "Undecided") || !strings.Contains(rrQuorum0.Body.String(), "Approval undecided by policy") {
+		t.Fatalf("expected Undecided on /runs/r-quorum with 0 approvals, got %d: %s", rrQuorum0.Code, rrQuorum0.Body.String())
+	}
+	if rr0 := postUI(t, h, "/runs/r-quorum/confirm", nil); rr0.Code != http.StatusForbidden || !strings.Contains(rr0.Body.String(), "Approval undecided by policy") {
+		t.Fatalf("expected 403 Forbidden (undecided) with 0 approvals, got %d: %s", rr0.Code, rr0.Body.String())
 	}
 
 	// 1st approval (operator via HTTP POST /runs/r-quorum/approve)
