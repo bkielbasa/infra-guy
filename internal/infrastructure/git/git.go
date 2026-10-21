@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,7 +85,8 @@ func authArgs(token string) []string {
 	if token == "" {
 		return nil
 	}
-	return []string{"-c", "http.extraheader=AUTHORIZATION: bearer " + token}
+	creds := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+	return []string{"-c", "http.extraheader=AUTHORIZATION: basic " + creds}
 }
 
 func execGit(ctx context.Context, dir, token string, args ...string) error {
@@ -95,6 +97,7 @@ func execGit(ctx context.Context, dir, token string, args ...string) error {
 func gitOutput(ctx context.Context, dir, token string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append(authArgs(token), args...)...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, out)

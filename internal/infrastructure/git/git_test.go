@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,19 +14,17 @@ func TestCloneArgsKeepsURLClean(t *testing.T) {
 	url := "https://github.com/owner/repo.git"
 	token := "s3cret-token"
 	args := cloneArgs(url, token, "deadbeef")
+	wantHeader := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
 
 	var foundURL, foundAuth bool
 	for _, a := range args {
-		if strings.Contains(a, "x-access-token") {
-			t.Fatalf("args contain x-access-token: %q", args)
+		if strings.Contains(a, "x-access-token") || strings.Contains(a, token) {
+			t.Fatalf("args contain cleartext token or x-access-token: %q", args)
 		}
 		if a == url {
 			foundURL = true
-			if strings.Contains(a, token) {
-				t.Fatalf("URL argument contains token: %q", a)
-			}
 		}
-		if strings.Contains(a, "AUTHORIZATION: bearer "+token) {
+		if strings.Contains(a, wantHeader) {
 			foundAuth = true
 		}
 	}
@@ -33,7 +32,7 @@ func TestCloneArgsKeepsURLClean(t *testing.T) {
 		t.Fatalf("URL argument want %s in %q", url, args)
 	}
 	if !foundAuth {
-		t.Fatalf("missing extraheader with bearer token in %q", args)
+		t.Fatalf("missing extraheader %q in %q", wantHeader, args)
 	}
 }
 
