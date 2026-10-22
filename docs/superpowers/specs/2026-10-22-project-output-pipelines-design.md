@@ -51,7 +51,7 @@ Allow a Terraform project's outputs to be mapped as inputs (`TF_VAR_*`) to downs
 - Add `TriggerPipeline Trigger = "pipeline"`.
 - Treat `TriggerPipeline` as a tracked run alongside `TriggerPush` and `TriggerManual`.
 
-## 3. Database Schema (`internal/infrastructure/postgres/migrations/0011_project_dependencies.sql`)
+## 3. Database Schema (`internal/infrastructure/postgres/migrations/007_project_dependencies.sql`)
 
 ```sql
 CREATE TABLE IF NOT EXISTS project_dependencies (
