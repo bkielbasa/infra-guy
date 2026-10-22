@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	authapp "infra-guy/internal/application/auth"
+	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
@@ -34,6 +35,7 @@ type ServerConfig struct {
 	States        *stateapp.Service
 	Contexts      *tfcontextapp.Service
 	Policies      *policyapp.Service
+	Dependencies  *dependencyapp.Service
 	Versions      VersionLister
 	Checkout      brancher
 	Lookup        commitLookup

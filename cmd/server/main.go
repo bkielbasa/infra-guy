@@ -22,6 +22,7 @@ import (
 	"time"
 
 	authapp "infra-guy/internal/application/auth"
+	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
@@ -169,6 +170,18 @@ func main() {
 		wsCache = s3Cache
 	}
 
+	dependencyRepo := postgres.NewDependencyRepo(pool)
+	dependencySvc := &dependencyapp.Service{
+		Dependencies: dependencyRepo,
+		Projects:     projects,
+		States:       states,
+		Tokens:       tokenSource,
+		Checkout:     git.Checkout{},
+		Lookup:       git.CommitLookup{},
+		Now:          now,
+		NewID:        newID,
+	}
+
 	runSvc := &runapp.Service{
 		Projects:       projects,
 		Runs:           runs,
@@ -185,14 +198,17 @@ func main() {
 				_ = wsCache.Delete(ctx, worker.WorkspaceCacheKey(ps.TenantID, string(ps.ID), string(rs.ID)))
 			}
 			_ = os.RemoveAll(filepath.Join(workDir, string(rs.ID)))
+			dependencySvc.TriggerDownstreamRuns(ctx, p, r)
 		},
 	}
+	dependencySvc.Runs = runSvc
 	w := &worker.Worker{
 		WorkerID: workerID(), Queue: postgres.WorkerQueue{Queue: queue},
 		Projects: projects, Runs: runs, Service: runSvc,
 		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{Binary: tfInstaller}},
 		Tokens:          tokenSource,
 		Contexts:        contextSvc,
+		Dependencies:    dependencySvc,
 		Cache:           wsCache,
 		WorkDir:         workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
 	}
@@ -240,6 +256,7 @@ func main() {
 		States:        &stateapp.Service{Projects: projects, States: states, Now: now},
 		Contexts:      contextSvc,
 		Policies:      policySvc,
+		Dependencies:  dependencySvc,
 		Versions:      tfCatalog,
 		Checkout:      git.Checkout{},
 		Lookup:        git.CommitLookup{},

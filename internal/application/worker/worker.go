@@ -83,6 +83,10 @@ type ContextResolver interface {
 	ResolveForProject(ctx context.Context, projectID project.ID) (map[string]string, map[string][]byte, error)
 }
 
+type DependencyResolver interface {
+	ResolveForProject(ctx context.Context, projectID project.ID) (map[string]string, []string, error)
+}
+
 type WorkspaceCache interface {
 	Save(ctx context.Context, key, srcDir string) error
 	Restore(ctx context.Context, key, destDir string) (bool, error)
@@ -104,6 +108,7 @@ type Worker struct {
 	Dispatcher      Dispatcher
 	Tokens          TokenSource
 	Contexts        ContextResolver
+	Dependencies    DependencyResolver
 	Cache           WorkspaceCache
 	WorkDir         string
 	InternalBaseURL string
@@ -279,6 +284,26 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 			return w.completeAndCleanup(ctx, job)
 		}
 		logger.LogBeforef("Resolved %d environment variable(s) and %d file(s)", len(ctxEnv), len(ctxFiles))
+	}
+	if w.Dependencies != nil {
+		depEnv, depMsgs, derr := w.Dependencies.ResolveForProject(ctx, ps.ID)
+		if derr != nil {
+			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, derr.Error()); ferr != nil {
+				return ferr
+			}
+			return w.completeAndCleanup(ctx, job)
+		}
+		for _, msg := range depMsgs {
+			logger.LogBeforef("%s", msg)
+		}
+		if len(depEnv) > 0 {
+			if ctxEnv == nil {
+				ctxEnv = make(map[string]string, len(depEnv))
+			}
+			for k, v := range depEnv {
+				ctxEnv[k] = v
+			}
+		}
 	}
 
 	timeout := StepTimeout(job.Step)

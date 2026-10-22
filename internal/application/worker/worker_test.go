@@ -921,4 +921,88 @@ func TestWorkerStreamsLogsDuringExecution(t *testing.T) {
 	}
 }
 
+type fakeDependencyResolver struct {
+	env      map[string]string
+	messages []string
+	err      error
+}
 
+func (f fakeDependencyResolver) ResolveForProject(_ context.Context, _ project.ID) (map[string]string, []string, error) {
+	return f.env, f.messages, f.err
+}
+
+func TestWorkerResolvesUpstreamDependenciesIntoEnv(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(100, 0).UTC()
+	p := testProject(t)
+	projs := &memProjects{items: map[project.ID]*project.Project{p.Snapshot().ID: p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	sched := &memSched{}
+	svc := &runapp.Service{Projects: projs, Runs: runs, Schedule: sched, Now: func() time.Time { return now }, NewID: func() string { return "r1" }}
+	r, err := svc.Open(ctx, runapp.OpenRequest{ProjectID: "p1", Trigger: run.TriggerPipeline, SHA: "abcdef1234567", Branch: "main", TriggeredBy: "pipeline:net"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &fakeQueue{claim: &Job{ID: 1, RunID: r.Snapshot().ID, Step: run.StepInit}}
+	exec := &fakeExecutor{res: Result{ExitCode: 0}}
+	w := &Worker{
+		WorkerID: "w1", Queue: q, Projects: projs, Runs: runs, Service: svc,
+		Checkout: &fakeCheckout{t: t}, Executor: exec,
+		Tokens: tokenSourceFunc(func(ctx context.Context, tenantID string) (string, error) {
+			return "ghs_install", nil
+		}),
+		Contexts: fakeContextResolver{env: map[string]string{"AWS_REGION": "eu-central-1", "TF_VAR_vpc_id": "from-ctx"}},
+		Dependencies: fakeDependencyResolver{
+			env:      map[string]string{"TF_VAR_vpc_id": "vpc-from-upstream"},
+			messages: []string{`Injected TF_VAR_vpc_id from upstream project "network" output "vpc_id"`},
+		},
+		WorkDir: t.TempDir(), Now: func() time.Time { return now },
+	}
+	if err := w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	capturedEnv := exec.req.Env
+	if capturedEnv["AWS_REGION"] != "eu-central-1" || capturedEnv["TF_VAR_vpc_id"] != "vpc-from-upstream" {
+		t.Fatalf("expected merged env with upstream override, got %+v", capturedEnv)
+	}
+	updated, _ := runs.Get(ctx, r.Snapshot().ID)
+	if !strings.Contains(updated.Snapshot().Steps[0].Logs, "Injected TF_VAR_vpc_id") {
+		t.Fatalf("expected dependency injection log in step logs, got %q", updated.Snapshot().Steps[0].Logs)
+	}
+}
+
+func TestWorkerDependencyResolutionErrorFailsWithoutExecutor(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-dep-err", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPipeline, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{res: Result{ExitCode: 0}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 21, RunID: "run-dep-err", Step: run.StepInit}}, exec)
+	fx.w.Dependencies = fakeDependencyResolver{
+		err: errors.New("upstream state load failed"),
+	}
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.exec.called {
+		t.Fatal("executor should not be called on dependency resolution error")
+	}
+	saved, err := fx.runs.Get(ctx, "run-dep-err")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := saved.Snapshot()
+	if snap.Status != run.StatusFailed {
+		t.Fatalf("status %s, want failed", snap.Status)
+	}
+	if snap.Error != "upstream state load failed" {
+		t.Fatalf("error %q, want upstream state load failed", snap.Error)
+	}
+	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 21 {
+		t.Fatalf("completed jobs %#v, want [21]", fx.queue.completed)
+	}
+}
