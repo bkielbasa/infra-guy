@@ -1,0 +1,105 @@
+{{define "tab_dependencies"}}
+<div id="tab-panel">
+  <section class="group">
+    <h3>Upstream Dependencies</h3>
+    <p class="sub">Outputs from upstream projects are injected as <code>TF_VAR_*</code> environment variables during runs and can automatically trigger this project when upstream applies succeed.</p>
+    {{if .CandidateProjects}}
+    <form method="post" action="/projects/{{.ProjectID}}/dependencies" class="actions" style="margin: 12px 0;">
+      <select name="depends_on_project_id" required>
+        <option value="">Select upstream project…</option>
+        {{range .CandidateProjects}}
+        <option value="{{.ID}}">{{.Name}}</option>
+        {{end}}
+      </select>
+      <label class="inline"><input type="checkbox" name="trigger_always"> Trigger on every apply</label>
+      <button type="submit">Add dependency</button>
+    </form>
+    {{end}}
+
+    {{if .Upstream}}
+      {{range .Upstream}}
+      <div class="card" style="margin-top: 12px; padding: 12px; border: 1px solid var(--border, #ddd); border-radius: 6px;">
+        <div class="actions" style="justify-content: space-between;">
+          <div>
+            <strong><a href="/projects/{{.UpstreamProjectID}}">{{.UpstreamProjectName}}</a></strong>
+            {{if .AvailableOutputs}}
+            <span class="sub"> · Available outputs: {{range $i, $o := .AvailableOutputs}}{{if $i}}, {{end}}<code>{{$o}}</code>{{end}}</span>
+            {{else}}
+            <span class="sub"> · No outputs in current state</span>
+            {{end}}
+          </div>
+          <div class="actions">
+            <form method="post" action="/projects/{{$.ProjectID}}/dependencies/{{.ID}}/trigger-mode" class="inline">
+              <input type="hidden" name="trigger_always" value="{{if .TriggerAlways}}off{{else}}on{{end}}">
+              <button type="submit">{{if .TriggerAlways}}Trigger: Every apply{{else}}Trigger: When mapped outputs change{{end}}</button>
+            </form>
+            <form method="post" action="/projects/{{$.ProjectID}}/dependencies/{{.ID}}/delete" class="inline">
+              <button type="submit" class="btn-danger">Remove</button>
+            </form>
+          </div>
+        </div>
+
+        {{if .Mappings}}
+        <table style="margin-top: 8px;">
+          <thead>
+            <tr><th>Upstream Output</th><th>Injected Variable</th><th>Current Value</th><th></th></tr>
+          </thead>
+          <tbody>
+            {{range .Mappings}}
+            <tr>
+              <td><code>{{.OutputName}}</code></td>
+              <td><code>{{.EnvKey}}</code></td>
+              <td><code>{{.PreviewValue}}</code></td>
+              <td>
+                <form method="post" action="/projects/{{$.ProjectID}}/dependencies/{{.DepID}}/mappings/{{.ID}}/delete" class="inline">
+                  <button type="submit" class="btn-danger">Delete</button>
+                </form>
+              </td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        {{else}}
+        <p class="sub" style="margin-top: 8px;">No output mappings configured yet.</p>
+        {{end}}
+
+        <form method="post" action="/projects/{{$.ProjectID}}/dependencies/{{.ID}}/mappings" class="actions" style="margin-top: 8px;">
+          <input type="text" name="output_name" placeholder="Upstream output (e.g. vpc_id)" list="outputs-{{.ID}}" required>
+          {{if .AvailableOutputs}}
+          <datalist id="outputs-{{.ID}}">
+            {{range .AvailableOutputs}}<option value="{{.}}">{{end}}
+          </datalist>
+          {{end}}
+          <input type="text" name="input_name" placeholder="Input variable name (optional, defaults to output)">
+          <button type="submit">Map output</button>
+        </form>
+      </div>
+      {{end}}
+    {{else}}
+      <p class="empty">No upstream dependencies.</p>
+    {{end}}
+  </section>
+
+  <section class="group" style="margin-top: 24px;">
+    <h3>Downstream Dependents</h3>
+    {{if .Downstream}}
+    <table>
+      <thead>
+        <tr><th>Project</th><th>Trigger Mode</th><th>Mapped Outputs</th></tr>
+      </thead>
+      <tbody>
+        {{range .Downstream}}
+        <tr>
+          <td><a href="/projects/{{.ProjectID}}">{{.ProjectName}}</a></td>
+          <td>{{if .TriggerAlways}}Every succeeded apply{{else}}When mapped outputs change{{end}}</td>
+          <td>{{if .MappedOutputs}}{{range $i, $m := .MappedOutputs}}{{if $i}}, {{end}}<code>{{$m}}</code>{{end}}{{else}}<em>none</em>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No downstream projects depend on this project.</p>
+    {{end}}
+  </section>
+</div>
+{{end}}

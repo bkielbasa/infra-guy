@@ -19,6 +19,7 @@ import (
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
+	"infra-guy/internal/domain/dependency"
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
@@ -112,6 +113,12 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /projects/{id}/tabs/tracked", u.tabTracked)
 	mux.HandleFunc("GET /projects/{id}/tabs/pulls", u.tabPulls)
 	mux.HandleFunc("GET /projects/{id}/tabs/state", u.tabState)
+	mux.HandleFunc("GET /projects/{id}/tabs/dependencies", u.tabDependencies)
+	mux.HandleFunc("POST /projects/{id}/dependencies", u.createDependency)
+	mux.HandleFunc("POST /projects/{id}/dependencies/{depID}/trigger-mode", u.updateDependencyTriggerMode)
+	mux.HandleFunc("POST /projects/{id}/dependencies/{depID}/delete", u.deleteDependency)
+	mux.HandleFunc("POST /projects/{id}/dependencies/{depID}/mappings", u.addDependencyMapping)
+	mux.HandleFunc("POST /projects/{id}/dependencies/{depID}/mappings/{mapID}/delete", u.deleteDependencyMapping)
 	mux.HandleFunc("GET /projects/{id}/details", u.details)
 	mux.HandleFunc("GET /projects/{id}/settings", u.details)
 	mux.HandleFunc("POST /projects/{id}", u.update)
@@ -955,7 +962,7 @@ func filterRuns(runs []*run.Run, ok func(run.Snapshot) bool) []*run.Run {
 }
 
 func isTracked(s run.Snapshot) bool {
-	return s.Trigger == run.TriggerPush || s.Trigger == run.TriggerManual
+	return s.Trigger == run.TriggerPush || s.Trigger == run.TriggerManual || s.Trigger == run.TriggerPipeline
 }
 
 func isPR(s run.Snapshot) bool { return s.Trigger == run.TriggerPullRequest }
@@ -1676,4 +1683,303 @@ func (u *ui) deletePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/policies", http.StatusSeeOther)
 }
+
+type depProjectChoice struct {
+	ID   string
+	Name string
+}
+
+type depMappingView struct {
+	ID           string
+	DepID        string
+	OutputName   string
+	EnvKey       string
+	PreviewValue string
+}
+
+type upstreamDepView struct {
+	ID                  string
+	UpstreamProjectID   string
+	UpstreamProjectName string
+	TriggerAlways       bool
+	AvailableOutputs    []string
+	Mappings            []depMappingView
+}
+
+type downstreamDepView struct {
+	ProjectID     string
+	ProjectName   string
+	TriggerAlways bool
+	MappedOutputs []string
+}
+
+type dependenciesTabView struct {
+	ProjectID         string
+	CandidateProjects []depProjectChoice
+	Upstream          []upstreamDepView
+	Downstream        []downstreamDepView
+}
+
+func (u *ui) tabDependencies(w http.ResponseWriter, r *http.Request) {
+	p, runs, err := u.loadProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	view := dependenciesTabView{ProjectID: string(ps.ID)}
+
+	allProjects, err := u.cfg.Projects.List(r.Context(), ps.TenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	projNames := make(map[project.ID]string, len(allProjects))
+	for _, item := range allProjects {
+		is := item.Snapshot()
+		projNames[is.ID] = is.Name
+	}
+
+	alreadyUpstream := make(map[project.ID]bool)
+	if u.cfg.Dependencies != nil {
+		upDeps, err := u.cfg.Dependencies.ListByProject(r.Context(), ps.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, d := range upDeps {
+			ds := d.Snapshot()
+			alreadyUpstream[ds.DependsOnProjectID] = true
+			upName := projNames[ds.DependsOnProjectID]
+			if upName == "" {
+				upName = string(ds.DependsOnProjectID)
+			}
+
+			var outputs map[string]state.OutputValue
+			if u.cfg.States != nil && u.cfg.States.States != nil {
+				if st, err := u.cfg.States.States.Load(r.Context(), string(ds.DependsOnProjectID)); err == nil && st != nil {
+					outputs = st.Snapshot().Outputs()
+				}
+			}
+			var avail []string
+			for k := range outputs {
+				avail = append(avail, k)
+			}
+			sort.Strings(avail)
+
+			mappings := make([]depMappingView, 0, len(ds.Mappings))
+			for _, m := range ds.Mappings {
+				preview := "(not in current state)"
+				if outVal, ok := outputs[m.OutputName]; ok {
+					if outVal.Sensitive {
+						preview = "(sensitive)"
+					} else {
+						preview = outVal.EnvString
+					}
+				}
+				mappings = append(mappings, depMappingView{
+					ID:           m.ID,
+					DepID:        string(ds.ID),
+					OutputName:   m.OutputName,
+					EnvKey:       m.EnvKey(),
+					PreviewValue: preview,
+				})
+			}
+
+			view.Upstream = append(view.Upstream, upstreamDepView{
+				ID:                  string(ds.ID),
+				UpstreamProjectID:   string(ds.DependsOnProjectID),
+				UpstreamProjectName: upName,
+				TriggerAlways:       ds.TriggerAlways,
+				AvailableOutputs:    avail,
+				Mappings:            mappings,
+			})
+		}
+
+		downDeps, err := u.cfg.Dependencies.ListDownstream(r.Context(), ps.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, d := range downDeps {
+			ds := d.Snapshot()
+			downName := projNames[ds.ProjectID]
+			if downName == "" {
+				downName = string(ds.ProjectID)
+			}
+			var mapped []string
+			for _, m := range ds.Mappings {
+				mapped = append(mapped, m.OutputName)
+			}
+			view.Downstream = append(view.Downstream, downstreamDepView{
+				ProjectID:     string(ds.ProjectID),
+				ProjectName:   downName,
+				TriggerAlways: ds.TriggerAlways,
+				MappedOutputs: mapped,
+			})
+		}
+	}
+
+	for _, item := range allProjects {
+		is := item.Snapshot()
+		if is.ID == ps.ID || alreadyUpstream[is.ID] {
+			continue
+		}
+		view.CandidateProjects = append(view.CandidateProjects, depProjectChoice{
+			ID:   string(is.ID),
+			Name: is.Name,
+		})
+	}
+
+	if r.Header.Get("HX-Request") == "true" {
+		u.fragment(w, "tab_dependencies", view)
+		return
+	}
+	var panel bytes.Buffer
+	if err := pages.ExecuteTemplate(&panel, "tab_dependencies", view); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.page(w, ps.Name, "project", u.projectView(r, ps, runs, template.HTML(panel.String())))
+}
+
+func (u *ui) createDependency(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if u.cfg.Dependencies == nil {
+		http.Error(w, "dependencies service not configured", http.StatusInternalServerError)
+		return
+	}
+	dependsOnID := project.ID(strings.TrimSpace(r.FormValue("depends_on_project_id")))
+	triggerAlways := r.FormValue("trigger_always") == "on"
+	if _, err := u.cfg.Dependencies.Create(r.Context(), ps.TenantID, ps.ID, dependsOnID, triggerAlways); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/dependencies", http.StatusSeeOther)
+}
+
+func (u *ui) updateDependencyTriggerMode(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if u.cfg.Dependencies == nil {
+		http.Error(w, "dependencies service not configured", http.StatusInternalServerError)
+		return
+	}
+	depID := dependency.ID(r.PathValue("depID"))
+	d, err := u.cfg.Dependencies.Get(r.Context(), ps.TenantID, depID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if d == nil || d.Snapshot().ProjectID != ps.ID {
+		http.NotFound(w, r)
+		return
+	}
+	triggerAlways := r.FormValue("trigger_always") == "on"
+	if err := u.cfg.Dependencies.SetTriggerAlways(r.Context(), ps.TenantID, depID, triggerAlways); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/dependencies", http.StatusSeeOther)
+}
+
+func (u *ui) deleteDependency(w http.ResponseWriter, r *http.Request) {
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if u.cfg.Dependencies == nil {
+		http.Error(w, "dependencies service not configured", http.StatusInternalServerError)
+		return
+	}
+	depID := dependency.ID(r.PathValue("depID"))
+	d, err := u.cfg.Dependencies.Get(r.Context(), ps.TenantID, depID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if d == nil || d.Snapshot().ProjectID != ps.ID {
+		http.NotFound(w, r)
+		return
+	}
+	if err := u.cfg.Dependencies.Delete(r.Context(), ps.TenantID, depID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/dependencies", http.StatusSeeOther)
+}
+
+func (u *ui) addDependencyMapping(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if u.cfg.Dependencies == nil {
+		http.Error(w, "dependencies service not configured", http.StatusInternalServerError)
+		return
+	}
+	depID := dependency.ID(r.PathValue("depID"))
+	d, err := u.cfg.Dependencies.Get(r.Context(), ps.TenantID, depID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if d == nil || d.Snapshot().ProjectID != ps.ID {
+		http.NotFound(w, r)
+		return
+	}
+	if err := u.cfg.Dependencies.AddMapping(r.Context(), ps.TenantID, depID, r.FormValue("output_name"), r.FormValue("input_name")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/dependencies", http.StatusSeeOther)
+}
+
+func (u *ui) deleteDependencyMapping(w http.ResponseWriter, r *http.Request) {
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if u.cfg.Dependencies == nil {
+		http.Error(w, "dependencies service not configured", http.StatusInternalServerError)
+		return
+	}
+	depID := dependency.ID(r.PathValue("depID"))
+	d, err := u.cfg.Dependencies.Get(r.Context(), ps.TenantID, depID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if d == nil || d.Snapshot().ProjectID != ps.ID {
+		http.NotFound(w, r)
+		return
+	}
+	if err := u.cfg.Dependencies.RemoveMapping(r.Context(), ps.TenantID, depID, r.PathValue("mapID")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/dependencies", http.StatusSeeOther)
+}
+
 

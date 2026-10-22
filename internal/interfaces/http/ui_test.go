@@ -14,12 +14,14 @@ import (
 	"time"
 
 	authapp "infra-guy/internal/application/auth"
+	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
+	"infra-guy/internal/domain/dependency"
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
@@ -1746,5 +1748,275 @@ allow if {
 		t.Fatalf("expected Cancelled by operator after cancel, got:\n%s", bodyAfterCancel)
 	}
 }
+
+type uiMemDependencies struct {
+	items map[dependency.ID]*dependency.Dependency
+}
+
+func newUIMemDependencies() *uiMemDependencies {
+	return &uiMemDependencies{items: map[dependency.ID]*dependency.Dependency{}}
+}
+
+func (m *uiMemDependencies) Create(_ context.Context, d *dependency.Dependency) error {
+	m.items[d.Snapshot().ID] = dependency.Restore(d.Snapshot())
+	return nil
+}
+
+func (m *uiMemDependencies) Get(_ context.Context, id dependency.ID) (*dependency.Dependency, error) {
+	d, ok := m.items[id]
+	if !ok {
+		return nil, nil
+	}
+	return dependency.Restore(d.Snapshot()), nil
+}
+
+func (m *uiMemDependencies) SetTriggerAlways(_ context.Context, id dependency.ID, triggerAlways bool) error {
+	d, ok := m.items[id]
+	if !ok {
+		return nil
+	}
+	d.SetTriggerAlways(triggerAlways)
+	return nil
+}
+
+func (m *uiMemDependencies) Delete(_ context.Context, id dependency.ID) error {
+	delete(m.items, id)
+	return nil
+}
+
+func (m *uiMemDependencies) UpsertMapping(_ context.Context, depID dependency.ID, mp dependency.Mapping) error {
+	d := m.items[depID]
+	s := d.Snapshot()
+	replaced := false
+	for i := range s.Mappings {
+		if s.Mappings[i].InputName == mp.InputName {
+			s.Mappings[i].OutputName = mp.OutputName
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.Mappings = append(s.Mappings, mp)
+	}
+	m.items[depID] = dependency.Restore(s)
+	return nil
+}
+
+func (m *uiMemDependencies) DeleteMapping(_ context.Context, depID dependency.ID, mappingID string) error {
+	d := m.items[depID]
+	s := d.Snapshot()
+	var kept []dependency.Mapping
+	for _, mp := range s.Mappings {
+		if mp.ID != mappingID {
+			kept = append(kept, mp)
+		}
+	}
+	s.Mappings = kept
+	m.items[depID] = dependency.Restore(s)
+	return nil
+}
+
+func (m *uiMemDependencies) ListByProject(_ context.Context, projectID project.ID) ([]*dependency.Dependency, error) {
+	var out []*dependency.Dependency
+	for _, d := range m.items {
+		if d.Snapshot().ProjectID == projectID {
+			out = append(out, dependency.Restore(d.Snapshot()))
+		}
+	}
+	return out, nil
+}
+
+func (m *uiMemDependencies) ListDownstream(_ context.Context, upstreamProjectID project.ID) ([]*dependency.Dependency, error) {
+	var out []*dependency.Dependency
+	for _, d := range m.items {
+		if d.Snapshot().DependsOnProjectID == upstreamProjectID {
+			out = append(out, dependency.Restore(d.Snapshot()))
+		}
+	}
+	return out, nil
+}
+
+func (m *uiMemDependencies) ListByTenant(_ context.Context, tenantID string) ([]*dependency.Dependency, error) {
+	var out []*dependency.Dependency
+	for _, d := range m.items {
+		if d.Snapshot().TenantID == tenantID {
+			out = append(out, dependency.Restore(d.Snapshot()))
+		}
+	}
+	return out, nil
+}
+
+func TestProjectDependenciesUI(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pNet, err := project.New("p-net", "network", repo, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pNet.SetStateToken("tok-net")
+	if err := pNet.SetPlacement("ten", 1); err != nil {
+		t.Fatal(err)
+	}
+	pApp, err := project.New("p-app", "app", repo, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pApp.SetStateToken("tok-app")
+	if err := pApp.SetPlacement("ten", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	projects := &memProjects{items: map[project.ID]*project.Project{
+		"p-net": pNet,
+		"p-app": pApp,
+	}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	stNet := state.New("p-net")
+	if err := stNet.Put([]byte(`{"version":4,"serial":1,"outputs":{"vpc_id":{"value":"vpc-777","type":"string"}}}`), "", "r-1", now); err != nil {
+		t.Fatal(err)
+	}
+	states := &memStates{items: map[string]*state.State{"p-net": stNet}}
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+
+	depRepo := newUIMemDependencies()
+	depSeq := 0
+	depSvc := &dependencyapp.Service{
+		Dependencies: depRepo,
+		Projects:     projects,
+		States:       states,
+		Runs:         runsSvc,
+		Now:          func() time.Time { return now },
+		NewID: func() string {
+			depSeq++
+			return fmt.Sprintf("dep-%d", depSeq)
+		},
+	}
+
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects:      projSvc,
+		Runs:          runsSvc,
+		States:        stSvc,
+		Dependencies:  depSvc,
+		Checkout:      &stubTip{sha: "abc1234"},
+		Lookup:        &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// 1. Project page has Dependencies tab link
+	rrProj := getUI(t, h, "/projects/p-app")
+	if rrProj.Code != http.StatusOK || !strings.Contains(rrProj.Body.String(), `hx-get="/projects/p-app/tabs/dependencies"`) {
+		t.Fatalf("expected Dependencies tab link on /projects/p-app, got %d: %s", rrProj.Code, rrProj.Body.String())
+	}
+
+	// 2. POST /projects/p-app/dependencies with depends_on_project_id=p-net redirects to /projects/p-app/tabs/dependencies
+	rrCreate := postUI(t, h, "/projects/p-app/dependencies", strings.NewReader("depends_on_project_id=p-net"))
+	if rrCreate.Code != http.StatusSeeOther || rrCreate.Header().Get("Location") != "/projects/p-app/tabs/dependencies" {
+		t.Fatalf("POST /projects/p-app/dependencies = %d (loc=%q): %s", rrCreate.Code, rrCreate.Header().Get("Location"), rrCreate.Body.String())
+	}
+
+	// 3. POST /projects/p-app/dependencies/dep-1/mappings with output_name=vpc_id and input_name=network_vpc_id
+	rrMap := postUI(t, h, "/projects/p-app/dependencies/dep-1/mappings", strings.NewReader("output_name=vpc_id&input_name=network_vpc_id"))
+	if rrMap.Code != http.StatusSeeOther || rrMap.Header().Get("Location") != "/projects/p-app/tabs/dependencies" {
+		t.Fatalf("POST /projects/p-app/dependencies/dep-1/mappings = %d (loc=%q): %s", rrMap.Code, rrMap.Header().Get("Location"), rrMap.Body.String())
+	}
+
+	// 4a. GET /projects/p-app/tabs/dependencies (HTMX fragment)
+	hxReq := httptest.NewRequest(http.MethodGet, "/projects/p-app/tabs/dependencies", nil)
+	hxReq.Header.Set("HX-Request", "true")
+	hxReq.AddCookie(&http.Cookie{Name: "session", Value: uiSessionID})
+	hxRR := httptest.NewRecorder()
+	h.ServeHTTP(hxRR, hxReq)
+	hxBody := hxRR.Body.String()
+	if hxRR.Code != http.StatusOK {
+		t.Fatalf("GET /projects/p-app/tabs/dependencies (HTMX) = %d: %s", hxRR.Code, hxBody)
+	}
+	for _, want := range []string{"network", "vpc_id", "TF_VAR_network_vpc_id", "vpc-777"} {
+		if !strings.Contains(hxBody, want) {
+			t.Fatalf("expected HTMX dependencies tab to contain %q, got:\n%s", want, hxBody)
+		}
+	}
+	if strings.Contains(hxBody, "<!DOCTYPE html>") {
+		t.Fatalf("expected HTMX request to return fragment without layout, got:\n%s", hxBody)
+	}
+
+	// 4b. GET /projects/p-app/tabs/dependencies (full page)
+	fullRR := getUI(t, h, "/projects/p-app/tabs/dependencies")
+	fullBody := fullRR.Body.String()
+	if fullRR.Code != http.StatusOK {
+		t.Fatalf("GET /projects/p-app/tabs/dependencies (full) = %d: %s", fullRR.Code, fullBody)
+	}
+	for _, want := range []string{"<!DOCTYPE html>", "network", "vpc_id", "TF_VAR_network_vpc_id", "vpc-777"} {
+		if !strings.Contains(fullBody, want) {
+			t.Fatalf("expected full dependencies page to contain %q, got:\n%s", want, fullBody)
+		}
+	}
+
+	// 4c. GET /projects/p-net/tabs/dependencies shows "app" under Downstream Dependents
+	netRR := getUI(t, h, "/projects/p-net/tabs/dependencies")
+	netBody := netRR.Body.String()
+	if netRR.Code != http.StatusOK {
+		t.Fatalf("GET /projects/p-net/tabs/dependencies = %d: %s", netRR.Code, netBody)
+	}
+	for _, want := range []string{"Downstream Dependents", "app", "When mapped outputs change", "vpc_id"} {
+		if !strings.Contains(netBody, want) {
+			t.Fatalf("expected upstream dependencies tab to contain %q, got:\n%s", want, netBody)
+		}
+	}
+
+	// 5. Verify a run with Trigger: run.TriggerPipeline appears under Tracked runs (GET /projects/p-app/tabs/tracked)
+	pipeRun := run.Restore(run.Snapshot{
+		ID: "r-pipe-1", ProjectID: "p-app", Trigger: run.TriggerPipeline, Status: run.StatusSucceeded,
+		SHA: "abcdef1234567", Message: "pipeline triggered deploy", TriggeredBy: "pipeline:network",
+		CreatedAt: now,
+	})
+	runs.items["r-pipe-1"] = pipeRun
+	trackedRR := getUI(t, h, "/projects/p-app/tabs/tracked")
+	trackedBody := trackedRR.Body.String()
+	if trackedRR.Code != http.StatusOK || !strings.Contains(trackedBody, "pipeline triggered deploy") || !strings.Contains(trackedBody, "pipeline:network") {
+		t.Fatalf("expected pipeline run in tracked tab, got %d:\n%s", trackedRR.Code, trackedBody)
+	}
+
+	// 6. Toggle trigger-mode, delete mapping, and delete dependency
+	rrMode := postUI(t, h, "/projects/p-app/dependencies/dep-1/trigger-mode", strings.NewReader("trigger_always=on"))
+	if rrMode.Code != http.StatusSeeOther || rrMode.Header().Get("Location") != "/projects/p-app/tabs/dependencies" {
+		t.Fatalf("POST trigger-mode = %d (loc=%q)", rrMode.Code, rrMode.Header().Get("Location"))
+	}
+	if !depRepo.items["dep-1"].Snapshot().TriggerAlways {
+		t.Fatal("expected TriggerAlways=true after trigger-mode=on")
+	}
+
+	rrDelMap := postUI(t, h, "/projects/p-app/dependencies/dep-1/mappings/dep-2/delete", nil)
+	if rrDelMap.Code != http.StatusSeeOther || rrDelMap.Header().Get("Location") != "/projects/p-app/tabs/dependencies" {
+		t.Fatalf("POST delete mapping = %d (loc=%q)", rrDelMap.Code, rrDelMap.Header().Get("Location"))
+	}
+	if len(depRepo.items["dep-1"].Snapshot().Mappings) != 0 {
+		t.Fatalf("expected 0 mappings after delete, got %d", len(depRepo.items["dep-1"].Snapshot().Mappings))
+	}
+
+	rrDelDep := postUI(t, h, "/projects/p-app/dependencies/dep-1/delete", nil)
+	if rrDelDep.Code != http.StatusSeeOther || rrDelDep.Header().Get("Location") != "/projects/p-app/tabs/dependencies" {
+		t.Fatalf("POST delete dependency = %d (loc=%q)", rrDelDep.Code, rrDelDep.Header().Get("Location"))
+	}
+	if len(depRepo.items) != 0 {
+		t.Fatalf("expected 0 dependencies after delete, got %d", len(depRepo.items))
+	}
+}
+
 
 
