@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"time"
@@ -125,4 +126,86 @@ func readSerial(data []byte) *int64 {
 		return nil
 	}
 	return payload.Serial
+}
+
+type OutputValue struct {
+	Raw       json.RawMessage
+	EnvString string
+	Sensitive bool
+}
+
+func ExtractOutputs(data []byte) (map[string]OutputValue, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return map[string]OutputValue{}, nil
+	}
+	var payload struct {
+		Outputs map[string]struct {
+			Value     json.RawMessage `json:"value"`
+			Sensitive bool            `json:"sensitive"`
+		} `json:"outputs"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	out := make(map[string]OutputValue, len(payload.Outputs))
+	for k, v := range payload.Outputs {
+		raw := bytes.TrimSpace(v.Value)
+		if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+			continue
+		}
+		var compacted bytes.Buffer
+		if err := json.Compact(&compacted, raw); err != nil {
+			compacted.Reset()
+			compacted.Write(raw)
+		}
+		compactBytes := compacted.Bytes()
+		var strVal string
+		if err := json.Unmarshal(compactBytes, &strVal); err != nil {
+			strVal = string(compactBytes)
+		}
+		out[k] = OutputValue{
+			Raw:       append(json.RawMessage(nil), compactBytes...),
+			EnvString: strVal,
+			Sensitive: v.Sensitive,
+		}
+	}
+	return out, nil
+}
+
+func (s Snapshot) Outputs() map[string]OutputValue {
+	outs, err := ExtractOutputs(s.Data)
+	if err != nil {
+		return map[string]OutputValue{}
+	}
+	return outs
+}
+
+func (s Snapshot) ChangedOutputsSincePrevious() map[string]bool {
+	curr := s.Outputs()
+	changed := make(map[string]bool, len(curr))
+	if len(s.History) <= 1 {
+		for k := range curr {
+			changed[k] = true
+		}
+		return changed
+	}
+	prev, err := ExtractOutputs(s.History[len(s.History)-2].Data)
+	if err != nil {
+		for k := range curr {
+			changed[k] = true
+		}
+		return changed
+	}
+	for k, cv := range curr {
+		pv, ok := prev[k]
+		if !ok || !bytes.Equal(cv.Raw, pv.Raw) {
+			changed[k] = true
+		}
+	}
+	for k := range prev {
+		if _, ok := curr[k]; !ok {
+			changed[k] = true
+		}
+	}
+	return changed
 }

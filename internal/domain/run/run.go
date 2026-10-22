@@ -50,6 +50,7 @@ const (
 	TriggerPullRequest Trigger = "pull_request"
 	TriggerPush        Trigger = "push"
 	TriggerManual      Trigger = "manual"
+	TriggerPipeline    Trigger = "pipeline"
 )
 
 type StepName string
@@ -221,7 +222,6 @@ func (s Snapshot) SummaryBracket() string {
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
 }
-
 
 func (r *Run) SetTerraformVersion(v string) { r.s.TerraformVersion = v }
 
