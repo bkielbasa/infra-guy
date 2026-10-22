@@ -201,6 +201,28 @@ func (r *Run) PlanJSON() []byte {
 	return append([]byte(nil), r.s.PlanJSON...)
 }
 
+func (s Snapshot) HasChanges() bool {
+	return s.Add > 0 || s.Change > 0 || s.Destroy > 0
+}
+
+func (s Snapshot) SummaryBracket() string {
+	var parts []string
+	if s.Add > 0 {
+		parts = append(parts, fmt.Sprintf("add: %d", s.Add))
+	}
+	if s.Change > 0 {
+		parts = append(parts, fmt.Sprintf("change: %d", s.Change))
+	}
+	if s.Destroy > 0 {
+		parts = append(parts, fmt.Sprintf("delete: %d", s.Destroy))
+	}
+	if len(parts) == 0 {
+		return "No changes"
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+
 func (r *Run) SetTerraformVersion(v string) { r.s.TerraformVersion = v }
 
 func (r *Run) SetStepLogs(name StepName, logs string) error {
@@ -298,7 +320,7 @@ func (r *Run) CompleteStep(name StepName, result StepResult, now time.Time) (Dec
 }
 
 func (r *Run) Approve(a Approval, now time.Time) error {
-	if r.s.Status != StatusNeedsApproval {
+	if r.s.Status != StatusNeedsApproval && !(r.s.PlanOnly && r.s.Status == StatusPlanned) {
 		return ErrNotUnconfirmed
 	}
 	login := strings.TrimSpace(a.Login)

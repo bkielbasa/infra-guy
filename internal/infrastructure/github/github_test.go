@@ -238,3 +238,34 @@ func TestTokensRefreshesWhenUnderFiveMinutes(t *testing.T) {
 		t.Fatalf("calls %d", calls)
 	}
 }
+
+func TestCreateCommitStatus(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	var gotBody CommitStatus
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":1}`))
+	}))
+	err := c.CreateCommitStatus(context.Background(), "ghs_tok", "acme", "infra", "deadbeef", CommitStatus{
+		State:       "pending",
+		TargetURL:   "https://infra.example.com/runs/r-1",
+		Description: "[add: 3, delete: 3]",
+		Context:     "infra-guy/prod",
+	})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/repos/acme/infra/statuses/deadbeef" || gotAuth != "Bearer ghs_tok" {
+		t.Fatalf("got %s %s auth=%q", gotMethod, gotPath, gotAuth)
+	}
+	if gotBody.State != "pending" || gotBody.TargetURL != "https://infra.example.com/runs/r-1" || gotBody.Description != "[add: 3, delete: 3]" || gotBody.Context != "infra-guy/prod" {
+		t.Fatalf("got body %+v", gotBody)
+	}
+}
+

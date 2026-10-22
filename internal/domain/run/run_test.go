@@ -169,3 +169,37 @@ func TestLabel(t *testing.T) {
 		t.Fatal("labels")
 	}
 }
+
+func TestApprovePlanOnlyPlannedRun(t *testing.T) {
+	r, err := Open(OpenInput{ID: "r", ProjectID: "p", PlanOnly: true, Trigger: TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(10, 0).UTC()
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	completeStep(t, r, StepPlan, StepResult{PlanText: "Plan: 3 to add, 0 to change, 3 to destroy.\n"}, now)
+	if r.Snapshot().Status != StatusPlanned {
+		t.Fatalf("status %s, want planned", r.Snapshot().Status)
+	}
+	if err := r.Approve(Approval{UserID: "u1", Login: "alice", Role: "admin"}, now); err != nil {
+		t.Fatalf("approve planned PR run: %v", err)
+	}
+	if len(r.Snapshot().Approvals) != 1 || r.Snapshot().Approvals[0].Login != "alice" {
+		t.Fatalf("approvals: %#v", r.Snapshot().Approvals)
+	}
+}
+
+func TestSummaryBracket(t *testing.T) {
+	if got := (Snapshot{Add: 3, Change: 0, Destroy: 3}).SummaryBracket(); got != "[add: 3, delete: 3]" {
+		t.Fatalf("got %q, want [add: 3, delete: 3]", got)
+	}
+	if got := (Snapshot{Add: 1, Change: 2, Destroy: 0}).SummaryBracket(); got != "[add: 1, change: 2]" {
+		t.Fatalf("got %q, want [add: 1, change: 2]", got)
+	}
+	if got := (Snapshot{Add: 0, Change: 0, Destroy: 0}).SummaryBracket(); got != "No changes" {
+		t.Fatalf("got %q, want No changes", got)
+	}
+}
+

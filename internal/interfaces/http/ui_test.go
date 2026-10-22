@@ -1618,3 +1618,102 @@ func TestRunPlanStepStaysOpenWhenUnconfirmedAndRendersParsedPlanJSON(t *testing.
 	}
 }
 
+func TestPRRunApprovalUI(t *testing.T) {
+	p := listProject(t)
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	prNum := 42
+	prSnap := run.Snapshot{
+		ID: "r-pr-1", ProjectID: "p1", Trigger: run.TriggerPullRequest, Status: run.StatusPlanned,
+		PlanOnly: true, PRNumber: &prNum, PRTitle: "Add S3 bucket", SHA: "abc1234def",
+		Add: 3, Destroy: 1, SummaryPresent: true,
+		PlanJSON: []byte(`{"format_version":"1.2"}`),
+		Steps: []run.Step{
+			{Name: run.StepInit, Position: 1, Status: run.StepSucceeded, Logs: "init done"},
+			{Name: run.StepPlan, Position: 2, Status: run.StepSucceeded, Logs: "plan done"},
+		},
+	}
+	runs := &memRuns{items: map[run.ID]*run.Run{"r-pr-1": run.Restore(prSnap)}}
+	states := &memStates{items: map[string]*state.State{}}
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+	polRepo := newUIMemPolicies(projects)
+	polSeq := 0
+	polSvc := &policyapp.Service{
+		Policies: polRepo,
+		Engine:   opa.NewEvaluator(),
+		Now:      time.Now,
+		NewID: func() string {
+			polSeq++
+			return fmt.Sprintf("pol-%d", polSeq)
+		},
+	}
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+		repos: map[int64][]installation.Repo{100: {{ID: 101, Owner: "operator", Name: "my-infra"}}},
+	}
+	h := NewServer(ServerConfig{
+		Projects:      projSvc,
+		Runs:          runsSvc,
+		States:        stSvc,
+		Policies:      polSvc,
+		Versions:      stubVersions{list: []string{"1.10.5"}},
+		Checkout:      &stubTip{sha: "abc1234"},
+		Lookup:        &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// Attach a policy requiring >= 1 approval
+	rego := `package infraguy.approval
+import rego.v1
+allow if {
+	count(input.approvals) >= 1
+}
+`
+	rrPol := postUI(t, h, "/policies", strings.NewReader(url.Values{"name": {"pr-approval"}, "rego": {rego}}.Encode()))
+	if rrPol.Code != http.StatusSeeOther {
+		t.Fatalf("create policy = %d: %s", rrPol.Code, rrPol.Body.String())
+	}
+	if rrAssign := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id=pol-1")); rrAssign.Code != http.StatusSeeOther {
+		t.Fatalf("assign policy = %d", rrAssign.Code)
+	}
+
+	// 1. Before approval: PR run shows Approve button and Undecided policy status, but NOT Confirm or Cancel buttons
+	rrBefore := getUI(t, h, "/runs/r-pr-1")
+	bodyBefore := rrBefore.Body.String()
+	if rrBefore.Code != http.StatusOK {
+		t.Fatalf("GET /runs/r-pr-1 = %d: %s", rrBefore.Code, bodyBefore)
+	}
+	if !strings.Contains(bodyBefore, `action="/runs/r-pr-1/approve"`) {
+		t.Fatalf("expected Approve form on planned PR run with changes, got:\n%s", bodyBefore)
+	}
+	if !strings.Contains(bodyBefore, "Undecided") || !strings.Contains(bodyBefore, "Approval undecided by policy") {
+		t.Fatalf("expected Undecided policy evaluation on planned PR run, got:\n%s", bodyBefore)
+	}
+	if strings.Contains(bodyBefore, `/runs/r-pr-1/confirm`) || strings.Contains(bodyBefore, `/runs/r-pr-1/cancel`) {
+		t.Fatalf("expected PlanOnly PR run NOT to render Confirm or Cancel buttons, got:\n%s", bodyBefore)
+	}
+
+	// 2. Approve PR run via POST /runs/r-pr-1/approve
+	rrApprove := postUI(t, h, "/runs/r-pr-1/approve", nil)
+	if rrApprove.Code != http.StatusSeeOther {
+		t.Fatalf("POST /runs/r-pr-1/approve = %d: %s", rrApprove.Code, rrApprove.Body.String())
+	}
+
+	// 3. After approval: policy evaluation is Allowed and Approved by operator (1) is shown
+	rrAfter := getUI(t, h, "/runs/r-pr-1")
+	bodyAfter := rrAfter.Body.String()
+	if !strings.Contains(bodyAfter, "Allowed") || !strings.Contains(bodyAfter, "Approved by operator (1)") {
+		t.Fatalf("expected Allowed and Approved by operator (1) after approval, got:\n%s", bodyAfter)
+	}
+}
+
+

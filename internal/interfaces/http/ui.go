@@ -90,7 +90,7 @@ type historyView struct {
 	ID, StatusLabel, StatusClass, ApprovedBy, QueuedAt string
 	ApprovedByList                                     string
 	ApprovalCount                                      int
-	CanApprove                                         bool
+	CanApprove, PlanOnly                               bool
 	Poll, Terminal, Unconfirmed, Confirmed, Cancelled  bool
 	Queued                                             bool
 	Apply, Plan, Init                                  *stepView
@@ -878,15 +878,18 @@ func historyFrom(s run.Snapshot, evalView *runPolicyEvalView, currentLogin strin
 	if len(s.PlanJSON) > 0 {
 		planDiff, _ = run.ParsePlanJSON(s.PlanJSON)
 	}
+	approvable := s.Status == run.StatusNeedsApproval || (s.PlanOnly && s.Status == run.StatusPlanned && s.HasChanges())
 	h := historyView{
 		ID: string(s.ID), Poll: !s.Status.Terminal(), StatusLabel: s.Status.Label(), StatusClass: statusClass(s.Status),
-		Terminal: s.Status.Terminal(), Unconfirmed: s.Status == run.StatusNeedsApproval,
+		Terminal:       s.Status.Terminal(),
+		Unconfirmed:    approvable,
+		PlanOnly:       s.PlanOnly,
 		Confirmed:      s.ApprovedBy != "" && s.Status != run.StatusCancelled,
 		Cancelled:      s.Status == run.StatusCancelled,
 		ApprovedBy:     s.ApprovedBy,
 		ApprovedByList: strings.Join(approvers, ", "),
 		ApprovalCount:  len(s.Approvals),
-		CanApprove:     s.Status == run.StatusNeedsApproval && !alreadyApproved,
+		CanApprove:     approvable && !alreadyApproved,
 		Queued:         true,
 		QueuedAt:       fmtTime(s.CreatedAt),
 		PlanDiff:       planDiff,
@@ -1416,7 +1419,8 @@ func approvalsInfoFrom(approvals []run.Approval) []policyapp.ApprovalInfo {
 }
 
 func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snapshot) *runPolicyEvalView {
-	if rs.Status != run.StatusNeedsApproval || ps.ApprovalPolicyID == "" || u.cfg.Policies == nil {
+	approvable := rs.Status == run.StatusNeedsApproval || (rs.PlanOnly && rs.Status == run.StatusPlanned && rs.HasChanges())
+	if !approvable || ps.ApprovalPolicyID == "" || u.cfg.Policies == nil {
 		return nil
 	}
 	polID := policy.ID(ps.ApprovalPolicyID)

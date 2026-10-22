@@ -1,7 +1,17 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
+
+	policyapp "infra-guy/internal/application/policy"
+	runapp "infra-guy/internal/application/run"
+	"infra-guy/internal/domain/policy"
+	"infra-guy/internal/domain/project"
+	"infra-guy/internal/domain/run"
+	"infra-guy/internal/infrastructure/github"
+	"infra-guy/internal/infrastructure/opa"
 )
 
 func TestParseJobID(t *testing.T) {
@@ -216,3 +226,125 @@ func TestBuildWorkerPassThroughEnv(t *testing.T) {
 		}
 	})
 }
+
+type stubTokenGetter struct{ token string }
+
+func (s stubTokenGetter) InstallationToken(_ context.Context, _ string) (string, error) {
+	return s.token, nil
+}
+
+type stubCommitStatusPoster struct {
+	token, owner, repo, sha string
+	status                  github.CommitStatus
+}
+
+func (s *stubCommitStatusPoster) CreateCommitStatus(_ context.Context, token, owner, repo, sha string, status github.CommitStatus) error {
+	s.token, s.owner, s.repo, s.sha, s.status = token, owner, repo, sha, status
+	return nil
+}
+
+type memPolRepo struct{ items map[policy.ID]*policy.Policy }
+
+func (m *memPolRepo) Insert(_ context.Context, p *policy.Policy) error {
+	m.items[p.ID()] = policy.Restore(p.Snapshot())
+	return nil
+}
+func (m *memPolRepo) Update(_ context.Context, p *policy.Policy) error {
+	m.items[p.ID()] = policy.Restore(p.Snapshot())
+	return nil
+}
+func (m *memPolRepo) Get(_ context.Context, id policy.ID) (*policy.Policy, error) {
+	p, ok := m.items[id]
+	if !ok {
+		return nil, policy.ErrNotFound
+	}
+	return policy.Restore(p.Snapshot()), nil
+}
+func (m *memPolRepo) ListByTenant(_ context.Context, _ string) ([]*policy.Policy, error) {
+	return nil, nil
+}
+func (m *memPolRepo) Delete(_ context.Context, id policy.ID) error {
+	delete(m.items, id)
+	return nil
+}
+
+func TestStatusReporterAndMergeabilityChecker(t *testing.T) {
+	ctx := context.Background()
+	poster := &stubCommitStatusPoster{}
+	reporter := newStatusReporter(stubTokenGetter{token: "ghs_test"}, poster)
+
+	ps := project.Snapshot{
+		ID: "p1", TenantID: "t1", Name: "payments",
+		Repo: project.SourceRepo{Owner: "acme", Name: "infra"},
+	}
+	err := reporter.ReportCommitStatus(ctx, ps, "deadbeef", runapp.StatusReport{
+		State:       "pending",
+		Description: "[add: 2, delete: 1]",
+		Context:     "infra-guy / payments",
+		TargetURL:   "https://infra.example.com/runs/r1",
+	})
+	if err != nil {
+		t.Fatalf("reporter: %v", err)
+	}
+	if poster.token != "ghs_test" || poster.owner != "acme" || poster.repo != "infra" || poster.sha != "deadbeef" {
+		t.Fatalf("unexpected poster call: %+v", poster)
+	}
+	if poster.status.State != "pending" || poster.status.Description != "[add: 2, delete: 1]" {
+		t.Fatalf("unexpected commit status: %+v", poster.status)
+	}
+
+	// Mergeability without policy: requires AutoApprove or >= 1 approval
+	polRepo := &memPolRepo{items: map[policy.ID]*policy.Policy{}}
+	polSvc := &policyapp.Service{
+		Policies: polRepo,
+		Engine:   opa.NewEvaluator(),
+		Now:      time.Now,
+		NewID:    func() string { return "pol-1" },
+	}
+	checker := newMergeabilityChecker(polSvc)
+
+	rUnapproved := run.Snapshot{ID: "r1", ProjectID: "p1", Status: run.StatusPlanned, PlanOnly: true}
+	if checker.IsMergeable(ctx, ps, rUnapproved) {
+		t.Fatalf("expected unapproved run without AutoApprove to be not mergeable")
+	}
+	rApproved := run.Snapshot{
+		ID: "r1", ProjectID: "p1", Status: run.StatusPlanned, PlanOnly: true,
+		Approvals: []run.Approval{{UserID: "u1", Login: "alice", Role: "admin"}},
+	}
+	if !checker.IsMergeable(ctx, ps, rApproved) {
+		t.Fatalf("expected approved run without policy to be mergeable")
+	}
+
+	// Mergeability with policy requiring >= 2 approvals
+	pol, err := policySvcCreateHelper(ctx, polSvc, "t1", "two-eyes", `package infraguy.approval
+import rego.v1
+allow if { count(input.approvals) >= 2 }
+`)
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	psWithPol := project.Snapshot{
+		ID: "p1", TenantID: "t1", Name: "payments",
+		Repo:             project.SourceRepo{Owner: "acme", Name: "infra"},
+		ApprovalPolicyID: string(pol.ID()),
+	}
+	if checker.IsMergeable(ctx, psWithPol, rApproved) {
+		t.Fatalf("expected 1 approval to not satisfy 2-eyes policy")
+	}
+	rTwoApprovals := run.Snapshot{
+		ID: "r1", ProjectID: "p1", Status: run.StatusPlanned, PlanOnly: true,
+		PlanJSON: []byte(`{"format_version":"1.2"}`),
+		Approvals: []run.Approval{
+			{UserID: "u1", Login: "alice", Role: "admin"},
+			{UserID: "u2", Login: "bob", Role: "member"},
+		},
+	}
+	if !checker.IsMergeable(ctx, psWithPol, rTwoApprovals) {
+		t.Fatalf("expected 2 approvals to satisfy 2-eyes policy")
+	}
+}
+
+func policySvcCreateHelper(ctx context.Context, svc *policyapp.Service, tenantID, name, rego string) (*policy.Policy, error) {
+	return svc.Create(ctx, policyapp.CreateInput{TenantID: tenantID, Name: name, Rego: rego})
+}
+

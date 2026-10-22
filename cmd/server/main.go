@@ -29,6 +29,7 @@ import (
 	stateapp "infra-guy/internal/application/state"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/application/worker"
+	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/tenant"
@@ -169,7 +170,14 @@ func main() {
 	}
 
 	runSvc := &runapp.Service{
-		Projects: projects, Runs: runs, Schedule: queue, Now: now, NewID: newID,
+		Projects:       projects,
+		Runs:           runs,
+		Schedule:       queue,
+		Now:            now,
+		NewID:          newID,
+		PublicBaseURL:  public,
+		StatusReporter: newStatusReporter(tokenSource, gh),
+		Mergeability:   newMergeabilityChecker(policySvc),
 		OnTerminal: func(ctx context.Context, p *project.Project, r *run.Run) {
 			ps := p.Snapshot()
 			rs := r.Snapshot()
@@ -456,3 +464,80 @@ func workerID() string {
 	h, _ := os.Hostname()
 	return fmt.Sprintf("%s-%d", h, os.Getpid())
 }
+
+type installationTokenGetter interface {
+	InstallationToken(ctx context.Context, tenantID string) (string, error)
+}
+
+type commitStatusPoster interface {
+	CreateCommitStatus(ctx context.Context, token, owner, repo, sha string, status github.CommitStatus) error
+}
+
+type githubStatusReporter struct {
+	tokens installationTokenGetter
+	gh     commitStatusPoster
+}
+
+func newStatusReporter(tokens installationTokenGetter, gh commitStatusPoster) runapp.StatusReporter {
+	return githubStatusReporter{tokens: tokens, gh: gh}
+}
+
+func (r githubStatusReporter) ReportCommitStatus(ctx context.Context, ps project.Snapshot, sha string, status runapp.StatusReport) error {
+	token, err := r.tokens.InstallationToken(ctx, ps.TenantID)
+	if err != nil {
+		return err
+	}
+	return r.gh.CreateCommitStatus(ctx, token, ps.Repo.Owner, ps.Repo.Name, sha, github.CommitStatus{
+		State:       status.State,
+		TargetURL:   status.TargetURL,
+		Description: status.Description,
+		Context:     status.Context,
+	})
+}
+
+type policyMergeabilityChecker struct {
+	policySvc *policyapp.Service
+}
+
+func newMergeabilityChecker(policySvc *policyapp.Service) runapp.MergeabilityChecker {
+	return policyMergeabilityChecker{policySvc: policySvc}
+}
+
+func (c policyMergeabilityChecker) IsMergeable(ctx context.Context, ps project.Snapshot, rs run.Snapshot) bool {
+	if ps.ApprovalPolicyID == "" {
+		return ps.AutoApprove || len(rs.Approvals) > 0
+	}
+	if c.policySvc == nil {
+		return false
+	}
+	approvals := make([]policyapp.ApprovalInfo, 0, len(rs.Approvals))
+	for _, a := range rs.Approvals {
+		ts := ""
+		if !a.ApprovedAt.IsZero() {
+			ts = a.ApprovedAt.UTC().Format(time.RFC3339)
+		}
+		approvals = append(approvals, policyapp.ApprovalInfo{
+			ID:         a.UserID,
+			Login:      a.Login,
+			Role:       a.Role,
+			ApprovedAt: ts,
+		})
+	}
+	var userInfo policyapp.UserInfo
+	if n := len(rs.Approvals); n > 0 {
+		last := rs.Approvals[n-1]
+		userInfo = policyapp.UserInfo{ID: last.UserID, Login: last.Login, Role: last.Role}
+	}
+	projInfo := policyapp.ProjectInfo{
+		ID:               string(ps.ID),
+		Name:             ps.Name,
+		RepoOwner:        ps.Repo.Owner,
+		RepoName:         ps.Repo.Name,
+		WorkingDirectory: ps.WorkingDirectory,
+		TerraformVersion: ps.TerraformVersion,
+		AutoApprove:      ps.AutoApprove,
+	}
+	res, err := c.policySvc.EvaluateForRun(ctx, ps.TenantID, policy.ID(ps.ApprovalPolicyID), rs.PlanJSON, userInfo, projInfo, approvals)
+	return err == nil && res.Allowed
+}
+

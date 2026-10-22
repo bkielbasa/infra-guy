@@ -348,3 +348,160 @@ func TestAdvanceInitSuccessEnqueuesPlanKeepsActiveRun(t *testing.T) {
 		t.Fatalf("active run %q", projects.items["p1"].Snapshot().ActiveRunID)
 	}
 }
+
+type recordedStatus struct {
+	sha    string
+	report StatusReport
+}
+
+type fakeStatusReporter struct {
+	calls []recordedStatus
+}
+
+func (f *fakeStatusReporter) ReportCommitStatus(_ context.Context, _ project.Snapshot, sha string, status StatusReport) error {
+	f.calls = append(f.calls, recordedStatus{sha: sha, report: status})
+	return nil
+}
+
+type fakeMergeability struct {
+	fn func(p project.Snapshot, r run.Snapshot) bool
+}
+
+func (f fakeMergeability) IsMergeable(_ context.Context, p project.Snapshot, r run.Snapshot) bool {
+	return f.fn(p, r)
+}
+
+func TestPRCommitStatusLifecycle(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := project.ParseSourceRepo("bkielbasa/infra")
+	p, _ := project.New("p1", "infra", repo, time.Unix(0, 0).UTC())
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	sched := &memSched{}
+	reporter := &fakeStatusReporter{}
+	svc := &Service{
+		Projects:       projects,
+		Runs:           runs,
+		Schedule:       sched,
+		StatusReporter: reporter,
+		PublicBaseURL:  "https://infra.example.com",
+		Mergeability: fakeMergeability{fn: func(_ project.Snapshot, r run.Snapshot) bool {
+			return len(r.Approvals) >= 2
+		}},
+		Now:   func() time.Time { return time.Unix(1, 0).UTC() },
+		NewID: func() string { return "run-1" },
+	}
+
+	// 1. Open PR run -> pending "In progress"
+	opened, err := svc.Open(ctx, OpenRequest{
+		ProjectID: "p1", Trigger: run.TriggerPullRequest, SHA: "sha123", PlanOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reporter.calls) != 1 {
+		t.Fatalf("expected 1 status call after Open, got %d", len(reporter.calls))
+	}
+	if got := reporter.calls[0]; got.sha != "sha123" || got.report.State != "pending" || got.report.Description != "In progress" || got.report.Context != "infra-guy/infra" || got.report.TargetURL != "https://infra.example.com/runs/run-1" {
+		t.Fatalf("after Open: %+v", got)
+	}
+
+	// 2. Advance init -> no redundant status call, still in progress
+	r := runs.items[opened.Snapshot().ID]
+	beginStep(t, r, run.StepInit, time.Unix(2, 0).UTC())
+	_ = runs.Save(ctx, r)
+	if err := svc.Advance(ctx, "run-1", run.StepInit, run.StepResult{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reporter.calls) != 1 {
+		t.Fatalf("expected no extra status call after StepInit, got %d", len(reporter.calls))
+	}
+
+	// 3. Advance plan with changes (3 add, 3 destroy) -> pending "[add: 3, delete: 3]"
+	r = runs.items["run-1"]
+	beginStep(t, r, run.StepPlan, time.Unix(3, 0).UTC())
+	_ = runs.Save(ctx, r)
+	if err := svc.Advance(ctx, "run-1", run.StepPlan, run.StepResult{
+		PlanText: "Plan: 3 to add, 0 to change, 3 to destroy.\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reporter.calls) != 2 {
+		t.Fatalf("expected 2 status calls after StepPlan, got %d", len(reporter.calls))
+	}
+	if got := reporter.calls[1]; got.report.State != "pending" || got.report.Description != "[add: 3, delete: 3]" {
+		t.Fatalf("after StepPlan: %+v", got)
+	}
+
+	// 4. First approval (policy requires 2) -> still pending "[add: 3, delete: 3]"
+	if err := svc.Approve(ctx, "run-1", run.Approval{UserID: "u1", Login: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reporter.calls) != 3 {
+		t.Fatalf("expected 3 status calls after first Approve, got %d", len(reporter.calls))
+	}
+	if got := reporter.calls[2]; got.report.State != "pending" || got.report.Description != "[add: 3, delete: 3]" {
+		t.Fatalf("after first Approve: %+v", got)
+	}
+
+	// 5. Second approval (policy now allows!) -> success "[add: 3, delete: 3]"
+	if err := svc.Approve(ctx, "run-1", run.Approval{UserID: "u2", Login: "bob"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reporter.calls) != 4 {
+		t.Fatalf("expected 4 status calls after second Approve, got %d", len(reporter.calls))
+	}
+	if got := reporter.calls[3]; got.report.State != "success" || got.report.Description != "[add: 3, delete: 3]" {
+		t.Fatalf("after second Approve: %+v", got)
+	}
+}
+
+func TestPRCommitStatusEmptyPlanAndFail(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := project.ParseSourceRepo("bkielbasa/infra")
+	p, _ := project.New("p1", "infra", repo, time.Unix(0, 0).UTC())
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	sched := &memSched{}
+	reporter := &fakeStatusReporter{}
+	ids := []string{"run-empty", "run-fail"}
+	svc := &Service{
+		Projects:       projects,
+		Runs:           runs,
+		Schedule:       sched,
+		StatusReporter: reporter,
+		PublicBaseURL:  "https://infra.example.com",
+		Now:            func() time.Time { return time.Unix(1, 0).UTC() },
+		NewID:          func() string { id := ids[0]; ids = ids[1:]; return id },
+	}
+
+	// Empty plan -> immediately success "No changes"
+	if _, err := svc.Open(ctx, OpenRequest{ProjectID: "p1", Trigger: run.TriggerPullRequest, SHA: "sha-empty", PlanOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	r := runs.items["run-empty"]
+	beginStep(t, r, run.StepPlan, time.Unix(2, 0).UTC())
+	_ = runs.Save(ctx, r)
+	if err := svc.Advance(ctx, "run-empty", run.StepPlan, run.StepResult{
+		PlanText: "No changes. Your infrastructure matches the configuration.\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	last := reporter.calls[len(reporter.calls)-1]
+	if last.sha != "sha-empty" || last.report.State != "success" || last.report.Description != "No changes" {
+		t.Fatalf("empty plan status: %+v", last)
+	}
+
+	// Failed plan -> failure "Plan failed"
+	if _, err := svc.Open(ctx, OpenRequest{ProjectID: "p1", Trigger: run.TriggerPullRequest, SHA: "sha-fail", PlanOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Fail(ctx, "run-fail", run.StepPlan, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	last = reporter.calls[len(reporter.calls)-1]
+	if last.sha != "sha-fail" || last.report.State != "failure" || last.report.Description != "Plan failed" {
+		t.Fatalf("failed plan status: %+v", last)
+	}
+}
+

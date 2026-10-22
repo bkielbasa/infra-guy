@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -28,6 +29,13 @@ type Repo struct {
 	ID    int64
 	Owner string
 	Name  string
+}
+
+type CommitStatus struct {
+	State       string `json:"state"`
+	TargetURL   string `json:"target_url,omitempty"`
+	Description string `json:"description,omitempty"`
+	Context     string `json:"context"`
 }
 
 type Client struct {
@@ -264,6 +272,20 @@ func (c *Client) ListRepos(ctx context.Context, installationID int64) ([]Repo, e
 			return repos, nil
 		}
 	}
+}
+
+func (c *Client) CreateCommitStatus(ctx context.Context, token, owner, repo, sha string, status CommitStatus) error {
+	payload, err := json.Marshal(status)
+	if err != nil {
+		return err
+	}
+	u := fmt.Sprintf("%s/repos/%s/%s/statuses/%s", c.base(), url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha))
+	resp, err := c.do(ctx, http.MethodPost, u, token, githubAccept, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkStatus(resp)
 }
 
 func (t *Tokens) Token(ctx context.Context, installationID int64) (string, error) {
