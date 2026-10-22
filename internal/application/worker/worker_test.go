@@ -916,8 +916,8 @@ func TestWorkerStreamsLogsDuringExecution(t *testing.T) {
 	if err := fx.w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if midExecutionLogs != "line 1\n" {
-		t.Fatalf("mid-execution logs = %q, want %q", midExecutionLogs, "line 1\n")
+	if !strings.Contains(midExecutionLogs, "Cloning repository") || !strings.Contains(midExecutionLogs, "line 1\n") {
+		t.Fatalf("mid-execution logs = %q, want workspace prep + %q", midExecutionLogs, "line 1\n")
 	}
 }
 

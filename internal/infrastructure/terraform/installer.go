@@ -22,6 +22,21 @@ type BinaryLocator interface {
 	Ensure(ctx context.Context, version string) (string, error)
 }
 
+type logFuncKey struct{}
+
+func WithLogFunc(ctx context.Context, fn func(format string, args ...any)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, logFuncKey{}, fn)
+}
+
+func logProgress(ctx context.Context, format string, args ...any) {
+	if fn, ok := ctx.Value(logFuncKey{}).(func(format string, args ...any)); ok && fn != nil {
+		fn(format, args...)
+	}
+}
+
 type Installer struct {
 	CacheDir string
 	BaseURL  string
@@ -41,6 +56,7 @@ func (in *Installer) Ensure(ctx context.Context, version string) (string, error)
 	if in.CacheDir != "" {
 		cached := filepath.Join(in.CacheDir, "terraform-"+norm)
 		if info, err := os.Stat(cached); err == nil && !info.IsDir() {
+			logProgress(ctx, "Using cached Terraform v%s binary (%s)", norm, cached)
 			return cached, nil
 		}
 	}
@@ -48,6 +64,7 @@ func (in *Installer) Ensure(ctx context.Context, version string) (string, error)
 	if in.BaseURL == "" {
 		if path, err := exec.LookPath("terraform"); err == nil {
 			if got := binaryVersion(ctx, path); got == norm {
+				logProgress(ctx, "Using system Terraform v%s binary (%s)", norm, path)
 				return path, nil
 			}
 		}
@@ -65,6 +82,7 @@ func (in *Installer) Ensure(ctx context.Context, version string) (string, error)
 		base = "https://releases.hashicorp.com"
 	}
 	archiveURL := fmt.Sprintf("%s/terraform/%s/terraform_%s_%s_%s.zip", base, norm, norm, runtime.GOOS, runtime.GOARCH)
+	logProgress(ctx, "Terraform v%s not in cache; downloading from %s...", norm, archiveURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, archiveURL, nil)
 	if err != nil {
 		return "", err
@@ -85,6 +103,7 @@ func (in *Installer) Ensure(ctx context.Context, version string) (string, error)
 	if err != nil {
 		return "", err
 	}
+	logProgress(ctx, "Downloaded Terraform v%s archive (%d KB); extracting binary...", norm, len(raw)/1024)
 	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
 		return "", err
@@ -126,6 +145,7 @@ func (in *Installer) Ensure(ctx context.Context, version string) (string, error)
 	if err := os.Rename(tmpPath, dest); err != nil {
 		return "", err
 	}
+	logProgress(ctx, "Cached Terraform v%s binary at %s", norm, dest)
 	return dest, nil
 }
 

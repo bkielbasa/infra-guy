@@ -238,16 +238,29 @@ func TestInstallerDownloadsAndCachesBinary(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	inst := &Installer{CacheDir: t.TempDir(), BaseURL: srv.URL, Client: srv.Client()}
-	bin1, err := inst.Ensure(context.Background(), "1.8.5")
+	var firstLogs, secondLogs []string
+	ctx1 := WithLogFunc(context.Background(), func(format string, args ...any) {
+		firstLogs = append(firstLogs, format)
+	})
+	bin1, err := inst.Ensure(ctx1, "1.8.5")
 	if err != nil {
 		t.Fatal(err)
 	}
-	bin2, err := inst.Ensure(context.Background(), "1.8.5")
+	ctx2 := WithLogFunc(context.Background(), func(format string, args ...any) {
+		secondLogs = append(secondLogs, format)
+	})
+	bin2, err := inst.Ensure(ctx2, "1.8.5")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bin1 != bin2 || hits != 1 {
 		t.Fatalf("expected cached binary with 1 hit, got hits=%d bin1=%q bin2=%q", hits, bin1, bin2)
+	}
+	if len(firstLogs) == 0 || !strings.Contains(strings.Join(firstLogs, "\n"), "downloading") {
+		t.Fatalf("expected first Ensure to log download progress, got %v", firstLogs)
+	}
+	if len(secondLogs) == 0 || !strings.Contains(strings.Join(secondLogs, "\n"), "Using cached Terraform") {
+		t.Fatalf("expected second Ensure to log cache hit, got %v", secondLogs)
 	}
 }
 
@@ -381,12 +394,32 @@ func TestExecutorStreamsLogsViaOnLog(t *testing.T) {
 	if len(snapshots) < 2 {
 		t.Fatalf("expected incremental OnLog callbacks (>=2), got %d: %#v", len(snapshots), snapshots)
 	}
-	if !strings.Contains(snapshots[0], "line-1") || strings.Contains(snapshots[0], "line-2") {
-		t.Fatalf("expected first streamed snapshot to contain only line-1, got %q", snapshots[0])
+	var sawLine1BeforeLine2 bool
+	for _, snap := range snapshots {
+		if strings.Contains(snap, "line-1") && !strings.Contains(snap, "line-2") {
+			sawLine1BeforeLine2 = true
+			break
+		}
+	}
+	if !sawLine1BeforeLine2 {
+		t.Fatalf("expected an incremental snapshot containing line-1 before line-2, got %#v", snapshots)
 	}
 	last := snapshots[len(snapshots)-1]
-	if !strings.Contains(last, "line-1") || !strings.Contains(last, "line-2") {
-		t.Fatalf("expected final snapshot to contain both lines, got %q", last)
+	for _, want := range []string{
+		"Configured HTTP state backend override",
+		"Ensuring Terraform v1.9.8 binary...",
+		"Running: terraform init -input=false -no-color",
+		"line-1",
+		"line-2",
+	} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("expected final snapshot to contain %q, got %q", want, last)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(last, "\n"), "\n") {
+		if !strings.HasPrefix(line, "[") || !strings.Contains(line, "] ") {
+			t.Fatalf("expected every log line to start with [HH:MM:SS.mmm] timestamp, got %q", line)
+		}
 	}
 }
 

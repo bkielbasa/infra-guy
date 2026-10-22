@@ -32,7 +32,7 @@
     {{end}}
   </div>
   {{range .Resources}}
-  <details class="plan-resource plan-resource-{{.Action}}" data-preserve-key="res:{{.Address}}" open>
+  <details class="plan-resource plan-resource-{{.Action}}" data-preserve-key="res:{{.Address}}">
     <summary class="plan-resource-summary">
       <span class="plan-action plan-action-{{.Action}}">{{.ActionSymbol}} {{.ActionLabel}}</span>
       <code class="plan-address">{{.Address}}</code>

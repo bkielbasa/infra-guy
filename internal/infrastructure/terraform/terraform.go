@@ -93,13 +93,21 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 
+	streamer := newLogStreamer(req.OnLog)
+	defer streamer.Close()
+	streamer.Logf("Configured HTTP state backend override")
+
 	bin := "terraform"
 	if e.Binary != nil && req.TerraformVersion != "" {
+		streamer.Logf("Ensuring Terraform v%s binary...", req.TerraformVersion)
 		var err error
-		bin, err = e.Binary.Ensure(ctx, req.TerraformVersion)
+		bin, err = e.Binary.Ensure(WithLogFunc(ctx, streamer.Logf), req.TerraformVersion)
 		if err != nil {
+			streamer.Close()
 			return Result{}, err
 		}
+	} else {
+		streamer.Logf("Using system terraform binary")
 	}
 
 	homeDir := filepath.Join(req.WorkDir, ".home")
@@ -112,10 +120,11 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 	if err := materializeFiles(homeDir, req.Files); err != nil {
 		return Result{}, err
 	}
+	if len(req.Env) > 0 || len(req.Files) > 0 {
+		streamer.Logf("Prepared execution environment (%d env var(s), %d file(s))", len(req.Env), len(req.Files))
+	}
 
 	env := commandEnv(req.GitHubToken, homeDir, req.Env)
-	streamer := newLogStreamer(req.OnLog)
-	defer streamer.Close()
 
 	var planText string
 	var planJSON []byte
@@ -123,6 +132,7 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 		showJSON := len(args) >= 2 && args[0] == "show" && args[1] == "-json"
 		showText := !showJSON && len(args) >= 1 && args[0] == "show"
 
+		streamer.Logf("Running: terraform %s", strings.Join(args, " "))
 		cmd := commandBin(ctx, bin, dir, env, args...)
 		var cmdOut bytes.Buffer
 		if showJSON || showText {
@@ -148,8 +158,10 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 		}
 		if showJSON {
 			planJSON = []byte(strings.TrimSpace(cmdOut.String()))
+			streamer.Logf("Exported JSON plan (%d bytes)", len(planJSON))
 		} else if showText {
 			planText = cmdOut.String()
+			streamer.Logf("Captured plan text summary")
 		} else {
 			streamer.Flush()
 		}
@@ -312,19 +324,20 @@ func parseVersionOutput(out []byte) string {
 }
 
 type logStreamer struct {
-	mu       sync.Mutex
-	buf      strings.Builder
-	onLog    func(string)
-	lastSent string
-	lastAt   time.Time
-	notifyCh chan struct{}
-	stopCh   chan struct{}
-	doneCh   chan struct{}
-	closed   bool
+	mu          sync.Mutex
+	buf         strings.Builder
+	atLineStart bool
+	onLog       func(string)
+	lastSent    string
+	lastAt      time.Time
+	notifyCh    chan struct{}
+	stopCh      chan struct{}
+	doneCh      chan struct{}
+	closed      bool
 }
 
 func newLogStreamer(onLog func(string)) *logStreamer {
-	s := &logStreamer{onLog: onLog}
+	s := &logStreamer{onLog: onLog, atLineStart: true}
 	if onLog == nil {
 		return s
 	}
@@ -355,8 +368,23 @@ func (s *logStreamer) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	total := len(p)
 	s.mu.Lock()
-	_, _ = s.buf.Write(p)
+	ts := time.Now().UTC().Format("15:04:05.000")
+	for len(p) > 0 {
+		if s.atLineStart {
+			_, _ = s.buf.WriteString("[" + ts + "] ")
+			s.atLineStart = false
+		}
+		idx := bytes.IndexByte(p, '\n')
+		if idx < 0 {
+			_, _ = s.buf.Write(p)
+			break
+		}
+		_, _ = s.buf.Write(p[:idx+1])
+		s.atLineStart = true
+		p = p[idx+1:]
+	}
 	shouldNotify := s.onLog != nil && !s.closed && (s.lastAt.IsZero() || time.Since(s.lastAt) >= logFlushInterval)
 	s.mu.Unlock()
 	if shouldNotify {
@@ -365,7 +393,22 @@ func (s *logStreamer) Write(p []byte) (int, error) {
 		default:
 		}
 	}
-	return len(p), nil
+	return total, nil
+}
+
+func (s *logStreamer) Logf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if !strings.HasSuffix(msg, "\n") {
+		msg += "\n"
+	}
+	s.mu.Lock()
+	if !s.atLineStart {
+		_ = s.buf.WriteByte('\n')
+		s.atLineStart = true
+	}
+	s.mu.Unlock()
+	_, _ = s.Write([]byte(msg))
+	s.Flush()
 }
 
 func (s *logStreamer) deliver() {

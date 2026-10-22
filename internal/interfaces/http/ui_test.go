@@ -1555,7 +1555,7 @@ func TestRunPlanStepStaysOpenWhenUnconfirmedAndRendersParsedPlanJSON(t *testing.
 	runs := &memRuns{items: map[run.ID]*run.Run{"r-plan-json": run.Restore(snap)}}
 	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "")
 
-	// 1. /runs/r-plan-json/history keeps the Plan step <details> open while awaiting approval and renders structured plan cards + raw log toggle
+	// 1. /runs/r-plan-json/history keeps the Plan step <details> open while awaiting approval and renders raw step logs (not the structured diff)
 	histRR := getUI(t, h, "/runs/r-plan-json/history")
 	histBody := histRR.Body.String()
 	if histRR.Code != http.StatusOK {
@@ -1564,30 +1564,26 @@ func TestRunPlanStepStaysOpenWhenUnconfirmedAndRendersParsedPlanJSON(t *testing.
 	if !strings.Contains(histBody, `<details data-step="plan" data-status="succeeded" open>`) {
 		t.Fatalf("expected plan <details> to stay open when awaiting approval, got:\n%s", histBody)
 	}
-	for _, want := range []string{
-		"aws_s3_bucket.assets",
-		"my-assets-bucket",
-		"(known after apply)",
-		"aws_iam_role.worker",
-		"bucket_name",
-		"Raw plan logs",
-		"Refreshing state...",
-	} {
-		if !strings.Contains(histBody, want) {
-			t.Fatalf("expected history body to contain %q, got:\n%s", want, histBody)
-		}
+	if !strings.Contains(histBody, "Refreshing state...") {
+		t.Fatalf("expected history body to contain raw step logs %q, got:\n%s", "Refreshing state...", histBody)
+	}
+	if strings.Contains(histBody, `class="plan-diff"`) {
+		t.Fatalf("expected history tab NOT to render structured plan-diff cards, got:\n%s", histBody)
 	}
 
-	// 2. /runs/r-plan-json/changes also renders structured plan diff
+	// 2. /runs/r-plan-json/changes renders structured plan diff with resource cards collapsed by default
 	chgRR := getUI(t, h, "/runs/r-plan-json/changes")
 	chgBody := chgRR.Body.String()
 	if chgRR.Code != http.StatusOK {
 		t.Fatalf("changes status = %d: %s", chgRR.Code, chgBody)
 	}
 	for _, want := range []string{
+		`<details class="plan-resource plan-resource-create" data-preserve-key="res:aws_s3_bucket.assets">`,
 		"aws_s3_bucket.assets",
 		"aws_iam_role.worker",
 		"my-assets-bucket",
+		"(known after apply)",
+		"bucket_name",
 		"Raw Terraform plan output",
 	} {
 		if !strings.Contains(chgBody, want) {

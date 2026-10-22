@@ -8,6 +8,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	runapp "infra-guy/internal/application/run"
@@ -252,7 +254,12 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	if w.Cache != nil {
 		defer func() { _ = os.RemoveAll(dest) }()
 	}
-	if err := w.prepareWorkspace(ctx, job, ps, rs, token, dest, cacheKey); err != nil {
+	logger := &stepLogger{
+		save: func(logs string) {
+			_ = w.Service.UpdateStepLogs(ctx, job.RunID, job.Step, logs)
+		},
+	}
+	if err := w.prepareWorkspace(ctx, job, ps, rs, token, dest, cacheKey, logger); err != nil {
 		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
 			return ferr
 		}
@@ -262,6 +269,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	var ctxEnv map[string]string
 	var ctxFiles map[string][]byte
 	if w.Contexts != nil {
+		logger.LogBeforef("Resolving project contexts...")
 		var cerr error
 		ctxEnv, ctxFiles, cerr = w.Contexts.ResolveForProject(ctx, ps.ID)
 		if cerr != nil {
@@ -270,6 +278,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 			}
 			return w.completeAndCleanup(ctx, job)
 		}
+		logger.LogBeforef("Resolved %d environment variable(s) and %d file(s)", len(ctxEnv), len(ctxFiles))
 	}
 
 	timeout := StepTimeout(job.Step)
@@ -284,7 +293,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		TerraformVersion: ps.TerraformVersion, Step: job.Step, PlanFile: rs.PlanFile,
 		Env: ctxEnv, Files: ctxFiles,
 		OnLog: func(logs string) {
-			_ = w.Service.UpdateStepLogs(ctx, job.RunID, job.Step, logs)
+			logger.SetExec(logs)
 		},
 	})
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
@@ -299,13 +308,16 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		}
 		return w.completeAndCleanup(ctx, job)
 	}
+	logger.SetExec(res.Logs)
 	if job.Step == run.StepInit && res.ExitCode == 0 && w.Cache != nil {
+		logger.LogAfterf("Uploading initialized workspace cache to S3 (%s)...", cacheKey)
 		if err := w.Cache.Save(ctx, cacheKey, dest); err != nil {
 			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "save workspace cache: "+err.Error()); ferr != nil {
 				return ferr
 			}
 			return w.completeAndCleanup(ctx, job)
 		}
+		logger.LogAfterf("Workspace cache uploaded")
 	}
 	if res.Version != "" {
 		if err := w.Service.SetTerraformVersion(ctx, job.RunID, res.Version); err != nil {
@@ -313,21 +325,31 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		}
 	}
 	if err := w.Service.Advance(ctx, job.RunID, job.Step, run.StepResult{
-		ExitCode: res.ExitCode, Logs: res.Logs, PlanText: res.PlanText, PlanFile: res.PlanFile, PlanJSON: res.PlanJSON,
+		ExitCode: res.ExitCode, Logs: logger.String(), PlanText: res.PlanText, PlanFile: res.PlanFile, PlanJSON: res.PlanJSON,
 	}); err != nil {
 		return err
 	}
 	return w.completeAndCleanup(ctx, job)
 }
 
-func (w *Worker) prepareWorkspace(ctx context.Context, job Job, ps project.Snapshot, rs run.Snapshot, token, dest, cacheKey string) error {
+func (w *Worker) prepareWorkspace(ctx context.Context, job Job, ps project.Snapshot, rs run.Snapshot, token, dest, cacheKey string, logger *stepLogger) error {
+	sha := rs.SHA
+	if len(sha) > 7 {
+		sha = sha[:7]
+	}
 	if w.Cache != nil {
 		if err := os.RemoveAll(dest); err != nil {
 			return err
 		}
 		if job.Step == run.StepInit {
-			return w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA)
+			logger.LogBeforef("Cloning repository %s@%s...", ps.Repo.String(), sha)
+			if err := w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA); err != nil {
+				return err
+			}
+			logger.LogBeforef("Repository cloned")
+			return nil
 		}
+		logger.LogBeforef("Restoring workspace cache from S3 (%s)...", cacheKey)
 		ok, err := w.Cache.Restore(ctx, cacheKey, dest)
 		if err != nil {
 			return fmt.Errorf("restore workspace cache: %w", err)
@@ -335,16 +357,83 @@ func (w *Worker) prepareWorkspace(ctx context.Context, job Job, ps project.Snaps
 		if !ok {
 			return errors.New("workspace cache not found for run")
 		}
+		logger.LogBeforef("Workspace cache restored")
 		return nil
 	}
 
 	if job.Step != run.StepInit && hasInitializedTerraform(dest, ps.WorkingDirectory) {
+		logger.LogBeforef("Reusing initialized local workspace")
 		return nil
 	}
 	if err := os.RemoveAll(dest); err != nil {
 		return err
 	}
-	return w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA)
+	logger.LogBeforef("Cloning repository %s@%s...", ps.Repo.String(), sha)
+	if err := w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA); err != nil {
+		return err
+	}
+	logger.LogBeforef("Repository cloned")
+	return nil
+}
+
+type stepLogger struct {
+	mu     sync.Mutex
+	before strings.Builder
+	exec   string
+	after  strings.Builder
+	save   func(string)
+}
+
+func (l *stepLogger) LogBeforef(format string, args ...any) {
+	l.mu.Lock()
+	writeTimestampedLines(&l.before, fmt.Sprintf(format, args...))
+	combined := l.lockedString()
+	l.mu.Unlock()
+	if l.save != nil {
+		l.save(combined)
+	}
+}
+
+func (l *stepLogger) SetExec(logs string) {
+	l.mu.Lock()
+	l.exec = logs
+	combined := l.lockedString()
+	l.mu.Unlock()
+	if l.save != nil {
+		l.save(combined)
+	}
+}
+
+func (l *stepLogger) LogAfterf(format string, args ...any) {
+	l.mu.Lock()
+	writeTimestampedLines(&l.after, fmt.Sprintf(format, args...))
+	combined := l.lockedString()
+	l.mu.Unlock()
+	if l.save != nil {
+		l.save(combined)
+	}
+}
+
+func (l *stepLogger) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lockedString()
+}
+
+func (l *stepLogger) lockedString() string {
+	b := l.before.String()
+	e := l.exec
+	if e != "" && !strings.HasSuffix(e, "\n") && l.after.Len() > 0 {
+		e += "\n"
+	}
+	return b + e + l.after.String()
+}
+
+func writeTimestampedLines(buf *strings.Builder, msg string) {
+	ts := time.Now().UTC().Format("15:04:05.000")
+	for _, line := range strings.Split(strings.TrimSuffix(msg, "\n"), "\n") {
+		buf.WriteString("[" + ts + "] " + line + "\n")
+	}
 }
 
 func hasInitializedTerraform(dest, workingDir string) bool {

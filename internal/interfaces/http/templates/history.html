@@ -23,15 +23,7 @@
     <li>
       <details data-step="plan" data-status="{{.Plan.Status}}"{{if .Plan.Open}} open{{end}}>
         <summary>Planning{{if .Plan.Running}} <span class="step-live">streaming&hellip;</span>{{end}}</summary>
-        {{if .PlanDiff}}
-        {{template "plan_diff" .PlanDiff}}
-        <details class="plan-raw-logs" data-preserve-key="plan-raw-logs">
-          <summary>Raw plan logs</summary>
-          <pre class="log" data-log-step="plan">{{.Plan.Logs}}</pre>
-        </details>
-        {{else}}
         <pre class="log" data-log-step="plan">{{if .Plan.Logs}}{{.Plan.Logs}}{{else if .Plan.Running}}Waiting for Terraform output...{{end}}</pre>
-        {{end}}
       </details>
     </li>
     {{end}}
