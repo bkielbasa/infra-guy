@@ -224,6 +224,9 @@ func (r *RunRepo) loadApprovals(ctx context.Context, id run.ID) ([]run.Approval,
 }
 
 func upsertApprovals(ctx context.Context, tx pgx.Tx, s run.Snapshot) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM run_approvals WHERE run_id = $1`, s.ID); err != nil {
+		return err
+	}
 	for _, a := range s.Approvals {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO run_approvals (run_id, user_id, user_login, user_role, approved_at)

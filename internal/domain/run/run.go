@@ -349,6 +349,26 @@ func (r *Run) Approve(a Approval, now time.Time) error {
 	return nil
 }
 
+func (r *Run) Unapprove(login, userID string) error {
+	if r.s.Status != StatusNeedsApproval && !(r.s.PlanOnly && r.s.Status == StatusPlanned) {
+		return ErrNotUnconfirmed
+	}
+	login = strings.TrimSpace(login)
+	userID = strings.TrimSpace(userID)
+	if login == "" && userID == "" {
+		return fmt.Errorf("approver login or id required")
+	}
+	kept := r.s.Approvals[:0]
+	for _, existing := range r.s.Approvals {
+		if (login != "" && strings.EqualFold(existing.Login, login)) || (userID != "" && existing.UserID == userID) {
+			continue
+		}
+		kept = append(kept, existing)
+	}
+	r.s.Approvals = kept
+	return nil
+}
+
 func (r *Run) Confirm(actor string, now time.Time) (Decision, error) {
 	if r.s.Status != StatusNeedsApproval {
 		return Decision{}, ErrNotUnconfirmed
@@ -360,7 +380,7 @@ func (r *Run) Confirm(actor string, now time.Time) (Decision, error) {
 }
 
 func (r *Run) Cancel(actor string, now time.Time) error {
-	if r.s.Status != StatusNeedsApproval {
+	if r.s.Status != StatusNeedsApproval && !(r.s.PlanOnly && r.s.Status == StatusPlanned) {
 		return ErrNotUnconfirmed
 	}
 	r.skip(StepApply, now)

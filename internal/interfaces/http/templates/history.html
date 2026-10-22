@@ -46,7 +46,9 @@
       <button type="submit">Approve{{if .ApprovalCount}} ({{.ApprovalCount}}){{end}}</button>
     </form>
     {{else}}
-    <button type="button" disabled>Approved ({{.ApprovalCount}})</button>
+    <form method="post" action="/runs/{{.ID}}/unapprove" class="inline">
+      <button type="submit">Unapprove ({{.ApprovalCount}})</button>
+    </form>
     {{end}}
     {{if and .PolicyEval (not .PolicyEval.Allowed)}}
     {{if .PolicyEval.Undecided}}
@@ -59,7 +61,11 @@
       <button type="submit" class="btn-trigger">Confirm</button>
     </form>
     {{end}}
-    {{if not .PlanOnly}}
+    {{if .PlanOnly}}
+    <form method="post" action="/runs/{{.ID}}/cancel" class="inline">
+      <button type="submit">Decline</button>
+    </form>
+    {{else}}
     <form method="post" action="/runs/{{.ID}}/cancel" hx-post="/runs/{{.ID}}/cancel" hx-target="#run-panel" hx-swap="outerHTML" class="inline">
       <button type="submit">Cancel</button>
     </form>

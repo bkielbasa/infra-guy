@@ -189,6 +189,42 @@ func TestApprovePlanOnlyPlannedRun(t *testing.T) {
 	if len(r.Snapshot().Approvals) != 1 || r.Snapshot().Approvals[0].Login != "alice" {
 		t.Fatalf("approvals: %#v", r.Snapshot().Approvals)
 	}
+	if err := r.Unapprove("alice", "u1"); err != nil {
+		t.Fatalf("unapprove planned PR run: %v", err)
+	}
+	if len(r.Snapshot().Approvals) != 0 {
+		t.Fatalf("expected 0 approvals after unapprove, got %#v", r.Snapshot().Approvals)
+	}
+	if err := r.Cancel("alice", now); err != nil {
+		t.Fatalf("cancel planned PR run: %v", err)
+	}
+	if r.Snapshot().Status != StatusCancelled || r.Snapshot().ApprovedBy != "alice" {
+		t.Fatalf("expected cancelled by alice, got %s (%s)", r.Snapshot().Status, r.Snapshot().ApprovedBy)
+	}
+	if err := r.Unapprove("alice", "u1"); err != ErrNotUnconfirmed {
+		t.Fatalf("expected ErrNotUnconfirmed after cancel, got %v", err)
+	}
+}
+
+func TestUnapproveNeedsApprovalRun(t *testing.T) {
+	r := openFull(false)
+	now := time.Unix(10, 0).UTC()
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	completeStep(t, r, StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
+	if err := r.Approve(Approval{UserID: "u1", Login: "alice"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Approve(Approval{UserID: "u2", Login: "bob"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Unapprove("ALICE", ""); err != nil {
+		t.Fatalf("unapprove alice: %v", err)
+	}
+	if len(r.Snapshot().Approvals) != 1 || r.Snapshot().Approvals[0].Login != "bob" {
+		t.Fatalf("expected only bob left, got %#v", r.Snapshot().Approvals)
+	}
 }
 
 func TestSummaryBracket(t *testing.T) {

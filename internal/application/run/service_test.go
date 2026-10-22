@@ -454,6 +454,28 @@ func TestPRCommitStatusLifecycle(t *testing.T) {
 	if got := reporter.calls[3]; got.report.State != "success" || got.report.Description != "[add: 3, delete: 3]" {
 		t.Fatalf("after second Approve: %+v", got)
 	}
+
+	// 6. Unapprove bob -> back to pending "[add: 3, delete: 3]"
+	if err := svc.Unapprove(ctx, "run-1", "bob", "u2"); err != nil {
+		t.Fatal(err)
+	}
+	if len(reporter.calls) != 5 {
+		t.Fatalf("expected 5 status calls after Unapprove, got %d", len(reporter.calls))
+	}
+	if got := reporter.calls[4]; got.report.State != "pending" || got.report.Description != "[add: 3, delete: 3]" {
+		t.Fatalf("after Unapprove: %+v", got)
+	}
+
+	// 7. Cancel/decline planned PR run -> failure "Cancelled"
+	if err := svc.Cancel(ctx, "run-1", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if len(reporter.calls) != 6 {
+		t.Fatalf("expected 6 status calls after Cancel, got %d", len(reporter.calls))
+	}
+	if got := reporter.calls[5]; got.report.State != "failure" || got.report.Description != "Cancelled" {
+		t.Fatalf("after Cancel: %+v", got)
+	}
 }
 
 func TestPRCommitStatusEmptyPlanAndFail(t *testing.T) {

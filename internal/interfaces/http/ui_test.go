@@ -1686,7 +1686,7 @@ allow if {
 		t.Fatalf("assign policy = %d", rrAssign.Code)
 	}
 
-	// 1. Before approval: PR run shows Approve button and Undecided policy status, but NOT Confirm or Cancel buttons
+	// 1. Before approval: PR run shows Approve and Decline/Cancel buttons, and Undecided policy status, but NOT Confirm button
 	rrBefore := getUI(t, h, "/runs/r-pr-1")
 	bodyBefore := rrBefore.Body.String()
 	if rrBefore.Code != http.StatusOK {
@@ -1695,11 +1695,14 @@ allow if {
 	if !strings.Contains(bodyBefore, `action="/runs/r-pr-1/approve"`) {
 		t.Fatalf("expected Approve form on planned PR run with changes, got:\n%s", bodyBefore)
 	}
+	if !strings.Contains(bodyBefore, `action="/runs/r-pr-1/cancel"`) {
+		t.Fatalf("expected Cancel/Decline form on planned PR run, got:\n%s", bodyBefore)
+	}
 	if !strings.Contains(bodyBefore, "Undecided") || !strings.Contains(bodyBefore, "Approval undecided by policy") {
 		t.Fatalf("expected Undecided policy evaluation on planned PR run, got:\n%s", bodyBefore)
 	}
-	if strings.Contains(bodyBefore, `/runs/r-pr-1/confirm`) || strings.Contains(bodyBefore, `/runs/r-pr-1/cancel`) {
-		t.Fatalf("expected PlanOnly PR run NOT to render Confirm or Cancel buttons, got:\n%s", bodyBefore)
+	if strings.Contains(bodyBefore, `/runs/r-pr-1/confirm`) {
+		t.Fatalf("expected PlanOnly PR run NOT to render Confirm button, got:\n%s", bodyBefore)
 	}
 
 	// 2. Approve PR run via POST /runs/r-pr-1/approve
@@ -1708,11 +1711,39 @@ allow if {
 		t.Fatalf("POST /runs/r-pr-1/approve = %d: %s", rrApprove.Code, rrApprove.Body.String())
 	}
 
-	// 3. After approval: policy evaluation is Allowed and Approved by operator (1) is shown
+	// 3. After approval: policy evaluation is Allowed, Approved by operator (1) is shown, and Unapprove + Decline/Cancel buttons are shown
 	rrAfter := getUI(t, h, "/runs/r-pr-1")
 	bodyAfter := rrAfter.Body.String()
 	if !strings.Contains(bodyAfter, "Allowed") || !strings.Contains(bodyAfter, "Approved by operator (1)") {
 		t.Fatalf("expected Allowed and Approved by operator (1) after approval, got:\n%s", bodyAfter)
+	}
+	if !strings.Contains(bodyAfter, `action="/runs/r-pr-1/unapprove"`) || !strings.Contains(bodyAfter, "Unapprove (1)") {
+		t.Fatalf("expected Unapprove (1) form after approval, got:\n%s", bodyAfter)
+	}
+	if !strings.Contains(bodyAfter, `action="/runs/r-pr-1/cancel"`) {
+		t.Fatalf("expected Cancel/Decline form after approval, got:\n%s", bodyAfter)
+	}
+
+	// 4. Unapprove PR run via POST /runs/r-pr-1/unapprove
+	rrUnapprove := postUI(t, h, "/runs/r-pr-1/unapprove", nil)
+	if rrUnapprove.Code != http.StatusSeeOther {
+		t.Fatalf("POST /runs/r-pr-1/unapprove = %d: %s", rrUnapprove.Code, rrUnapprove.Body.String())
+	}
+	rrAfterUnapprove := getUI(t, h, "/runs/r-pr-1")
+	bodyAfterUnapprove := rrAfterUnapprove.Body.String()
+	if !strings.Contains(bodyAfterUnapprove, `action="/runs/r-pr-1/approve"`) || !strings.Contains(bodyAfterUnapprove, "Undecided") {
+		t.Fatalf("expected Approve form and Undecided after unapprove, got:\n%s", bodyAfterUnapprove)
+	}
+
+	// 5. Decline/cancel PR run via POST /runs/r-pr-1/cancel
+	rrCancel := postUI(t, h, "/runs/r-pr-1/cancel", nil)
+	if rrCancel.Code != http.StatusSeeOther {
+		t.Fatalf("POST /runs/r-pr-1/cancel = %d: %s", rrCancel.Code, rrCancel.Body.String())
+	}
+	rrAfterCancel := getUI(t, h, "/runs/r-pr-1")
+	bodyAfterCancel := rrAfterCancel.Body.String()
+	if !strings.Contains(bodyAfterCancel, "Cancelled by operator") {
+		t.Fatalf("expected Cancelled by operator after cancel, got:\n%s", bodyAfterCancel)
 	}
 }
 

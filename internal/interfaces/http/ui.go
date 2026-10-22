@@ -122,6 +122,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /projects/{id}/delete", u.delete)
 	mux.HandleFunc("GET /projects/{id}/runs/{runID}", u.runPage)
 	mux.HandleFunc("POST /projects/{id}/runs/{runID}/approve", u.approve)
+	mux.HandleFunc("POST /projects/{id}/runs/{runID}/unapprove", u.unapprove)
 	mux.HandleFunc("POST /projects/{id}/runs/{runID}/confirm", u.confirm)
 	mux.HandleFunc("POST /projects/{id}/runs/{runID}/cancel", u.cancel)
 	mux.HandleFunc("GET /runs/{id}", u.runPage)
@@ -129,6 +130,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /runs/{id}/history", u.history)
 	mux.HandleFunc("GET /runs/{id}/changes", u.changes)
 	mux.HandleFunc("POST /runs/{id}/approve", u.approve)
+	mux.HandleFunc("POST /runs/{id}/unapprove", u.unapprove)
 	mux.HandleFunc("POST /runs/{id}/confirm", u.confirm)
 	mux.HandleFunc("POST /runs/{id}/cancel", u.cancel)
 	mux.HandleFunc("GET /contexts", u.contexts)
@@ -587,6 +589,25 @@ func (u *ui) approve(w http.ResponseWriter, r *http.Request) {
 		Login:  firstNonEmpty(info.Login, u.actor(r)),
 		Role:   info.Role,
 	}); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		w.Header().Set("HX-Redirect", "/runs/"+string(id))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Redirect(w, r, "/runs/"+string(id), http.StatusSeeOther)
+}
+
+func (u *ui) unapprove(w http.ResponseWriter, r *http.Request) {
+	rn, _, err := u.loadRun(w, r)
+	if err != nil {
+		return
+	}
+	id := rn.Snapshot().ID
+	info := u.userInfo(r)
+	if err := u.cfg.Runs.Unapprove(r.Context(), id, firstNonEmpty(info.Login, u.actor(r)), info.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

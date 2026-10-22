@@ -128,6 +128,21 @@ func (s *Service) Approve(ctx context.Context, id run.ID, a run.Approval) error 
 	return nil
 }
 
+func (s *Service) Unapprove(ctx context.Context, id run.ID, login, userID string) error {
+	r, err := s.Runs.Get(ctx, id)
+	if err != nil || r == nil {
+		return fmt.Errorf("run %s not found", id)
+	}
+	if err := r.Unapprove(login, userID); err != nil {
+		return err
+	}
+	if err := s.Runs.Save(ctx, r); err != nil {
+		return err
+	}
+	s.reportPRStatus(ctx, r)
+	return nil
+}
+
 func (s *Service) Confirm(ctx context.Context, id run.ID, actor string) error {
 	r, err := s.Runs.Get(ctx, id)
 	if err != nil || r == nil {
