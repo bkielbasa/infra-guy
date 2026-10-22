@@ -95,11 +95,9 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 
 	streamer := newLogStreamer(req.OnLog)
 	defer streamer.Close()
-	streamer.Logf("Configured HTTP state backend override")
 
 	bin := "terraform"
 	if e.Binary != nil && req.TerraformVersion != "" {
-		streamer.Logf("Ensuring Terraform v%s binary...", req.TerraformVersion)
 		var err error
 		bin, err = e.Binary.Ensure(WithLogFunc(ctx, streamer.Logf), req.TerraformVersion)
 		if err != nil {
@@ -132,7 +130,9 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 		showJSON := len(args) >= 2 && args[0] == "show" && args[1] == "-json"
 		showText := !showJSON && len(args) >= 1 && args[0] == "show"
 
-		streamer.Logf("Running: terraform %s", strings.Join(args, " "))
+		if !showJSON && !showText {
+			streamer.Logf("Running: terraform %s", strings.Join(args, " "))
+		}
 		cmd := commandBin(ctx, bin, dir, env, args...)
 		var cmdOut bytes.Buffer
 		if showJSON || showText {
@@ -161,7 +161,6 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 			streamer.Logf("Exported JSON plan (%d bytes)", len(planJSON))
 		} else if showText {
 			planText = cmdOut.String()
-			streamer.Logf("Captured plan text summary")
 		} else {
 			streamer.Flush()
 		}

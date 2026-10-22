@@ -406,8 +406,6 @@ func TestExecutorStreamsLogsViaOnLog(t *testing.T) {
 	}
 	last := snapshots[len(snapshots)-1]
 	for _, want := range []string{
-		"Configured HTTP state backend override",
-		"Ensuring Terraform v1.9.8 binary...",
 		"Running: terraform init -input=false -no-color",
 		"line-1",
 		"line-2",

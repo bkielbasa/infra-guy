@@ -48,19 +48,19 @@
             <td class="plan-attr-sym">{{.Symbol}}</td>
             <td class="plan-attr-name"><code>{{.Name}}</code>{{if .ForcesReplace}} <span class="plan-forces-replace"># forces replacement</span>{{end}}</td>
             <td class="plan-attr-val">
-              {{if eq .Change "update"}}
-                {{if .Sensitive}}
+              {{- if eq .Change "update" -}}
+                {{- if .Sensitive -}}
                   <span class="plan-val-muted">(sensitive value)</span>
-                {{else}}
+                {{- else -}}
                   <span class="plan-val-before">{{.Before}}</span>
                   <span class="plan-val-arrow">&rarr;</span>
                   <span class="{{if .KnownAfterApply}}plan-val-muted{{else}}plan-val-after{{end}}">{{.After}}</span>
-                {{end}}
-              {{else if eq .Change "delete"}}
+                {{- end -}}
+              {{- else if eq .Change "delete" -}}
                 <span class="{{if .Sensitive}}plan-val-muted{{else}}plan-val-before{{end}}">{{.Before}}</span>
-              {{else}}
+              {{- else -}}
                 <span class="{{if or .KnownAfterApply .Sensitive}}plan-val-muted{{else}}plan-val-after{{end}}">{{.After}}</span>
-              {{end}}
+              {{- end -}}
             </td>
           </tr>
           {{end}}
@@ -96,19 +96,19 @@
           <td class="plan-attr-sym">{{.Symbol}}</td>
           <td class="plan-attr-name"><code>{{.Name}}</code></td>
           <td class="plan-attr-val">
-            {{if eq .Action "update"}}
-              {{if .Sensitive}}
+            {{- if eq .Action "update" -}}
+              {{- if .Sensitive -}}
                 <span class="plan-val-muted">(sensitive value)</span>
-              {{else}}
+              {{- else -}}
                 <span class="plan-val-before">{{.Before}}</span>
                 <span class="plan-val-arrow">&rarr;</span>
                 <span class="{{if .KnownAfterApply}}plan-val-muted{{else}}plan-val-after{{end}}">{{.After}}</span>
-              {{end}}
-            {{else if eq .Action "delete"}}
+              {{- end -}}
+            {{- else if eq .Action "delete" -}}
               <span class="{{if .Sensitive}}plan-val-muted{{else}}plan-val-before{{end}}">{{.Before}}</span>
-            {{else}}
+            {{- else -}}
               <span class="{{if or .KnownAfterApply .Sensitive}}plan-val-muted{{else}}plan-val-after{{end}}">{{.After}}</span>
-            {{end}}
+            {{- end -}}
           </td>
         </tr>
         {{end}}

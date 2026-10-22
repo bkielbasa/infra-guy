@@ -486,6 +486,9 @@ summary:hover { color: #fff; }
 
 .plan-attr-val {
   word-break: break-word;
+}
+
+.plan-val-before, .plan-val-after, .plan-val-muted {
   white-space: pre-wrap;
 }
 
