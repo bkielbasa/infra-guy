@@ -188,4 +188,31 @@ func TestBuildWorkerPassThroughEnv(t *testing.T) {
 			t.Fatalf("got WORK_DIR = %q, want /work", got["WORK_DIR"])
 		}
 	})
+
+	t.Run("with S3 cache vars", func(t *testing.T) {
+		getenv := func(k string) string {
+			switch k {
+			case "S3_ENDPOINT":
+				return "https://s3.internal"
+			case "S3_REGION":
+				return "eu-central-1"
+			case "S3_BUCKET":
+				return "infra-guy-cache"
+			case "S3_ACCESS_KEY_ID":
+				return "ak-123"
+			case "S3_SECRET_ACCESS_KEY":
+				return "sk-456"
+			case "S3_USE_PATH_STYLE":
+				return "true"
+			case "S3_PREFIX":
+				return "workspaces"
+			default:
+				return baseVars[k]
+			}
+		}
+		got := buildWorkerPassThroughEnv(getenv, "http://infra-guy:8080")
+		if got["S3_BUCKET"] != "infra-guy-cache" || got["S3_ENDPOINT"] != "https://s3.internal" || got["S3_ACCESS_KEY_ID"] != "ak-123" || got["S3_SECRET_ACCESS_KEY"] != "sk-456" {
+			t.Fatalf("missing S3 pass-through env vars: %v", got)
+		}
+	})
 }

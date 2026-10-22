@@ -30,11 +30,12 @@ type OpenRequest struct {
 }
 
 type Service struct {
-	Projects project.Repository
-	Runs     run.Repository
-	Schedule Scheduler
-	Now      func() time.Time
-	NewID    func() string
+	Projects   project.Repository
+	Runs       run.Repository
+	Schedule   Scheduler
+	Now        func() time.Time
+	NewID      func() string
+	OnTerminal func(ctx context.Context, p *project.Project, r *run.Run)
 }
 
 func (s *Service) Get(ctx context.Context, id run.ID) (*run.Run, error) {
@@ -181,6 +182,11 @@ func (s *Service) releaseIfTerminal(ctx context.Context, r *run.Run) error {
 	rs := r.Snapshot()
 	if !rs.Status.Terminal() {
 		return nil
+	}
+	if s.OnTerminal != nil {
+		if p, err := s.Projects.Get(ctx, project.ID(rs.ProjectID)); err == nil && p != nil {
+			s.OnTerminal(ctx, p, r)
+		}
 	}
 	return s.Projects.ReleaseActiveRun(ctx, project.ID(rs.ProjectID), string(rs.ID))
 }

@@ -47,13 +47,12 @@ func commands(step run.StepName) [][]string {
 		return [][]string{initArgs}
 	case run.StepPlan:
 		return [][]string{
-			initArgs,
 			{"plan", "-input=false", "-no-color", "-out=tfplan"},
 			{"show", "-no-color", "tfplan"},
 			{"show", "-json", "tfplan"},
 		}
 	case run.StepApply:
-		return [][]string{initArgs, {"apply", "-input=false", "-no-color", "tfplan"}}
+		return [][]string{{"apply", "-input=false", "-no-color", "tfplan"}}
 	default:
 		return nil
 	}
@@ -70,17 +69,21 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 	}
 
 	backend := backendFile(req.InternalBaseURL, req.ProjectID, req.RunID, req.StateToken)
+	overridePath := filepath.Join(dir, "~infraguy_backend_override.tf.json")
 	// A later *_override.tf.json replaces any backend or cloud block in the repository.
-	if err := os.WriteFile(filepath.Join(dir, "~infraguy_backend_override.tf.json"), backend, 0o644); err != nil {
+	if err := os.WriteFile(overridePath, backend, 0o644); err != nil {
 		return Result{}, err
 	}
+	defer os.Remove(overridePath)
 
 	cmds := commands(req.Step)
 	if cmds == nil {
 		return Result{ExitCode: 1, Logs: "unknown terraform step"}, nil
 	}
+	planPath := filepath.Join(dir, "tfplan")
+	defer os.Remove(planPath)
 	if req.Step == run.StepApply {
-		if err := os.WriteFile(filepath.Join(dir, "tfplan"), req.PlanFile, 0o644); err != nil {
+		if err := os.WriteFile(planPath, req.PlanFile, 0o644); err != nil {
 			return Result{}, err
 		}
 	}
@@ -193,6 +196,13 @@ var blockedEnv = map[string]bool{
 	"GITHUB_APP_CLIENT_ID":        true,
 	"GITHUB_APP_CLIENT_SECRET":    true,
 	"CONTEXT_ENCRYPTION_KEY":      true,
+	"S3_ENDPOINT":                 true,
+	"S3_REGION":                   true,
+	"S3_BUCKET":                   true,
+	"S3_ACCESS_KEY_ID":            true,
+	"S3_SECRET_ACCESS_KEY":        true,
+	"S3_USE_PATH_STYLE":           true,
+	"S3_PREFIX":                   true,
 	"TF_LOG":                      true,
 	"GIT_TRACE":                   true,
 }

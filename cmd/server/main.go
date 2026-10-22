@@ -29,6 +29,8 @@ import (
 	stateapp "infra-guy/internal/application/state"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/application/worker"
+	"infra-guy/internal/domain/project"
+	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/tenant"
 	"infra-guy/internal/domain/user"
 	"infra-guy/internal/infrastructure/crypto"
@@ -37,6 +39,7 @@ import (
 	"infra-guy/internal/infrastructure/k8s"
 	"infra-guy/internal/infrastructure/opa"
 	"infra-guy/internal/infrastructure/postgres"
+	"infra-guy/internal/infrastructure/s3"
 	"infra-guy/internal/infrastructure/terraform"
 	httpapi "infra-guy/internal/interfaces/http"
 
@@ -156,13 +159,33 @@ func main() {
 	identStore := identityAdapter{store: postgres.NewIdentityStore(pool)}
 	tokenSource := tenantTokenSource{store: identStore, tokens: tokens}
 
-	runSvc := &runapp.Service{Projects: projects, Runs: runs, Schedule: queue, Now: now, NewID: newID}
+	s3Cache, err := s3.NewFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("s3 workspace cache: %v", err)
+	}
+	var wsCache worker.WorkspaceCache
+	if s3Cache != nil {
+		wsCache = s3Cache
+	}
+
+	runSvc := &runapp.Service{
+		Projects: projects, Runs: runs, Schedule: queue, Now: now, NewID: newID,
+		OnTerminal: func(ctx context.Context, p *project.Project, r *run.Run) {
+			ps := p.Snapshot()
+			rs := r.Snapshot()
+			if wsCache != nil {
+				_ = wsCache.Delete(ctx, worker.WorkspaceCacheKey(ps.TenantID, string(ps.ID), string(rs.ID)))
+			}
+			_ = os.RemoveAll(filepath.Join(workDir, string(rs.ID)))
+		},
+	}
 	w := &worker.Worker{
 		WorkerID: workerID(), Queue: postgres.WorkerQueue{Queue: queue},
 		Projects: projects, Runs: runs, Service: runSvc,
 		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{Binary: tfInstaller}},
 		Tokens:          tokenSource,
 		Contexts:        contextSvc,
+		Cache:           wsCache,
 		WorkDir:         workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
 	}
 	if jobID > 0 {
@@ -295,6 +318,19 @@ func buildWorkerPassThroughEnv(getenv func(string) string, internalURL string) m
 	}
 	if key := getenv("CONTEXT_ENCRYPTION_KEY"); key != "" {
 		env["CONTEXT_ENCRYPTION_KEY"] = key
+	}
+	for _, k := range []string{
+		"S3_ENDPOINT",
+		"S3_REGION",
+		"S3_BUCKET",
+		"S3_ACCESS_KEY_ID",
+		"S3_SECRET_ACCESS_KEY",
+		"S3_USE_PATH_STYLE",
+		"S3_PREFIX",
+	} {
+		if v := getenv(k); v != "" {
+			env[k] = v
+		}
 	}
 	return env
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"time"
 
@@ -79,6 +80,16 @@ type ContextResolver interface {
 	ResolveForProject(ctx context.Context, projectID project.ID) (map[string]string, map[string][]byte, error)
 }
 
+type WorkspaceCache interface {
+	Save(ctx context.Context, key, srcDir string) error
+	Restore(ctx context.Context, key, destDir string) (bool, error)
+	Delete(ctx context.Context, key string) error
+}
+
+func WorkspaceCacheKey(tenantID, projectID, runID string) string {
+	return path.Join(tenantID, projectID, runID)
+}
+
 type Worker struct {
 	WorkerID        string
 	Queue           Queue
@@ -90,6 +101,7 @@ type Worker struct {
 	Dispatcher      Dispatcher
 	Tokens          TokenSource
 	Contexts        ContextResolver
+	Cache           WorkspaceCache
 	WorkDir         string
 	InternalBaseURL string
 	Now             func() time.Time
@@ -227,20 +239,21 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		return w.completeAndCleanup(ctx, job)
 	}
 
-	dest := filepath.Join(w.WorkDir, string(job.RunID))
-	if err := os.RemoveAll(dest); err != nil {
-		return err
-	}
-	if err := w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA); err != nil {
-		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
-			return ferr
+	if job.Step == run.StepApply && len(rs.PlanFile) == 0 {
+		if err := w.Service.Fail(ctx, job.RunID, job.Step, "apply requires a stored plan file"); err != nil {
+			return err
 		}
 		return w.completeAndCleanup(ctx, job)
 	}
 
-	if job.Step == run.StepApply && len(rs.PlanFile) == 0 {
-		if err := w.Service.Fail(ctx, job.RunID, job.Step, "apply requires a stored plan file"); err != nil {
-			return err
+	dest := filepath.Join(w.WorkDir, string(job.RunID))
+	cacheKey := WorkspaceCacheKey(ps.TenantID, string(ps.ID), string(job.RunID))
+	if w.Cache != nil {
+		defer func() { _ = os.RemoveAll(dest) }()
+	}
+	if err := w.prepareWorkspace(ctx, job, ps, rs, token, dest, cacheKey); err != nil {
+		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
+			return ferr
 		}
 		return w.completeAndCleanup(ctx, job)
 	}
@@ -282,6 +295,14 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		}
 		return w.completeAndCleanup(ctx, job)
 	}
+	if job.Step == run.StepInit && res.ExitCode == 0 && w.Cache != nil {
+		if err := w.Cache.Save(ctx, cacheKey, dest); err != nil {
+			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "save workspace cache: "+err.Error()); ferr != nil {
+				return ferr
+			}
+			return w.completeAndCleanup(ctx, job)
+		}
+	}
 	if res.Version != "" {
 		if err := w.Service.SetTerraformVersion(ctx, job.RunID, res.Version); err != nil {
 			return err
@@ -293,6 +314,42 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		return err
 	}
 	return w.completeAndCleanup(ctx, job)
+}
+
+func (w *Worker) prepareWorkspace(ctx context.Context, job Job, ps project.Snapshot, rs run.Snapshot, token, dest, cacheKey string) error {
+	if w.Cache != nil {
+		if err := os.RemoveAll(dest); err != nil {
+			return err
+		}
+		if job.Step == run.StepInit {
+			return w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA)
+		}
+		ok, err := w.Cache.Restore(ctx, cacheKey, dest)
+		if err != nil {
+			return fmt.Errorf("restore workspace cache: %w", err)
+		}
+		if !ok {
+			return errors.New("workspace cache not found for run")
+		}
+		return nil
+	}
+
+	if job.Step != run.StepInit && hasInitializedTerraform(dest, ps.WorkingDirectory) {
+		return nil
+	}
+	if err := os.RemoveAll(dest); err != nil {
+		return err
+	}
+	return w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA)
+}
+
+func hasInitializedTerraform(dest, workingDir string) bool {
+	dir := dest
+	if workingDir != "" {
+		dir = filepath.Join(dest, workingDir)
+	}
+	info, err := os.Stat(filepath.Join(dir, ".terraform"))
+	return err == nil && info.IsDir()
 }
 
 func (w *Worker) completeAndCleanup(ctx context.Context, job Job) error {
@@ -316,7 +373,14 @@ func (w *Worker) removeIfTerminal(ctx context.Context, id run.ID) error {
 	if err != nil || r == nil {
 		return err
 	}
-	if r.Snapshot().Status.Terminal() {
+	rs := r.Snapshot()
+	if rs.Status.Terminal() {
+		if w.Cache != nil && w.Projects != nil {
+			if p, perr := w.Projects.Get(ctx, project.ID(rs.ProjectID)); perr == nil && p != nil {
+				ps := p.Snapshot()
+				_ = w.Cache.Delete(ctx, WorkspaceCacheKey(ps.TenantID, string(ps.ID), string(id)))
+			}
+		}
 		return os.RemoveAll(filepath.Join(w.WorkDir, string(id)))
 	}
 	return nil

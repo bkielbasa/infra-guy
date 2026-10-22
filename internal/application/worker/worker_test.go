@@ -751,3 +751,132 @@ func TestExecuteClaimedReturnsErrorWhenJobNotFound(t *testing.T) {
 		t.Fatal("executor should not be called when job is missing")
 	}
 }
+
+type fakeWorkspaceCache struct {
+	saved    map[string]string
+	restored []string
+	deleted  []string
+	saveErr  error
+	restErr  error
+}
+
+func newFakeWorkspaceCache() *fakeWorkspaceCache {
+	return &fakeWorkspaceCache{saved: make(map[string]string)}
+}
+
+func (c *fakeWorkspaceCache) Save(_ context.Context, key, srcDir string) error {
+	if c.saveErr != nil {
+		return c.saveErr
+	}
+	data, _ := os.ReadFile(filepath.Join(srcDir, ".terraform.lock.hcl"))
+	c.saved[key] = string(data)
+	return nil
+}
+
+func (c *fakeWorkspaceCache) Restore(_ context.Context, key, destDir string) (bool, error) {
+	if c.restErr != nil {
+		return false, c.restErr
+	}
+	data, ok := c.saved[key]
+	if !ok {
+		return false, nil
+	}
+	c.restored = append(c.restored, key)
+	if err := os.MkdirAll(filepath.Join(destDir, ".terraform"), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(filepath.Join(destDir, ".terraform.lock.hcl"), []byte(data), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *fakeWorkspaceCache) Delete(_ context.Context, key string) error {
+	c.deleted = append(c.deleted, key)
+	delete(c.saved, key)
+	return nil
+}
+
+func TestTickInitSavesToCacheAndPlanAndApplyRestoreWithoutRecloning(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-cached", ProjectID: "p1", AutoApprove: true, Trigger: run.TriggerPush, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache := newFakeWorkspaceCache()
+	exec := &fakeExecutor{res: Result{ExitCode: 0, Version: "1.10.5"}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 1, RunID: "run-cached", Step: run.StepInit}}, exec)
+	fx.w.Cache = cache
+	fx.exec.onRun = func(context.Context) {
+		_ = os.MkdirAll(fx.ws, 0o755)
+		_ = os.WriteFile(filepath.Join(fx.ws, ".terraform.lock.hcl"), []byte("lock-v1"), 0o644)
+	}
+
+	// 1. Run StepInit: clones repo, runs terraform init, saves workspace zip to cache, deletes local ws.
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wantKey := "ten-1/p1/run-cached"
+	if cache.saved[wantKey] != "lock-v1" {
+		t.Fatalf("expected cache saved under %q, got %#v", wantKey, cache.saved)
+	}
+	if fx.co.dest != fx.ws {
+		t.Fatalf("expected clone during init, got dest=%q", fx.co.dest)
+	}
+	if _, err := os.Stat(fx.ws); !os.IsNotExist(err) {
+		t.Fatalf("local workspace should be removed after StepInit when cache is active: %v", err)
+	}
+
+	// 2. Run StepPlan: restores from cache, does NOT clone again, keeps cache for StepApply.
+	fx.co.dest = ""
+	fx.queue.claim = &Job{ID: 2, RunID: "run-cached", Step: run.StepPlan}
+	fx.exec.res = Result{
+		ExitCode: 0,
+		PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.",
+		PlanFile: []byte("plan-bytes"),
+		PlanJSON: []byte(`{"format_version":"1.2"}`),
+	}
+	var planSawLockfile string
+	fx.exec.onRun = func(context.Context) {
+		b, _ := os.ReadFile(filepath.Join(fx.ws, ".terraform.lock.hcl"))
+		planSawLockfile = string(b)
+	}
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.co.dest != "" {
+		t.Fatalf("StepPlan should not clone when cache is configured, got dest=%q", fx.co.dest)
+	}
+	if planSawLockfile != "lock-v1" {
+		t.Fatalf("StepPlan did not see restored lockfile, got %q", planSawLockfile)
+	}
+	if len(cache.deleted) != 0 {
+		t.Fatalf("cache should not be deleted before apply, got deleted=%v", cache.deleted)
+	}
+
+	// 3. Run StepApply: restores from cache, does NOT clone, deletes cache when run succeeds.
+	fx.queue.claim = &Job{ID: 3, RunID: "run-cached", Step: run.StepApply}
+	fx.exec.res = Result{ExitCode: 0, Logs: "Apply complete!"}
+	var applySawLockfile string
+	fx.exec.onRun = func(context.Context) {
+		b, _ := os.ReadFile(filepath.Join(fx.ws, ".terraform.lock.hcl"))
+		applySawLockfile = string(b)
+	}
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.co.dest != "" {
+		t.Fatalf("StepApply should not clone when cache is configured, got dest=%q", fx.co.dest)
+	}
+	if applySawLockfile != "lock-v1" {
+		t.Fatalf("StepApply did not see restored lockfile, got %q", applySawLockfile)
+	}
+	if len(cache.deleted) != 1 || cache.deleted[0] != wantKey {
+		t.Fatalf("expected cache %q deleted on terminal status, got %v", wantKey, cache.deleted)
+	}
+}
+

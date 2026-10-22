@@ -35,20 +35,14 @@ func TestBackendFile(t *testing.T) {
 	}
 }
 
-func TestPlanAndApplyStartWithInit(t *testing.T) {
-	for _, step := range []run.StepName{run.StepPlan, run.StepApply} {
-		cmds := commands(step)
-		if len(cmds) < 2 || strings.Join(cmds[0], " ") != "init -input=false -no-color" {
-			t.Fatalf("%s commands %#v", step, cmds)
-		}
-	}
-	if init := commands(run.StepInit); len(init) != 1 || init[0][0] != "init" {
+func TestPlanAndApplyDoNotReRunInit(t *testing.T) {
+	if init := commands(run.StepInit); len(init) != 1 || strings.Join(init[0], " ") != "init -input=false -no-color" {
 		t.Fatalf("init commands %#v", init)
 	}
-	if plan := commands(run.StepPlan); len(plan) != 4 || plan[1][0] != "plan" || plan[2][0] != "show" || plan[3][0] != "show" || plan[3][1] != "-json" {
+	if plan := commands(run.StepPlan); len(plan) != 3 || plan[0][0] != "plan" || plan[1][0] != "show" || plan[2][0] != "show" || plan[2][1] != "-json" {
 		t.Fatalf("plan commands %#v", plan)
 	}
-	if apply := commands(run.StepApply); apply[1][0] != "apply" {
+	if apply := commands(run.StepApply); len(apply) != 1 || apply[0][0] != "apply" {
 		t.Fatalf("apply commands %#v", apply)
 	}
 }
@@ -65,6 +59,13 @@ func TestCommandEnvDropsPlatformSecrets(t *testing.T) {
 	t.Setenv("GITHUB_APP_CLIENT_ID", "Iv1.abc")
 	t.Setenv("GITHUB_APP_CLIENT_SECRET", "client-secret")
 	t.Setenv("CONTEXT_ENCRYPTION_KEY", "enc-secret")
+	t.Setenv("S3_ENDPOINT", "https://s3.internal")
+	t.Setenv("S3_REGION", "eu-central-1")
+	t.Setenv("S3_BUCKET", "cache-bucket")
+	t.Setenv("S3_ACCESS_KEY_ID", "s3-ak")
+	t.Setenv("S3_SECRET_ACCESS_KEY", "s3-sk")
+	t.Setenv("S3_USE_PATH_STYLE", "true")
+	t.Setenv("S3_PREFIX", "workspaces")
 	t.Setenv("TF_LOG", "TRACE")
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("SOME_GH_COPY", "ghp_project_token")
@@ -82,6 +83,13 @@ func TestCommandEnvDropsPlatformSecrets(t *testing.T) {
 		"GITHUB_APP_CLIENT_ID=",
 		"GITHUB_APP_CLIENT_SECRET=",
 		"CONTEXT_ENCRYPTION_KEY=",
+		"S3_ENDPOINT=",
+		"S3_REGION=",
+		"S3_BUCKET=",
+		"S3_ACCESS_KEY_ID=",
+		"S3_SECRET_ACCESS_KEY=",
+		"S3_USE_PATH_STYLE=",
+		"S3_PREFIX=",
 		"TF_LOG=",
 		"GIT_TRACE=",
 		"ghp_project_token",
@@ -326,5 +334,14 @@ func TestExecutorPlanCapturesPlanJSONWithoutPollutingLogs(t *testing.T) {
 	}
 	if strings.Contains(res.Logs, `"format_version"`) {
 		t.Fatalf("raw JSON leaked into human logs: %s", res.Logs)
+	}
+	if strings.Contains(res.Logs, "Initialized!") {
+		t.Fatalf("plan step should not run terraform init: %s", res.Logs)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "~infraguy_backend_override.tf.json")); !os.IsNotExist(err) {
+		t.Fatalf("backend override file should be removed after Run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tfplan")); !os.IsNotExist(err) {
+		t.Fatalf("tfplan file should be removed from disk after Run: %v", err)
 	}
 }
