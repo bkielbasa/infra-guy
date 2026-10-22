@@ -741,9 +741,8 @@ func (u *ui) runView(r *http.Request, ps project.Snapshot, rs run.Snapshot, eval
 		"ID": string(rs.ID), "ProjectID": string(ps.ID), "ProjectName": ps.Name,
 		"Title": runTitle(rs), "Status": rs.Status.Label(), "StatusClass": statusClass(rs.Status),
 		"Meta": runMeta(ps, rs, hist), "ChangesLabel": template.HTML(changesLabel(rs)), "Panel": panel,
-		"Poll":            !rs.Status.Terminal(),
-		"PolicyEval":      evalView,
-		"PolicyInputJSON": u.buildPolicyInputJSON(r, ps, rs),
+		"Poll":       !rs.Status.Terminal(),
+		"PolicyEval": evalView,
 	}
 }
 
@@ -1394,18 +1393,6 @@ func approvalsInfoFrom(approvals []run.Approval) []policyapp.ApprovalInfo {
 		})
 	}
 	return out
-}
-
-func (u *ui) buildPolicyInputJSON(r *http.Request, ps project.Snapshot, rs run.Snapshot) string {
-	svc := u.cfg.Policies
-	if svc == nil {
-		svc = &policyapp.Service{}
-	}
-	_, pretty, err := svc.BuildInput(rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
-	if err != nil {
-		return "{}"
-	}
-	return pretty
 }
 
 func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snapshot) *runPolicyEvalView {

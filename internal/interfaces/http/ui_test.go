@@ -1393,8 +1393,8 @@ deny contains "Cannot destroy S3 buckets" if {
 	if !strings.Contains(runDenyBody, "Cannot destroy S3 buckets") || !strings.Contains(runDenyBody, "Denied") || !strings.Contains(runDenyBody, "Approval blocked by policy") {
 		t.Fatalf("expected Denied status, deny message, and disabled button on /runs/r-deny, got: %s", runDenyBody)
 	}
-	if !strings.Contains(runDenyBody, "Policy Input JSON (for Policy Tester)") || !strings.Contains(runDenyBody, "Copy Policy Input JSON") || !strings.Contains(runDenyBody, "aws_s3_bucket.main") {
-		t.Fatalf("expected Policy Input JSON collapsible section on /runs/r-deny, got: %s", runDenyBody)
+	if strings.Contains(runDenyBody, "Policy Input JSON (for Policy Tester)") {
+		t.Fatalf("did not expect Policy Input JSON collapsible section on /runs/r-deny, got: %s", runDenyBody)
 	}
 
 	// Confirm via /runs/r-deny/confirm -> 403 Forbidden

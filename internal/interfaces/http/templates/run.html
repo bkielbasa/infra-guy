@@ -21,13 +21,6 @@
   </div>
   {{end}}
   {{.Panel}}
-  <details class="policy-input-details">
-    <summary>Policy Input JSON (for Policy Tester)</summary>
-    <div class="actions">
-      <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('policy-input-json-code').textContent)">Copy Policy Input JSON</button>
-    </div>
-    <pre><code id="policy-input-json-code" data-code-highlight="json">{{.PolicyInputJSON}}</code></pre>
-  </details>
 </div>
 {{end}}
 
