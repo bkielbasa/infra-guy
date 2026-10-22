@@ -345,3 +345,48 @@ func TestExecutorPlanCapturesPlanJSONWithoutPollutingLogs(t *testing.T) {
 		t.Fatalf("tfplan file should be removed from disk after Run: %v", err)
 	}
 }
+
+func TestExecutorStreamsLogsViaOnLog(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(t.TempDir(), "fake-terraform")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"version\" ]; then echo '{\"terraform_version\":\"1.9.8\"}'; exit 0; fi\n" +
+		"echo 'line-1'\n" +
+		"sleep 0.25\n" +
+		"echo 'line-2'\n"
+	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var snapshots []string
+	e := Executor{Binary: staticBinary(fakeBin)}
+	res, err := e.Run(context.Background(), Request{
+		WorkDir:          dir,
+		InternalBaseURL:  "http://127.0.0.1:8080",
+		ProjectID:        "p1",
+		RunID:            "r1",
+		StateToken:       "tok",
+		Step:             run.StepInit,
+		TerraformVersion: "1.9.8",
+		OnLog: func(logs string) {
+			snapshots = append(snapshots, logs)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d: %s", res.ExitCode, res.Logs)
+	}
+	if len(snapshots) < 2 {
+		t.Fatalf("expected incremental OnLog callbacks (>=2), got %d: %#v", len(snapshots), snapshots)
+	}
+	if !strings.Contains(snapshots[0], "line-1") || strings.Contains(snapshots[0], "line-2") {
+		t.Fatalf("expected first streamed snapshot to contain only line-1, got %q", snapshots[0])
+	}
+	last := snapshots[len(snapshots)-1]
+	if !strings.Contains(last, "line-1") || !strings.Contains(last, "line-2") {
+		t.Fatalf("expected final snapshot to contain both lines, got %q", last)
+	}
+}
+

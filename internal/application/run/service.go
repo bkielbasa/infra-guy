@@ -157,6 +157,17 @@ func (s *Service) SetTerraformVersion(ctx context.Context, id run.ID, version st
 	return s.Runs.Save(ctx, r)
 }
 
+func (s *Service) UpdateStepLogs(ctx context.Context, id run.ID, step run.StepName, logs string) error {
+	r, err := s.Runs.Get(ctx, id)
+	if err != nil || r == nil {
+		return fmt.Errorf("run %s not found", id)
+	}
+	if err := r.SetStepLogs(step, logs); err != nil {
+		return err
+	}
+	return s.Runs.Save(ctx, r)
+}
+
 func (s *Service) Fail(ctx context.Context, id run.ID, step run.StepName, message string) error {
 	r, err := s.Runs.Get(ctx, id)
 	if err != nil || r == nil {

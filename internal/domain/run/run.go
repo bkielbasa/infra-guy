@@ -203,6 +203,15 @@ func (r *Run) PlanJSON() []byte {
 
 func (r *Run) SetTerraformVersion(v string) { r.s.TerraformVersion = v }
 
+func (r *Run) SetStepLogs(name StepName, logs string) error {
+	st := r.step(name)
+	if st == nil {
+		return fmt.Errorf("unknown step %s", name)
+	}
+	st.Logs = logs
+	return nil
+}
+
 func (r *Run) BeginStep(name StepName, now time.Time) error {
 	if r.s.Status.Terminal() {
 		return fmt.Errorf("run is %s", r.s.Status)
@@ -256,6 +265,11 @@ func (r *Run) CompleteStep(name StepName, result StepResult, now time.Time) (Dec
 			r.s.PlanJSON = append([]byte(nil), result.PlanJSON...)
 		}
 		sum := ParsePlanSummary(result.PlanText)
+		if !sum.Present && !sum.NoChanges() && len(result.PlanJSON) > 0 {
+			if jsonSum, ok := ParsePlanSummaryJSON(result.PlanJSON); ok {
+				sum = jsonSum
+			}
+		}
 		r.s.SummaryPresent = sum.Present
 		r.s.Add, r.s.Change, r.s.Destroy = sum.Add, sum.Change, sum.Destroy
 		if r.s.PlanOnly {

@@ -43,6 +43,7 @@ type Request struct {
 	PlanFile                                                                              []byte
 	Env                                                                                   map[string]string
 	Files                                                                                 map[string][]byte
+	OnLog                                                                                 func(logs string)
 }
 
 type Result struct {
@@ -282,6 +283,9 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: token,
 		TerraformVersion: ps.TerraformVersion, Step: job.Step, PlanFile: rs.PlanFile,
 		Env: ctxEnv, Files: ctxFiles,
+		OnLog: func(logs string) {
+			_ = w.Service.UpdateStepLogs(ctx, job.RunID, job.Step, logs)
+		},
 	})
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
 		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "step timed out"); ferr != nil {

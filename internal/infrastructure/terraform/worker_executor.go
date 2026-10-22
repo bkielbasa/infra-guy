@@ -18,6 +18,7 @@ func (e WorkerExecutor) Run(ctx context.Context, req worker.Request) (worker.Res
 		Step:             req.Step, PlanFile: req.PlanFile,
 		Env:   req.Env,
 		Files: req.Files,
+		OnLog: req.OnLog,
 	})
 	return worker.Result{
 		ExitCode: res.ExitCode, Logs: res.Logs, PlanText: res.PlanText,

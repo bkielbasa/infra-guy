@@ -1511,3 +1511,114 @@ allow if {
 		t.Fatalf("expected pol-2 to be deleted, err=%v", err)
 	}
 }
+
+func TestRunPlanStepStaysOpenWhenUnconfirmedAndRendersParsedPlanJSON(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	snap := needsApprovalSnap("r-plan-json")
+	snap.Steps[1].Logs = "Refreshing state...\n"
+	snap.PlanText = "Plan: 1 to add, 1 to change, 0 to destroy."
+	snap.PlanJSON = []byte(`{
+		"format_version": "1.2",
+		"resource_changes": [
+			{
+				"address": "aws_s3_bucket.assets",
+				"type": "aws_s3_bucket",
+				"name": "assets",
+				"change": {
+					"actions": ["create"],
+					"before": null,
+					"after": {"bucket": "my-assets-bucket"},
+					"after_unknown": {"arn": true}
+				}
+			},
+			{
+				"address": "aws_iam_role.worker",
+				"type": "aws_iam_role",
+				"name": "worker",
+				"change": {
+					"actions": ["update"],
+					"before": {"description": "old"},
+					"after": {"description": "new"},
+					"after_unknown": {}
+				}
+			}
+		],
+		"output_changes": {
+			"bucket_name": {
+				"actions": ["create"],
+				"before": null,
+				"after": "my-assets-bucket",
+				"after_unknown": false
+			}
+		}
+	}`)
+	runs := &memRuns{items: map[run.ID]*run.Run{"r-plan-json": run.Restore(snap)}}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "")
+
+	// 1. /runs/r-plan-json/history keeps the Plan step <details> open while awaiting approval and renders structured plan cards + raw log toggle
+	histRR := getUI(t, h, "/runs/r-plan-json/history")
+	histBody := histRR.Body.String()
+	if histRR.Code != http.StatusOK {
+		t.Fatalf("history status = %d: %s", histRR.Code, histBody)
+	}
+	if !strings.Contains(histBody, `<details data-step="plan" data-status="succeeded" open>`) {
+		t.Fatalf("expected plan <details> to stay open when awaiting approval, got:\n%s", histBody)
+	}
+	for _, want := range []string{
+		"aws_s3_bucket.assets",
+		"my-assets-bucket",
+		"(known after apply)",
+		"aws_iam_role.worker",
+		"bucket_name",
+		"Raw plan logs",
+		"Refreshing state...",
+	} {
+		if !strings.Contains(histBody, want) {
+			t.Fatalf("expected history body to contain %q, got:\n%s", want, histBody)
+		}
+	}
+
+	// 2. /runs/r-plan-json/changes also renders structured plan diff
+	chgRR := getUI(t, h, "/runs/r-plan-json/changes")
+	chgBody := chgRR.Body.String()
+	if chgRR.Code != http.StatusOK {
+		t.Fatalf("changes status = %d: %s", chgRR.Code, chgBody)
+	}
+	for _, want := range []string{
+		"aws_s3_bucket.assets",
+		"aws_iam_role.worker",
+		"my-assets-bucket",
+		"Raw Terraform plan output",
+	} {
+		if !strings.Contains(chgBody, want) {
+			t.Fatalf("expected changes body to contain %q, got:\n%s", want, chgBody)
+		}
+	}
+
+	// 3. Running step renders live streaming indicator and data-log-step attribute
+	runningSnap := run.Snapshot{
+		ID: "r-running", ProjectID: "p1", Trigger: run.TriggerPush, Status: run.StatusRunning,
+		SHA: "abc1234def",
+		Steps: []run.Step{
+			{Name: run.StepInit, Position: 1, Status: run.StepSucceeded, Logs: "init done"},
+			{Name: run.StepPlan, Position: 2, Status: run.StepRunning, Logs: "aws_s3_bucket.assets: Refreshing state..."},
+		},
+	}
+	runs.items["r-running"] = run.Restore(runningSnap)
+	liveRR := getUI(t, h, "/runs/r-running/history")
+	liveBody := liveRR.Body.String()
+	if liveRR.Code != http.StatusOK {
+		t.Fatalf("live history status = %d: %s", liveRR.Code, liveBody)
+	}
+	for _, want := range []string{
+		`<details data-step="plan" data-status="running" open>`,
+		`streaming&hellip;`,
+		`data-log-step="plan"`,
+		`aws_s3_bucket.assets: Refreshing state...`,
+	} {
+		if !strings.Contains(liveBody, want) {
+			t.Fatalf("expected live history body to contain %q, got:\n%s", want, liveBody)
+		}
+	}
+}
+

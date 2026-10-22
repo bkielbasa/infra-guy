@@ -3,10 +3,118 @@
   {{if .Delta}}
   <p class="delta">{{.Delta}}</p>
   {{end}}
+  {{if .PlanDiff}}
+  {{template "plan_diff" .PlanDiff}}
   {{if .PlanText}}
+  <details class="plan-raw-logs" data-preserve-key="changes-raw-plan">
+    <summary>Raw Terraform plan output</summary>
+    <pre class="log">{{.PlanText}}</pre>
+  </details>
+  {{end}}
+  {{else if .PlanText}}
   <pre class="log">{{.PlanText}}</pre>
   {{else}}
   <p class="empty">No plan yet.</p>
+  {{end}}
+</div>
+{{end}}
+
+{{define "plan_diff"}}
+<div class="plan-diff">
+  <div class="plan-summary-bar">
+    {{if .HasChanges}}
+      {{if .Add}}<span class="plan-badge plan-badge-create">+{{.Add}} to create</span>{{end}}
+      {{if .Change}}<span class="plan-badge plan-badge-update">~{{.Change}} to update</span>{{end}}
+      {{if .Replace}}<span class="plan-badge plan-badge-replace">-/+ {{.Replace}} to replace</span>{{end}}
+      {{if .Destroy}}<span class="plan-badge plan-badge-delete">-{{.Destroy}} to destroy</span>{{end}}
+    {{else}}
+      <span class="plan-badge plan-badge-noop">No infrastructure changes</span>
+    {{end}}
+  </div>
+  {{range .Resources}}
+  <details class="plan-resource plan-resource-{{.Action}}" data-preserve-key="res:{{.Address}}" open>
+    <summary class="plan-resource-summary">
+      <span class="plan-action plan-action-{{.Action}}">{{.ActionSymbol}} {{.ActionLabel}}</span>
+      <code class="plan-address">{{.Address}}</code>
+      {{if .ActionReason}}<span class="plan-reason">({{.ActionReason}})</span>{{end}}
+      {{if .ProviderName}}<span class="plan-provider">{{.ProviderName}}</span>{{end}}
+    </summary>
+    <div class="plan-resource-body">
+      {{if .Attributes}}
+      <table class="plan-attrs">
+        <tbody>
+          {{range .Attributes}}
+          <tr class="plan-attr plan-attr-{{.Change}}">
+            <td class="plan-attr-sym">{{.Symbol}}</td>
+            <td class="plan-attr-name"><code>{{.Name}}</code>{{if .ForcesReplace}} <span class="plan-forces-replace"># forces replacement</span>{{end}}</td>
+            <td class="plan-attr-val">
+              {{if eq .Change "update"}}
+                {{if .Sensitive}}
+                  <span class="plan-val-muted">(sensitive value)</span>
+                {{else}}
+                  <span class="plan-val-before">{{.Before}}</span>
+                  <span class="plan-val-arrow">&rarr;</span>
+                  <span class="{{if .KnownAfterApply}}plan-val-muted{{else}}plan-val-after{{end}}">{{.After}}</span>
+                {{end}}
+              {{else if eq .Change "delete"}}
+                <span class="{{if .Sensitive}}plan-val-muted{{else}}plan-val-before{{end}}">{{.Before}}</span>
+              {{else}}
+                <span class="{{if or .KnownAfterApply .Sensitive}}plan-val-muted{{else}}plan-val-after{{end}}">{{.After}}</span>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{end}}
+      {{if .UnchangedAttrs}}
+      <details class="plan-unchanged" data-preserve-key="unchanged:{{.Address}}">
+        <summary>{{.UnchangedCount}} unchanged attribute{{if ne .UnchangedCount 1}}s{{end}}</summary>
+        <table class="plan-attrs plan-attrs-unchanged">
+          <tbody>
+            {{range .UnchangedAttrs}}
+            <tr class="plan-attr plan-attr-unchanged">
+              <td class="plan-attr-sym"></td>
+              <td class="plan-attr-name"><code>{{.Name}}</code></td>
+              <td class="plan-attr-val"><span class="plan-val-muted">{{.After}}</span></td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </details>
+      {{end}}
+    </div>
+  </details>
+  {{end}}
+  {{if .Outputs}}
+  <div class="plan-outputs">
+    <h4>Outputs</h4>
+    <table class="plan-attrs">
+      <tbody>
+        {{range .Outputs}}
+        <tr class="plan-attr plan-attr-{{.Action}}">
+          <td class="plan-attr-sym">{{.Symbol}}</td>
+          <td class="plan-attr-name"><code>{{.Name}}</code></td>
+          <td class="plan-attr-val">
+            {{if eq .Action "update"}}
+              {{if .Sensitive}}
+                <span class="plan-val-muted">(sensitive value)</span>
+              {{else}}
+                <span class="plan-val-before">{{.Before}}</span>
+                <span class="plan-val-arrow">&rarr;</span>
+                <span class="{{if .KnownAfterApply}}plan-val-muted{{else}}plan-val-after{{end}}">{{.After}}</span>
+              {{end}}
+            {{else if eq .Action "delete"}}
+              <span class="{{if .Sensitive}}plan-val-muted{{else}}plan-val-before{{end}}">{{.Before}}</span>
+            {{else}}
+              <span class="{{if or .KnownAfterApply .Sensitive}}plan-val-muted{{else}}plan-val-after{{end}}">{{.After}}</span>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
   {{end}}
 </div>
 {{end}}

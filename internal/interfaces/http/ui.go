@@ -70,8 +70,10 @@ type stateRow struct {
 }
 
 type stepView struct {
-	Open bool
-	Logs string
+	Open    bool
+	Running bool
+	Status  string
+	Logs    string
 }
 
 type runPolicyEvalView struct {
@@ -92,6 +94,7 @@ type historyView struct {
 	Poll, Terminal, Unconfirmed, Confirmed, Cancelled  bool
 	Queued                                             bool
 	Apply, Plan, Init                                  *stepView
+	PlanDiff                                           *run.ParsedPlan
 	PolicyEval                                         *runPolicyEvalView
 }
 
@@ -563,8 +566,12 @@ func (u *ui) changes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := rn.Snapshot()
+	var planDiff *run.ParsedPlan
+	if len(s.PlanJSON) > 0 {
+		planDiff, _ = run.ParsePlanJSON(s.PlanJSON)
+	}
 	u.fragment(w, "changes", map[string]any{
-		"Delta": template.HTML(delta(s)), "PlanText": s.PlanText,
+		"Delta": template.HTML(delta(s)), "PlanText": s.PlanText, "PlanDiff": planDiff,
 	})
 }
 
@@ -867,6 +874,10 @@ func historyFrom(s run.Snapshot, evalView *runPolicyEvalView, currentLogin strin
 			alreadyApproved = true
 		}
 	}
+	var planDiff *run.ParsedPlan
+	if len(s.PlanJSON) > 0 {
+		planDiff, _ = run.ParsePlanJSON(s.PlanJSON)
+	}
 	h := historyView{
 		ID: string(s.ID), Poll: !s.Status.Terminal(), StatusLabel: s.Status.Label(), StatusClass: statusClass(s.Status),
 		Terminal: s.Status.Terminal(), Unconfirmed: s.Status == run.StatusNeedsApproval,
@@ -878,10 +889,19 @@ func historyFrom(s run.Snapshot, evalView *runPolicyEvalView, currentLogin strin
 		CanApprove:     s.Status == run.StatusNeedsApproval && !alreadyApproved,
 		Queued:         true,
 		QueuedAt:       fmtTime(s.CreatedAt),
+		PlanDiff:       planDiff,
 		PolicyEval:     evalView,
 	}
 	for _, st := range s.Steps {
-		sv := &stepView{Open: st.Status == run.StepRunning, Logs: st.Logs}
+		open := st.Status == run.StepRunning ||
+			st.Status == run.StepFailed ||
+			(st.Name == run.StepPlan && (s.Status == run.StatusNeedsApproval || s.Status == run.StatusPlanned))
+		sv := &stepView{
+			Open:    open,
+			Running: st.Status == run.StepRunning,
+			Status:  string(st.Status),
+			Logs:    st.Logs,
+		}
 		switch st.Name {
 		case run.StepInit:
 			if st.Status != run.StepPending {

@@ -237,6 +237,70 @@
     scope.querySelectorAll('code[data-code-highlight]').forEach(mountStaticHighlight);
   }
 
+  const preservedDetails = new Map();
+  const stepPrevStatus = new Map();
+  const savedLogScroll = new Map();
+
+  function getDetailsKey(el) {
+    if (!el || !el.dataset) return null;
+    if (el.dataset.step) return 'step:' + el.dataset.step;
+    if (el.dataset.preserveKey) return 'key:' + el.dataset.preserveKey;
+    return null;
+  }
+
+  document.addEventListener('click', function (e) {
+    const summary = e.target && e.target.closest ? e.target.closest('summary') : null;
+    if (!summary) return;
+    const details = summary.parentElement;
+    if (!details || details.tagName !== 'DETAILS') return;
+    const key = getDetailsKey(details);
+    if (!key) return;
+    preservedDetails.set(key, !details.open);
+  });
+
+  document.addEventListener('htmx:beforeSwap', function (e) {
+    const target = e.target;
+    if (!target || !target.querySelectorAll) return;
+    target.querySelectorAll('details[data-step]').forEach(function (d) {
+      stepPrevStatus.set(d.dataset.step, d.dataset.status || '');
+    });
+    target.querySelectorAll('pre.log[data-log-step]').forEach(function (pre) {
+      const step = pre.dataset.logStep;
+      const atBottom = (pre.scrollHeight - pre.scrollTop - pre.clientHeight) <= 32;
+      savedLogScroll.set(step, { scrollTop: pre.scrollTop, atBottom: atBottom });
+    });
+  });
+
+  function restoreRunPanelState(root) {
+    const scope = root || document;
+    if (!scope.querySelectorAll) return;
+    scope.querySelectorAll('details[data-step], details[data-preserve-key]').forEach(function (d) {
+      const key = getDetailsKey(d);
+      if (!key) return;
+      if (d.dataset.step) {
+        const prev = stepPrevStatus.get(d.dataset.step);
+        const cur = d.dataset.status || '';
+        if (cur === 'running' && prev && prev !== 'running') {
+          preservedDetails.delete(key);
+        }
+      }
+      if (preservedDetails.has(key)) {
+        d.open = preservedDetails.get(key);
+      }
+    });
+    scope.querySelectorAll('pre.log[data-log-step]').forEach(function (pre) {
+      const step = pre.dataset.logStep;
+      const details = pre.closest('details[data-step]');
+      const isRunning = details && details.dataset.status === 'running';
+      const saved = savedLogScroll.get(step);
+      if (isRunning && (!saved || saved.atBottom)) {
+        pre.scrollTop = pre.scrollHeight;
+      } else if (saved) {
+        pre.scrollTop = saved.scrollTop;
+      }
+    });
+  }
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () {
       initAll(document);
@@ -246,6 +310,7 @@
   }
 
   document.addEventListener('htmx:afterSwap', function (e) {
+    restoreRunPanelState(e.target);
     initAll(e.target);
   });
 })();

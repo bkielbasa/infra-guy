@@ -880,3 +880,45 @@ func TestTickInitSavesToCacheAndPlanAndApplyRestoreWithoutRecloning(t *testing.T
 	}
 }
 
+func TestWorkerStreamsLogsDuringExecution(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-stream", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginComplete(t, r, run.StepInit, run.StepResult{}, time.Unix(1, 0).UTC())
+	exec := &fakeExecutor{res: Result{
+		ExitCode: 0,
+		Logs:     "line 1\nline 2\nPlan: 1 to add, 0 to change, 0 to destroy.\n",
+		PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.",
+		PlanJSON: []byte(`{"format_version":"1.2"}`),
+	}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 55, RunID: "run-stream", Step: run.StepPlan}}, exec)
+	var midExecutionLogs string
+	fx.exec.onRun = func(ctx context.Context) {
+		if fx.exec.req.OnLog == nil {
+			t.Fatal("expected OnLog callback to be wired on executor Request")
+		}
+		fx.exec.req.OnLog("line 1\n")
+		saved, err := fx.runs.Get(ctx, "run-stream")
+		if err != nil || saved == nil {
+			t.Fatalf("get run during execution: %v", err)
+		}
+		for _, st := range saved.Snapshot().Steps {
+			if st.Name == run.StepPlan {
+				midExecutionLogs = st.Logs
+			}
+		}
+	}
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if midExecutionLogs != "line 1\n" {
+		t.Fatalf("mid-execution logs = %q, want %q", midExecutionLogs, "line 1\n")
+	}
+}
+
+

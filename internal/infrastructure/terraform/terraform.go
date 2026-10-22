@@ -1,16 +1,19 @@
 package terraform
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"infra-guy/internal/domain/run"
@@ -18,6 +21,7 @@ import (
 )
 
 const WaitDelay = 15 * time.Second
+const logFlushInterval = 200 * time.Millisecond
 
 type Executor struct {
 	Binary BinaryLocator
@@ -30,6 +34,7 @@ type Request struct {
 	PlanFile                                                                              []byte
 	Env                                                                                   map[string]string
 	Files                                                                                 map[string][]byte
+	OnLog                                                                                 func(logs string)
 }
 
 type Result struct {
@@ -109,33 +114,49 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 	}
 
 	env := commandEnv(req.GitHubToken, homeDir, req.Env)
-	var logs strings.Builder
+	streamer := newLogStreamer(req.OnLog)
+	defer streamer.Close()
+
 	var planText string
 	var planJSON []byte
 	for _, args := range cmds {
 		showJSON := len(args) >= 2 && args[0] == "show" && args[1] == "-json"
-		out, err := commandBin(ctx, bin, dir, env, args...).CombinedOutput()
-		if !showJSON {
-			logs.Write(out)
+		showText := !showJSON && len(args) >= 1 && args[0] == "show"
+
+		cmd := commandBin(ctx, bin, dir, env, args...)
+		var cmdOut bytes.Buffer
+		if showJSON || showText {
+			cmd.Stdout = &cmdOut
+			cmd.Stderr = &cmdOut
+		} else {
+			w := io.MultiWriter(&cmdOut, streamer)
+			cmd.Stdout = w
+			cmd.Stderr = w
 		}
+
+		err := cmd.Run()
 		if err != nil {
-			if showJSON {
-				logs.Write(out)
+			if showJSON || showText {
+				_, _ = streamer.Write(cmdOut.Bytes())
 			}
+			streamer.Close()
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
-				return Result{ExitCode: ee.ExitCode(), Logs: logs.String()}, nil
+				return Result{ExitCode: ee.ExitCode(), Logs: streamer.String()}, nil
 			}
 			return Result{}, err
 		}
 		if showJSON {
-			planJSON = []byte(strings.TrimSpace(string(out)))
-		} else if args[0] == "show" {
-			planText = string(out)
+			planJSON = []byte(strings.TrimSpace(cmdOut.String()))
+		} else if showText {
+			planText = cmdOut.String()
+		} else {
+			streamer.Flush()
 		}
 	}
+	streamer.Close()
 
-	res := Result{ExitCode: 0, Logs: logs.String(), PlanText: planText, PlanJSON: planJSON}
+	res := Result{ExitCode: 0, Logs: streamer.String(), PlanText: planText, PlanJSON: planJSON}
 	if req.Step == run.StepPlan {
 		plan, err := os.ReadFile(filepath.Join(dir, "tfplan"))
 		if err != nil {
@@ -289,3 +310,115 @@ func parseVersionOutput(out []byte) string {
 	}
 	return v.Version
 }
+
+type logStreamer struct {
+	mu       sync.Mutex
+	buf      strings.Builder
+	onLog    func(string)
+	lastSent string
+	lastAt   time.Time
+	notifyCh chan struct{}
+	stopCh   chan struct{}
+	doneCh   chan struct{}
+	closed   bool
+}
+
+func newLogStreamer(onLog func(string)) *logStreamer {
+	s := &logStreamer{onLog: onLog}
+	if onLog == nil {
+		return s
+	}
+	s.notifyCh = make(chan struct{}, 1)
+	s.stopCh = make(chan struct{})
+	s.doneCh = make(chan struct{})
+	go s.loop()
+	return s
+}
+
+func (s *logStreamer) loop() {
+	defer close(s.doneCh)
+	ticker := time.NewTicker(logFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-s.notifyCh:
+			s.deliver()
+		case <-ticker.C:
+			s.deliver()
+		}
+	}
+}
+
+func (s *logStreamer) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	_, _ = s.buf.Write(p)
+	shouldNotify := s.onLog != nil && !s.closed && (s.lastAt.IsZero() || time.Since(s.lastAt) >= logFlushInterval)
+	s.mu.Unlock()
+	if shouldNotify {
+		select {
+		case s.notifyCh <- struct{}{}:
+		default:
+		}
+	}
+	return len(p), nil
+}
+
+func (s *logStreamer) deliver() {
+	s.mu.Lock()
+	if s.onLog == nil {
+		s.mu.Unlock()
+		return
+	}
+	cur := s.buf.String()
+	if cur == "" || cur == s.lastSent {
+		s.mu.Unlock()
+		return
+	}
+	s.lastSent = cur
+	s.lastAt = time.Now()
+	onLog := s.onLog
+	s.mu.Unlock()
+	onLog(cur)
+}
+
+func (s *logStreamer) Flush() {
+	s.mu.Lock()
+	if s.onLog == nil || s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+	select {
+	case s.notifyCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *logStreamer) Close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	stopCh := s.stopCh
+	doneCh := s.doneCh
+	s.mu.Unlock()
+	if stopCh != nil {
+		close(stopCh)
+		<-doneCh
+	}
+	s.deliver()
+}
+
+func (s *logStreamer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
