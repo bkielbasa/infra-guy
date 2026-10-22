@@ -219,6 +219,8 @@ pre, .log {
   font-size: 13.5px;
   line-height: 1.55;
   tab-size: 2;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 @media (max-width: 720px) {
@@ -354,6 +356,11 @@ summary:hover { color: #fff; }
 .tok-op { color: #89ddff; }
 .tok-punct { color: #94a3b8; }
 .tok-comment { color: #636d83; font-style: italic; }
+
+details[data-status="running"] pre.log:empty::before {
+  content: "Waiting for Terraform output...";
+  color: var(--faint);
+}
 
 .step-live {
   display: inline-block;

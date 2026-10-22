@@ -258,9 +258,166 @@
     preservedDetails.set(key, !details.open);
   });
 
+  function isPollElement(elt) {
+    return Boolean(elt && (elt.id === 'run-panel' || elt.id === 'run-headline'));
+  }
+
+  function timelineItemKey(li) {
+    const d = li.querySelector('details[data-step]');
+    if (d) return 'step:' + d.dataset.step;
+    if (li.querySelector('.pill')) return 'terminal-pill';
+    const text = (li.textContent || '').trim();
+    if (text.startsWith('Queued ')) return 'queued';
+    return 'approval-status';
+  }
+
+  function actionsSignature(panel) {
+    const actions = panel.querySelector('.actions');
+    if (!actions) return '';
+    const parts = [];
+    actions.querySelectorAll('button').forEach(function (btn) {
+      parts.push((btn.textContent || '').trim() + ':' + Boolean(btn.disabled));
+    });
+    return parts.join('|');
+  }
+
+  function appendStepLogs(curDetails, incDetails) {
+    const prevStatus = curDetails.dataset.status || '';
+    const nextStatus = incDetails.dataset.status || '';
+    if (prevStatus !== nextStatus) {
+      curDetails.dataset.status = nextStatus;
+      if (nextStatus === 'running') {
+        curDetails.open = true;
+      }
+    }
+    const curSummary = curDetails.querySelector('summary');
+    const incSummary = incDetails.querySelector('summary');
+    if (curSummary && incSummary && curSummary.innerHTML !== incSummary.innerHTML) {
+      curSummary.innerHTML = incSummary.innerHTML;
+    }
+    const curPre = curDetails.querySelector('pre.log[data-log-step]');
+    const incPre = incDetails.querySelector('pre.log[data-log-step]');
+    if (curPre && incPre) {
+      const curText = curPre.textContent || '';
+      const incText = incPre.textContent || '';
+      if (incText !== curText) {
+        const atBottom = (curPre.scrollHeight - curPre.scrollTop - curPre.clientHeight) <= 32;
+        if (incText.startsWith(curText)) {
+          curPre.appendChild(document.createTextNode(incText.slice(curText.length)));
+        } else {
+          curPre.textContent = incText;
+        }
+        if (nextStatus === 'running' && atBottom) {
+          curPre.scrollTop = curPre.scrollHeight;
+        }
+      }
+    }
+  }
+
+  function syncHistoryPanelInPlace(currentPanel, incomingPanel) {
+    if (!currentPanel || !incomingPanel) return false;
+    const curTimeline = currentPanel.querySelector('ol.timeline');
+    const incTimeline = incomingPanel.querySelector('ol.timeline');
+    if (!curTimeline || !incTimeline) return false;
+
+    if (incomingPanel.hasAttribute('hx-trigger')) {
+      delete currentPanel.dataset.pollStopped;
+    } else {
+      currentPanel.dataset.pollStopped = '1';
+    }
+
+    const existingByKey = new Map();
+    Array.from(curTimeline.children).forEach(function (li) {
+      if (li.tagName === 'LI') {
+        existingByKey.set(timelineItemKey(li), li);
+      }
+    });
+
+    const incItems = Array.from(incTimeline.children).filter(function (el) {
+      return el.tagName === 'LI';
+    });
+    const incKeys = new Set(incItems.map(timelineItemKey));
+
+    existingByKey.forEach(function (li, key) {
+      if (!incKeys.has(key) && !key.startsWith('step:')) {
+        li.remove();
+        existingByKey.delete(key);
+      }
+    });
+
+    let nextRef = null;
+    for (let i = incItems.length - 1; i >= 0; i--) {
+      const incLi = incItems[i];
+      const key = timelineItemKey(incLi);
+      let curLi = existingByKey.get(key);
+      if (curLi) {
+        const curD = curLi.querySelector('details[data-step]');
+        const incD = incLi.querySelector('details[data-step]');
+        if (curD && incD) {
+          appendStepLogs(curD, incD);
+        } else if (curLi.innerHTML !== incLi.innerHTML) {
+          curLi.innerHTML = incLi.innerHTML;
+        }
+        nextRef = curLi;
+      } else {
+        const newLi = incLi.cloneNode(true);
+        curTimeline.insertBefore(newLi, nextRef);
+        nextRef = newLi;
+      }
+    }
+
+    const curActions = currentPanel.querySelector('.actions');
+    const incActions = incomingPanel.querySelector('.actions');
+    if (!incActions && curActions) {
+      curActions.remove();
+    } else if (incActions && !curActions) {
+      const clone = incActions.cloneNode(true);
+      currentPanel.appendChild(clone);
+      if (window.htmx) window.htmx.process(clone);
+    } else if (incActions && curActions && actionsSignature(currentPanel) !== actionsSignature(incomingPanel)) {
+      curActions.innerHTML = incActions.innerHTML;
+      if (window.htmx) window.htmx.process(curActions);
+    }
+
+    return true;
+  }
+
+  document.addEventListener('htmx:beforeRequest', function (e) {
+    const elt = e.detail && e.detail.elt;
+    if (elt && elt.dataset && elt.dataset.pollStopped === '1') {
+      e.preventDefault();
+    }
+  });
+
   document.addEventListener('htmx:beforeSwap', function (e) {
     const target = e.target;
     if (!target || !target.querySelectorAll) return;
+    const elt = e.detail && e.detail.elt;
+    const raw = (e.detail && e.detail.serverResponse) ? e.detail.serverResponse.trim() : '';
+    if (raw && (target.id === 'run-headline' || target.id === 'run-panel')) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = raw;
+      if (target.id === 'run-headline' && isPollElement(elt)) {
+        const incHead = tmp.querySelector('#run-headline');
+        if (incHead) {
+          if (incHead.hasAttribute('hx-trigger')) {
+            delete target.dataset.pollStopped;
+          } else {
+            target.dataset.pollStopped = '1';
+          }
+          if (incHead.innerHTML.trim() === target.innerHTML.trim()) {
+            e.detail.shouldSwap = false;
+            return;
+          }
+        }
+      } else if (target.id === 'run-panel') {
+        const incPanel = tmp.querySelector('#run-panel');
+        if (incPanel && syncHistoryPanelInPlace(target, incPanel)) {
+          e.detail.shouldSwap = false;
+          return;
+        }
+      }
+    }
     target.querySelectorAll('details[data-step]').forEach(function (d) {
       stepPrevStatus.set(d.dataset.step, d.dataset.status || '');
     });

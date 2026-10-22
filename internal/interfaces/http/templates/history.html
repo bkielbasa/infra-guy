@@ -8,7 +8,7 @@
     <li>
       <details data-step="apply" data-status="{{.Apply.Status}}"{{if .Apply.Open}} open{{end}}>
         <summary>Applying{{if .Apply.Running}} <span class="step-live">streaming&hellip;</span>{{end}}</summary>
-        <pre class="log" data-log-step="apply">{{if .Apply.Logs}}{{.Apply.Logs}}{{else if .Apply.Running}}Waiting for Terraform output...{{end}}</pre>
+        <pre class="log" data-log-step="apply">{{.Apply.Logs}}</pre>
       </details>
     </li>
     {{end}}
@@ -23,7 +23,7 @@
     <li>
       <details data-step="plan" data-status="{{.Plan.Status}}"{{if .Plan.Open}} open{{end}}>
         <summary>Planning{{if .Plan.Running}} <span class="step-live">streaming&hellip;</span>{{end}}</summary>
-        <pre class="log" data-log-step="plan">{{if .Plan.Logs}}{{.Plan.Logs}}{{else if .Plan.Running}}Waiting for Terraform output...{{end}}</pre>
+        <pre class="log" data-log-step="plan">{{.Plan.Logs}}</pre>
       </details>
     </li>
     {{end}}
@@ -31,7 +31,7 @@
     <li>
       <details data-step="init" data-status="{{.Init.Status}}"{{if .Init.Open}} open{{end}}>
         <summary>Initializing{{if .Init.Running}} <span class="step-live">streaming&hellip;</span>{{end}}</summary>
-        <pre class="log" data-log-step="init">{{if .Init.Logs}}{{.Init.Logs}}{{else if .Init.Running}}Waiting for Terraform output...{{end}}</pre>
+        <pre class="log" data-log-step="init">{{.Init.Logs}}</pre>
       </details>
     </li>
     {{end}}
