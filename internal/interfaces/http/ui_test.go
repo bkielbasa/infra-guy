@@ -2076,5 +2076,110 @@ func TestProjectDependenciesUI(t *testing.T) {
 	}
 }
 
+func TestSessionSlidingRenewalRefreshesCookie(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	store := newUIIdentity("ada", "ten")
+	gh := &uiGitHub{slug: "infra-guy", userID: 4, login: "ada"}
+	proj, runsSvc, st := uiServices(&memProjects{items: map[project.ID]*project.Project{}}, &memRuns{items: map[run.ID]*run.Run{}}, &memStates{items: map[string]*state.State{}})
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		PublicBaseURL: "https://infra.example",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh,
+			Now:           func() time.Time { return now },
+			NewID:         func() string { return "id-1" },
+			PublicBaseURL: "https://infra.example", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh,
+			Now:   func() time.Time { return now },
+			NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// Fresh session (< 1h elapsed): no Set-Cookie emitted.
+	freshExpiry := now.Add(authapp.DefaultSessionTTL - 10*time.Minute)
+	store.sessions[uiSessionID] = authapp.Session{
+		ID: uiSessionID, UserID: "user-1", TenantID: "ten", Role: "admin",
+		Login: "ada", ExpiresAt: freshExpiry,
+	}
+	rr := getUI(t, h, "/")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("fresh session GET / = %d: %s", rr.Code, rr.Body.String())
+	}
+	if cookies := rr.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("expected no Set-Cookie for fresh session, got %#v", cookies)
+	}
+
+	// Session past renewal threshold (>= 1h elapsed): cookie and store ExpiresAt refreshed.
+	store.sessions[uiSessionID] = authapp.Session{
+		ID: uiSessionID, UserID: "user-1", TenantID: "ten", Role: "admin",
+		Login: "ada", ExpiresAt: now.Add(authapp.DefaultSessionTTL - 2*time.Hour),
+	}
+	rr = getUI(t, h, "/")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("renewed session GET / = %d: %s", rr.Code, rr.Body.String())
+	}
+	wantExpires := now.Add(authapp.DefaultSessionTTL)
+	var cookie *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "session" {
+			cookie = c
+		}
+	}
+	if cookie == nil || cookie.Value != uiSessionID || !cookie.Expires.Equal(wantExpires) {
+		t.Fatalf("expected renewed session cookie with Expires=%v, got %#v", wantExpires, cookie)
+	}
+	if !store.sessions[uiSessionID].ExpiresAt.Equal(wantExpires) {
+		t.Fatalf("stored session ExpiresAt = %v, want %v", store.sessions[uiSessionID].ExpiresAt, wantExpires)
+	}
+}
+
+func TestGitHubSetupRedirectsToLoginWhenOrgMembershipUnsynced(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	store := newUIIdentity("ada", "")
+	store.sessions[uiSessionID] = authapp.Session{
+		ID: uiSessionID, UserID: "user-1", Login: "ada",
+		ExpiresAt: now.Add(authapp.DefaultSessionTTL),
+	}
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "ada",
+		accountID: 77, accountLogin: "acme", accountType: "Organization",
+	}
+	seq := 0
+	nextID := func() string {
+		seq++
+		return fmt.Sprintf("id-%d", seq)
+	}
+	proj, runsSvc, st := uiServices(&memProjects{items: map[project.ID]*project.Project{}}, &memRuns{items: map[run.ID]*run.Run{}}, &memStates{items: map[string]*state.State{}})
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh,
+			Now:           func() time.Time { return now },
+			NewID:         nextID,
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh,
+			Now:   func() time.Time { return now },
+			NewID: nextID,
+		},
+	})
+
+	rr := getUI(t, h, "/github/setup?installation_id=99")
+	if rr.Code != http.StatusFound || rr.Header().Get("Location") != "/github/login" {
+		t.Fatalf("setup = %d (loc=%q), want 302 to /github/login: %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+	if len(store.tenants) != 1 || store.tenants[0].Name != "acme" {
+		t.Fatalf("expected tenant acme upserted, got %+v", store.tenants)
+	}
+	if len(store.installations) != 1 || store.installations[0].GitHubInstallationID != 99 || !store.installations[0].Active {
+		t.Fatalf("expected active installation 99 upserted, got %+v", store.installations)
+	}
+}
+
+
 
 

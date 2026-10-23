@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
+
+	authapp "infra-guy/internal/application/auth"
 )
 
 func (u *ui) githubLogin(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +51,10 @@ func (u *ui) githubSetup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if _, err := u.cfg.Auth.EnterInstallation(r.Context(), sessionID, installationID, u.now()); err != nil {
+		if errors.Is(err, authapp.ErrDenied) {
+			http.Redirect(w, r, "/github/login", http.StatusFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}

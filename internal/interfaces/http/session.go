@@ -48,18 +48,21 @@ func withSession(next http.Handler, cfg ServerConfig) http.Handler {
 			http.Redirect(w, r, "/github/login", http.StatusFound)
 			return
 		}
-		sess, err := cfg.Auth.Session(r.Context(), c.Value)
+		now := time.Now().UTC()
+		if cfg.Auth.Now != nil {
+			now = cfg.Auth.Now()
+		}
+		sess, renewed, err := cfg.Auth.Authenticate(r.Context(), c.Value, now)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		now := time.Now()
-		if cfg.Auth.Now != nil {
-			now = cfg.Auth.Now()
-		}
-		if sess == nil || sess.ExpiresAt.Before(now) {
+		if sess == nil {
 			http.Redirect(w, r, "/github/login", http.StatusFound)
 			return
+		}
+		if renewed {
+			setSessionCookie(w, cfg.PublicBaseURL, sess.ID, sess.ExpiresAt)
 		}
 		if sess.TenantID == "" && !emptyTenantUI(r) {
 			http.Redirect(w, r, "/", http.StatusFound)
