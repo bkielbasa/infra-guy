@@ -114,12 +114,6 @@ func (a *api) webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	matched, err := a.projects.FindByRepo(r.Context(), inst.TenantID, env.Repository.ID)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
 	ownerLogin := env.Repository.Owner.Login
 	repoName := env.Repository.Name
 	if ownerLogin == "" && strings.Contains(env.Repository.FullName, "/") {
@@ -129,20 +123,14 @@ func (a *api) webhook(w http.ResponseWriter, r *http.Request) {
 			repoName = parts[1]
 		}
 	}
-	if ownerLogin != "" && repoName != "" && (event == "push" || event == "pull_request" || (event == "repository" && env.Action == "renamed")) {
-		for i, p := range matched {
-			snap := p.Snapshot()
-			if snap.Repo.Owner != ownerLogin || snap.Repo.Name != repoName {
-				snap.Repo.Owner = ownerLogin
-				snap.Repo.Name = repoName
-				updated := project.Restore(snap)
-				if err := a.projects.Save(r.Context(), updated); err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				matched[i] = updated
-			}
-		}
+	var syncOwner, syncName string
+	if event == "push" || event == "pull_request" || (event == "repository" && env.Action == "renamed") {
+		syncOwner, syncName = ownerLogin, repoName
+	}
+	matched, err := a.projects.SyncAndFindByRepo(r.Context(), inst.TenantID, env.Repository.ID, syncOwner, syncName)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	switch event {

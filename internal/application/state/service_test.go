@@ -52,7 +52,7 @@ func (m *memStates) Load(_ context.Context, projectID string) (*state.State, err
 	if st, ok := m.items[projectID]; ok {
 		return state.Restore(st.Snapshot()), nil
 	}
-	return state.New(projectID), nil
+	return nil, nil
 }
 
 func (m *memStates) Save(_ context.Context, s *state.State) error {
@@ -100,3 +100,59 @@ func TestStateHTTPOutcomes(t *testing.T) {
 		t.Fatalf("state changed: %s", got.Body)
 	}
 }
+
+func TestOutputsChangedAndForceUnlock(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(100, 0).UTC()
+	repo, _ := project.ParseSourceRepo("bklebasa/infra")
+	p, _ := project.New("p1", "infra", repo, now)
+	p.SetStateToken("tok")
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	states := &memStates{items: map[string]*state.State{}}
+	svc := &Service{Projects: projects, States: states, Now: func() time.Time { return now }}
+
+	// Empty state returns nil without error
+	outs, err := svc.Outputs(ctx, "p1")
+	if err != nil || outs != nil {
+		t.Fatalf("Outputs on missing state: %v, %v", outs, err)
+	}
+	changed, err := svc.ChangedOutputsSincePrevious(ctx, "p1")
+	if err != nil || changed != nil {
+		t.Fatalf("ChangedOutputsSincePrevious on missing state: %v, %v", changed, err)
+	}
+	if err := svc.ForceUnlock(ctx, "p1"); err != nil {
+		t.Fatalf("ForceUnlock on missing state: %v", err)
+	}
+
+	// Put state v1 and v2
+	v1 := []byte(`{"version":4,"serial":1,"outputs":{"vpc_id":{"value":"vpc-1","type":"string"}}}`)
+	v2 := []byte(`{"version":4,"serial":2,"outputs":{"vpc_id":{"value":"vpc-2","type":"string"}}}`)
+	if _, err := svc.Put(ctx, "p1", "tok", "", v1, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Put(ctx, "p1", "tok", "", v2, "r2"); err != nil {
+		t.Fatal(err)
+	}
+
+	outs, err = svc.Outputs(ctx, "p1")
+	if err != nil || outs["vpc_id"].EnvString != "vpc-2" {
+		t.Fatalf("got outputs %+v, err %v", outs, err)
+	}
+	changed, err = svc.ChangedOutputsSincePrevious(ctx, "p1")
+	if err != nil || !changed["vpc_id"] {
+		t.Fatalf("got changed %+v, err %v", changed, err)
+	}
+
+	// Lock then ForceUnlock
+	if out, err := svc.Lock(ctx, "p1", "tok", []byte(`{"ID":"lock-1"}`)); err != nil || out.Code != 200 {
+		t.Fatalf("lock: %+v, %v", out, err)
+	}
+	if err := svc.ForceUnlock(ctx, "p1"); err != nil {
+		t.Fatalf("force unlock: %v", err)
+	}
+	st, _ := states.Load(ctx, "p1")
+	if st.Snapshot().LockID != "" {
+		t.Fatalf("expected LockID cleared, got %q", st.Snapshot().LockID)
+	}
+}
+

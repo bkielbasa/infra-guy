@@ -47,7 +47,7 @@ type ServerConfig struct {
 }
 
 func NewServer(cfg ServerConfig) http.Handler {
-	api := New(cfg.States, cfg.Runs, cfg.Projects.Projects, WithWebhook(cfg.Installations, cfg.WebhookSecret))
+	api := New(cfg.States, cfg.Runs, cfg.Projects, WithWebhook(cfg.Installations, cfg.WebhookSecret))
 	uiMux := http.NewServeMux()
 	(&ui{cfg: cfg}).routes(uiMux)
 	protected := http.NewCrossOriginProtection().Handler(withSession(uiMux, cfg))

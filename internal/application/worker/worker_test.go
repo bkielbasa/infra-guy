@@ -214,7 +214,7 @@ func newFixture(t *testing.T, r *run.Run, p *project.Project, q *fakeQueue, exec
 		q = &fakeQueue{}
 	}
 	w := &Worker{
-		WorkerID: "w1", Queue: q, Projects: projects, Runs: runs, Service: svc,
+		WorkerID: "w1", Queue: q, Projects: projects, Service: svc,
 		Checkout: co, Executor: exec, WorkDir: work, InternalBaseURL: "http://127.0.0.1:8759",
 		Now: testNow,
 		Tokens: tokenSourceFunc(func(ctx context.Context, tenantID string) (string, error) {
@@ -958,7 +958,7 @@ func TestWorkerResolvesUpstreamDependenciesIntoEnv(t *testing.T) {
 	q := &fakeQueue{claim: &Job{ID: 1, RunID: r.Snapshot().ID, Step: run.StepInit}}
 	exec := &fakeExecutor{res: Result{ExitCode: 0}}
 	w := &Worker{
-		WorkerID: "w1", Queue: q, Projects: projs, Runs: runs, Service: svc,
+		WorkerID: "w1", Queue: q, Projects: projs, Service: svc,
 		Checkout: &fakeCheckout{t: t}, Executor: exec,
 		Tokens: tokenSourceFunc(func(ctx context.Context, tenantID string) (string, error) {
 			return "ghs_install", nil

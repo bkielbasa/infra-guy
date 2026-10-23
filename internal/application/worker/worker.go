@@ -108,6 +108,10 @@ type WorkspaceCache interface {
 	Delete(ctx context.Context, key string) error
 }
 
+type ProjectGetter interface {
+	Get(ctx context.Context, id project.ID) (*project.Project, error)
+}
+
 func WorkspaceCacheKey(tenantID, projectID, runID string) string {
 	return path.Join(tenantID, projectID, runID)
 }
@@ -115,8 +119,7 @@ func WorkspaceCacheKey(tenantID, projectID, runID string) string {
 type Worker struct {
 	WorkerID        string
 	Queue           Queue
-	Projects        project.Repository
-	Runs            run.Repository
+	Projects        ProjectGetter
 	Service         *runapp.Service
 	Checkout        Checkout
 	Executor        Executor
@@ -210,31 +213,9 @@ func (w *Worker) heartbeat(ctx context.Context, jobID int64) {
 }
 
 func (w *Worker) runJob(ctx context.Context, job Job) error {
-	r, err := w.Runs.Get(ctx, job.RunID)
-	if err != nil || r == nil {
-		return fmt.Errorf("run %s not found", job.RunID)
-	}
-	now := time.Now()
-	if w.Now != nil {
-		now = w.Now()
-	}
-	stepStatus := stepStatus(r, job.Step)
-	switch stepStatus {
-	case run.StepPending:
-		if err := r.BeginStep(job.Step, now); err != nil {
-			return err
-		}
-		if err := w.Runs.Save(ctx, r); err != nil {
-			return err
-		}
-	case run.StepRunning:
-	default:
-		if err := r.BeginStep(job.Step, now); err != nil {
-			return err
-		}
-		if err := w.Runs.Save(ctx, r); err != nil {
-			return err
-		}
+	r, err := w.Service.BeginStep(ctx, job.RunID, job.Step)
+	if err != nil {
+		return err
 	}
 
 	p, err := w.Projects.Get(ctx, project.ID(r.Snapshot().ProjectID))
@@ -488,17 +469,8 @@ func (w *Worker) completeAndCleanup(ctx context.Context, job Job) error {
 	return w.removeIfTerminal(ctx, job.RunID)
 }
 
-func stepStatus(r *run.Run, name run.StepName) run.StepStatus {
-	for _, st := range r.Snapshot().Steps {
-		if st.Name == name {
-			return st.Status
-		}
-	}
-	return ""
-}
-
 func (w *Worker) removeIfTerminal(ctx context.Context, id run.ID) error {
-	r, err := w.Runs.Get(ctx, id)
+	r, err := w.Service.Get(ctx, id)
 	if err != nil || r == nil {
 		return err
 	}

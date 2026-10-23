@@ -527,3 +527,47 @@ func TestPRCommitStatusEmptyPlanAndFail(t *testing.T) {
 	}
 }
 
+func TestBeginStepStartsAndSavesRun(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(100, 0).UTC()
+	repo, _ := project.ParseSourceRepo("bklebasa/infra")
+	p, _ := project.New("p1", "infra", repo, now)
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	sched := &memSched{}
+	svc := &Service{
+		Projects: projects,
+		Runs:     runs,
+		Schedule: sched,
+		Now:      func() time.Time { return now },
+		NewID:    func() string { return "r1" },
+	}
+	if _, err := svc.Open(ctx, OpenRequest{
+		ProjectID: "p1",
+		Trigger:   run.TriggerPush,
+		SHA:       "abc1234",
+		Branch:    "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := svc.BeginStep(ctx, "r1", run.StepInit)
+	if err != nil {
+		t.Fatalf("BeginStep: %v", err)
+	}
+	if r.Snapshot().Status != run.StatusRunning {
+		t.Fatalf("got status %s, want running", r.Snapshot().Status)
+	}
+	saved, _ := runs.Get(ctx, "r1")
+	if saved.Snapshot().Status != run.StatusRunning {
+		t.Fatalf("saved status %s, want running", saved.Snapshot().Status)
+	}
+
+	// Calling BeginStep when already running is a no-op and returns r
+	r2, err := svc.BeginStep(ctx, "r1", run.StepInit)
+	if err != nil || r2.Snapshot().Status != run.StatusRunning {
+		t.Fatalf("BeginStep already running: %v, %+v", err, r2)
+	}
+}
+
+

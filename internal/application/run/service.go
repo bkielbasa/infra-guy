@@ -61,6 +61,32 @@ func (s *Service) Get(ctx context.Context, id run.ID) (*run.Run, error) {
 	return s.Runs.Get(ctx, id)
 }
 
+func (s *Service) BeginStep(ctx context.Context, id run.ID, step run.StepName) (*run.Run, error) {
+	r, err := s.Runs.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("run %s not found", id)
+	}
+	for _, st := range r.Snapshot().Steps {
+		if st.Name == step && st.Status == run.StepRunning {
+			return r, nil
+		}
+	}
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	if err := r.BeginStep(step, now); err != nil {
+		return nil, err
+	}
+	if err := s.Runs.Save(ctx, r); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
 func (s *Service) ListByProject(ctx context.Context, projectID project.ID) ([]*run.Run, error) {
 	return s.Runs.ListByProject(ctx, run.ProjectID(projectID))
 }

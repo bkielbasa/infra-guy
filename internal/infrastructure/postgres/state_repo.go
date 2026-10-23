@@ -26,7 +26,7 @@ func (r *StateRepo) Load(ctx context.Context, projectID string) (*state.State, e
 		FROM states WHERE project_id = $1`, projectID,
 	).Scan(&s.Data, &lockID, &s.LockInfo, &s.Serial, &updated)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return state.New(projectID), nil
+		return nil, nil
 	}
 	if err != nil {
 		return nil, err

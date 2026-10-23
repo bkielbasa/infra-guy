@@ -93,9 +93,10 @@ func (s *stubLookup) Lookup(ctx context.Context, repo project.SourceRepo, token,
 }
 
 func uiServices(projects *memProjects, runs *memRuns, states *memStates) (*projectapp.Service, *runapp.Service, *stateapp.Service) {
-	return &projectapp.Service{Projects: projects, Now: time.Now, NewID: func() string { return "new-p" }},
+	stSvc := &stateapp.Service{Projects: projects, States: states, Now: time.Now}
+	return &projectapp.Service{Projects: projects, States: stSvc, Now: time.Now, NewID: func() string { return "new-p" }},
 		&runapp.Service{Projects: projects, Runs: runs, Schedule: nopSched{}, Now: time.Now, NewID: func() string { return "new-r" }},
-		&stateapp.Service{Projects: projects, States: states, Now: time.Now}
+		stSvc
 }
 
 const uiSessionID = "sess"
@@ -1877,8 +1878,8 @@ func TestProjectDependenciesUI(t *testing.T) {
 	depSeq := 0
 	depSvc := &dependencyapp.Service{
 		Dependencies: depRepo,
-		Projects:     projects,
-		States:       states,
+		Projects:     projSvc,
+		States:       stSvc,
 		Runs:         runsSvc,
 		Now:          func() time.Time { return now },
 		NewID: func() string {

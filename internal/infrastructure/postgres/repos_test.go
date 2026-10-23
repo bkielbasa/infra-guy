@@ -186,9 +186,10 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Snapshot().ProjectID != state.New(string(projectID)).Snapshot().ProjectID || !st.Empty() {
-		t.Fatal("expected empty state before put")
+	if st != nil {
+		t.Fatalf("expected nil state before first save, got %+v", st)
 	}
+	st = state.New(string(projectID))
 	body := []byte(`{"version":4,"serial":7}`)
 	if err := st.Put(body, "", string(opened.Snapshot().ID), now); err != nil {
 		t.Fatal(err)
@@ -366,6 +367,9 @@ func TestStateHistoryOnlyGrows(t *testing.T) {
 		st, err := states.Load(ctx, id)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if st == nil {
+			st = state.New(id)
 		}
 		if err := st.Put([]byte(body), "", fmt.Sprintf("run-%d", i), time.Unix(int64(1_700_000_000+i), 0).UTC()); err != nil {
 			t.Fatal(err)

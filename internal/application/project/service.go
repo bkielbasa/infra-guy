@@ -9,13 +9,17 @@ import (
 	"time"
 
 	"infra-guy/internal/domain/project"
-	"infra-guy/internal/domain/state"
 )
 
 var ErrActiveRun = errors.New("cannot force-unlock while a run is active")
 
+type StateForceUnlocker interface {
+	ForceUnlock(ctx context.Context, projectID string) error
+}
+
 type Service struct {
 	Projects project.Repository
+	States   StateForceUnlocker
 	Now      func() time.Time
 	NewID    func() string
 }
@@ -162,7 +166,7 @@ func (s *Service) Delete(ctx context.Context, id project.ID) error {
 	return s.Projects.Delete(ctx, id)
 }
 
-func (s *Service) ForceUnlock(ctx context.Context, id project.ID, states state.Repository) error {
+func (s *Service) ForceUnlock(ctx context.Context, id project.ID) error {
 	p, err := s.Projects.Get(ctx, id)
 	if err != nil {
 		return err
@@ -173,13 +177,34 @@ func (s *Service) ForceUnlock(ctx context.Context, id project.ID, states state.R
 	if p.Snapshot().ActiveRunID != "" {
 		return ErrActiveRun
 	}
-	st, err := states.Load(ctx, string(id))
-	if err != nil {
-		return err
-	}
-	if st == nil {
+	if s.States == nil {
 		return nil
 	}
-	st.ForceUnlock()
-	return states.Save(ctx, st)
+	return s.States.ForceUnlock(ctx, string(id))
 }
+
+func (s *Service) SyncAndFindByRepo(ctx context.Context, tenantID string, repoID int64, ownerLogin, repoName string) ([]*project.Project, error) {
+	matched, err := s.Projects.FindByRepo(ctx, tenantID, repoID)
+	if err != nil {
+		return nil, err
+	}
+	if ownerLogin != "" && repoName != "" {
+		now := time.Now().UTC()
+		if s.Now != nil {
+			now = s.Now()
+		}
+		for _, p := range matched {
+			snap := p.Snapshot()
+			if snap.Repo.Owner != ownerLogin || snap.Repo.Name != repoName {
+				if err := p.RenameRepo(ownerLogin, repoName, now); err != nil {
+					return nil, err
+				}
+				if err := s.Projects.Save(ctx, p); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return matched, nil
+}
+

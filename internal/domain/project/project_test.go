@@ -137,3 +137,27 @@ func TestApprovalPolicyID(t *testing.T) {
 		t.Fatalf("expected cleared policy id, got %q", p.ApprovalPolicyID())
 	}
 }
+
+func TestRenameRepo(t *testing.T) {
+	p := sample(t)
+	later := time.Unix(200, 0).UTC()
+
+	if err := p.RenameRepo("", "repo", later); err == nil {
+		t.Fatal("expected error for empty owner")
+	}
+	if err := p.RenameRepo("owner", "  ", later); err == nil {
+		t.Fatal("expected error for blank repo name")
+	}
+
+	if err := p.RenameRepo(" new-owner ", " new-repo ", later); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	snap := p.Snapshot()
+	if snap.Repo.Owner != "new-owner" || snap.Repo.Name != "new-repo" {
+		t.Fatalf("got %s/%s, want new-owner/new-repo", snap.Repo.Owner, snap.Repo.Name)
+	}
+	if !snap.UpdatedAt.Equal(later) {
+		t.Fatalf("got UpdatedAt %v, want %v", snap.UpdatedAt, later)
+	}
+}
+

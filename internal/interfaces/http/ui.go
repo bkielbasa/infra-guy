@@ -512,7 +512,7 @@ func (u *ui) forceUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := p.Snapshot().ID
-	if err := u.cfg.Projects.ForceUnlock(r.Context(), id, u.cfg.States.States); err != nil {
+	if err := u.cfg.Projects.ForceUnlock(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1755,10 +1755,8 @@ func (u *ui) tabDependencies(w http.ResponseWriter, r *http.Request) {
 			}
 
 			var outputs map[string]state.OutputValue
-			if u.cfg.States != nil && u.cfg.States.States != nil {
-				if st, err := u.cfg.States.States.Load(r.Context(), string(ds.DependsOnProjectID)); err == nil && st != nil {
-					outputs = st.Snapshot().Outputs()
-				}
+			if u.cfg.States != nil {
+				outputs, _ = u.cfg.States.Outputs(r.Context(), string(ds.DependsOnProjectID))
 			}
 			var avail []string
 			for k := range outputs {

@@ -43,7 +43,7 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
-		firstNonEmptyVersion(s.TerraformVersion), s.ApprovalPolicyID, s.AutoApprove, s.Locked, s.StateToken, s.ActiveRunID,
+		s.TerraformVersion, s.ApprovalPolicyID, s.AutoApprove, s.Locked, s.StateToken, s.ActiveRunID,
 		s.CreatedAt, s.UpdatedAt,
 	)
 	return err
@@ -55,13 +55,6 @@ func (r *ProjectRepo) Insert(ctx context.Context, p *project.Project) error {
 
 func (r *ProjectRepo) Update(ctx context.Context, p *project.Project) error {
 	return r.Save(ctx, p)
-}
-
-func firstNonEmptyVersion(v string) string {
-	if v == "" {
-		return project.DefaultTerraformVersion
-	}
-	return v
 }
 
 func (r *ProjectRepo) SetLocked(ctx context.Context, id project.ID, locked bool) error {

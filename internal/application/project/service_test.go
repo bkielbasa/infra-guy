@@ -21,8 +21,15 @@ func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, e
 	return m.items[id], nil
 }
 func (m *memProjects) List(context.Context, string) ([]*project.Project, error) { return nil, nil }
-func (m *memProjects) FindByRepo(context.Context, string, int64) ([]*project.Project, error) {
-	return nil, nil
+func (m *memProjects) FindByRepo(_ context.Context, tenantID string, repoID int64) ([]*project.Project, error) {
+	var out []*project.Project
+	for _, p := range m.items {
+		s := p.Snapshot()
+		if s.TenantID == tenantID && s.GitHubRepoID == repoID {
+			out = append(out, project.Restore(s))
+		}
+	}
+	return out, nil
 }
 func (m *memProjects) SetLocked(_ context.Context, id project.ID, locked bool) error {
 	if p := m.items[id]; p != nil {
@@ -49,7 +56,7 @@ func (m *memStates) Load(_ context.Context, projectID string) (*state.State, err
 	if st, ok := m.items[projectID]; ok {
 		return state.Restore(st.Snapshot()), nil
 	}
-	return state.New(projectID), nil
+	return nil, nil
 }
 
 func (m *memStates) Save(_ context.Context, s *state.State) error {
@@ -57,11 +64,20 @@ func (m *memStates) Save(_ context.Context, s *state.State) error {
 	return nil
 }
 
+func (m *memStates) ForceUnlock(ctx context.Context, projectID string) error {
+	st, err := m.Load(ctx, projectID)
+	if err != nil || st == nil {
+		return err
+	}
+	st.ForceUnlock()
+	return m.Save(ctx, st)
+}
+
 func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	ctx := context.Background()
 	projects := &memProjects{items: map[project.ID]*project.Project{}}
 	states := &memStates{items: map[string]*state.State{}}
-	svc := &Service{Projects: projects, Now: func() time.Time { return time.Unix(1, 0).UTC() }, NewID: func() string { return "p1" }}
+	svc := &Service{Projects: projects, States: states, Now: func() time.Time { return time.Unix(1, 0).UTC() }, NewID: func() string { return "p1" }}
 	repo, err := project.ParseSourceRepo("bklebasa/infra")
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +143,7 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	st := state.New("p1")
 	_, _ = st.Lock([]byte(`{"ID":"L1"}`))
 	_ = states.Save(ctx, st)
-	if err := svc.ForceUnlock(ctx, "p1", states); err != ErrActiveRun {
+	if err := svc.ForceUnlock(ctx, "p1"); err != ErrActiveRun {
 		t.Fatalf("force unlock: %v", err)
 	}
 	if states.items["p1"].Snapshot().LockID != "L1" {
@@ -135,10 +151,44 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	}
 	_ = created.ReleaseActiveRun("run-1")
 	_ = projects.Save(ctx, created)
-	if err := svc.ForceUnlock(ctx, "p1", states); err != nil {
+	if err := svc.ForceUnlock(ctx, "p1"); err != nil {
 		t.Fatal(err)
 	}
 	if states.items["p1"].Snapshot().LockID != "" {
 		t.Fatal("lock remains")
 	}
 }
+
+func TestSyncAndFindByRepoUpdatesRenamedRepo(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(200, 0).UTC()
+	projects := &memProjects{items: map[project.ID]*project.Project{}}
+	svc := &Service{
+		Projects: projects,
+		Now:      func() time.Time { return now },
+		NewID:    func() string { return "p1" },
+	}
+	repo, err := project.ParseSourceRepo("old-owner/old-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(ctx, "t1", "infra", repo, 42, "main", ".", false); err != nil {
+		t.Fatal(err)
+	}
+
+	matched, err := svc.SyncAndFindByRepo(ctx, "t1", 42, "new-owner", "new-name")
+	if err != nil {
+		t.Fatalf("SyncAndFindByRepo: %v", err)
+	}
+	if len(matched) != 1 {
+		t.Fatalf("got %d matched projects, want 1", len(matched))
+	}
+	if matched[0].Snapshot().Repo.Owner != "new-owner" || matched[0].Snapshot().Repo.Name != "new-name" {
+		t.Fatalf("returned project not renamed: %+v", matched[0].Snapshot())
+	}
+	saved, _ := projects.Get(ctx, "p1")
+	if saved.Snapshot().Repo.Owner != "new-owner" || saved.Snapshot().Repo.Name != "new-name" {
+		t.Fatalf("persisted project not renamed: %+v", saved.Snapshot())
+	}
+}
+

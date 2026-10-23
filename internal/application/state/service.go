@@ -67,6 +67,31 @@ func (s *Service) History(ctx context.Context, projectID string) ([]state.Histor
 	return st.Snapshot().History, nil
 }
 
+func (s *Service) Outputs(ctx context.Context, projectID string) (map[string]state.OutputValue, error) {
+	st, err := s.States.Load(ctx, projectID)
+	if err != nil || st == nil {
+		return nil, err
+	}
+	return st.Snapshot().Outputs(), nil
+}
+
+func (s *Service) ChangedOutputsSincePrevious(ctx context.Context, projectID string) (map[string]bool, error) {
+	st, err := s.States.Load(ctx, projectID)
+	if err != nil || st == nil {
+		return nil, err
+	}
+	return st.Snapshot().ChangedOutputsSincePrevious(), nil
+}
+
+func (s *Service) ForceUnlock(ctx context.Context, projectID string) error {
+	st, err := s.States.Load(ctx, projectID)
+	if err != nil || st == nil {
+		return err
+	}
+	st.ForceUnlock()
+	return s.States.Save(ctx, st)
+}
+
 func (s *Service) Get(ctx context.Context, projectID, token string) (Outcome, error) {
 	if out, err, ok := s.authorize(ctx, projectID, token); !ok {
 		return out, err

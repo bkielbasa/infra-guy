@@ -171,11 +171,25 @@ func (m *memStateRepo) Load(_ context.Context, projectID string) (*state.State, 
 	if st, ok := m.items[projectID]; ok {
 		return state.Restore(st.Snapshot()), nil
 	}
-	return state.New(projectID), nil
+	return nil, nil
 }
 func (m *memStateRepo) Save(_ context.Context, st *state.State) error {
 	m.items[st.Snapshot().ProjectID] = state.Restore(st.Snapshot())
 	return nil
+}
+func (m *memStateRepo) Outputs(ctx context.Context, projectID string) (map[string]state.OutputValue, error) {
+	st, err := m.Load(ctx, projectID)
+	if err != nil || st == nil {
+		return nil, err
+	}
+	return st.Snapshot().Outputs(), nil
+}
+func (m *memStateRepo) ChangedOutputsSincePrevious(ctx context.Context, projectID string) (map[string]bool, error) {
+	st, err := m.Load(ctx, projectID)
+	if err != nil || st == nil {
+		return nil, err
+	}
+	return st.Snapshot().ChangedOutputsSincePrevious(), nil
 }
 
 type fakeRunOpener struct {

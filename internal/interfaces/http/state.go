@@ -1,15 +1,20 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"net/http"
 
-	stateapp "infra-guy/internal/application/state"
 	"infra-guy/internal/application/installation"
+	stateapp "infra-guy/internal/application/state"
 	"infra-guy/internal/domain/project"
 )
+
+type ProjectMatcher interface {
+	SyncAndFindByRepo(ctx context.Context, tenantID string, repoID int64, ownerLogin, repoName string) ([]*project.Project, error)
+}
 
 type WebhookOption func(*api)
 
@@ -23,12 +28,12 @@ func WithWebhook(installations *installation.Service, secret string) WebhookOpti
 type api struct {
 	states        *stateapp.Service
 	open          opener
-	projects      project.Repository
+	projects      ProjectMatcher
 	installations *installation.Service
 	webhookSecret string
 }
 
-func New(states *stateapp.Service, open opener, projects project.Repository, opts ...WebhookOption) *http.ServeMux {
+func New(states *stateapp.Service, open opener, projects ProjectMatcher, opts ...WebhookOption) *http.ServeMux {
 	a := &api{states: states, open: open, projects: projects}
 	for _, opt := range opts {
 		opt(a)

@@ -167,3 +167,16 @@ func (p *Project) ReleaseActiveRun(runID string) error {
 	p.s.ActiveRunID = ""
 	return nil
 }
+
+func (p *Project) RenameRepo(owner, name string, now time.Time) error {
+	owner = strings.TrimSpace(owner)
+	name = strings.TrimSpace(name)
+	if owner == "" || name == "" {
+		return errors.New("repo owner and name required")
+	}
+	p.s.Repo.Owner = owner
+	p.s.Repo.Name = name
+	p.s.UpdatedAt = now
+	return nil
+}
+

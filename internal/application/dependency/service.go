@@ -32,10 +32,19 @@ type CommitLookup interface {
 	Lookup(ctx context.Context, repo project.SourceRepo, token, sha string) (message, author string, err error)
 }
 
+type ProjectGetter interface {
+	Get(ctx context.Context, id project.ID) (*project.Project, error)
+}
+
+type StateReader interface {
+	Outputs(ctx context.Context, projectID string) (map[string]state.OutputValue, error)
+	ChangedOutputsSincePrevious(ctx context.Context, projectID string) (map[string]bool, error)
+}
+
 type Service struct {
 	Dependencies dependency.Repository
-	Projects     project.Repository
-	States       state.Repository
+	Projects     ProjectGetter
+	States       StateReader
 	Runs         RunOpener
 	Tokens       TokenSource
 	Checkout     Brancher
@@ -178,12 +187,10 @@ func (s *Service) ResolveForProject(ctx context.Context, projectID project.ID) (
 		}
 		var outputs map[string]state.OutputValue
 		if s.States != nil {
-			st, err := s.States.Load(ctx, string(ds.DependsOnProjectID))
+			var err error
+			outputs, err = s.States.Outputs(ctx, string(ds.DependsOnProjectID))
 			if err != nil {
 				return nil, nil, err
-			}
-			if st != nil {
-				outputs = st.Snapshot().Outputs()
 			}
 		}
 		for _, m := range ds.Mappings {
@@ -223,9 +230,7 @@ func (s *Service) TriggerDownstreamRuns(ctx context.Context, upstreamProj *proje
 
 	var changed map[string]bool
 	if s.States != nil {
-		if st, err := s.States.Load(ctx, string(ps.ID)); err == nil && st != nil {
-			changed = st.Snapshot().ChangedOutputsSincePrevious()
-		}
+		changed, _ = s.States.ChangedOutputsSincePrevious(ctx, string(ps.ID))
 	}
 
 	deps, err := s.Dependencies.ListDownstream(ctx, ps.ID)

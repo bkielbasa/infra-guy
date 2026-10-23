@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	projectapp "infra-guy/internal/application/project"
 	stateapp "infra-guy/internal/application/state"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/state"
@@ -67,7 +68,7 @@ func (m *memStates) Load(_ context.Context, projectID string) (*state.State, err
 	if st, ok := m.items[projectID]; ok {
 		return state.Restore(st.Snapshot()), nil
 	}
-	return state.New(projectID), nil
+	return nil, nil
 }
 func (m *memStates) Save(_ context.Context, s *state.State) error {
 	m.items[s.Snapshot().ProjectID] = state.Restore(s.Snapshot())
@@ -94,7 +95,8 @@ func testProject(t *testing.T) *project.Project {
 func stateMux(t *testing.T, projects *memProjects, states *memStates) http.Handler {
 	t.Helper()
 	svc := &stateapp.Service{Projects: projects, States: states, Now: time.Now}
-	return New(svc, nil, projects)
+	projSvc := &projectapp.Service{Projects: projects, States: svc, Now: time.Now}
+	return New(svc, nil, projSvc)
 }
 
 func doState(t *testing.T, h http.Handler, method, path, user, pass string, body []byte) *httptest.ResponseRecorder {

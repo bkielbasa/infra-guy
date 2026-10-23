@@ -168,11 +168,14 @@ func main() {
 		wsCache = s3Cache
 	}
 
+	stateSvc := &stateapp.Service{Projects: projects, States: states, Now: now}
+	projectSvc := &projectapp.Service{Projects: projects, States: stateSvc, Now: now, NewID: newID}
+
 	dependencyRepo := postgres.NewDependencyRepo(pool)
 	dependencySvc := &dependencyapp.Service{
 		Dependencies: dependencyRepo,
-		Projects:     projects,
-		States:       states,
+		Projects:     projectSvc,
+		States:       stateSvc,
 		Tokens:       tokenSource,
 		Checkout:     git.Checkout{},
 		Lookup:       git.CommitLookup{},
@@ -202,7 +205,7 @@ func main() {
 	dependencySvc.Runs = runSvc
 	w := &worker.Worker{
 		WorkerID: workerID(), Queue: queue,
-		Projects: projects, Runs: runs, Service: runSvc,
+		Projects: projectSvc, Service: runSvc,
 		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{Binary: tfInstaller}},
 		Tokens:          tokenSource,
 		Contexts:        contextSvc,
@@ -249,9 +252,9 @@ func main() {
 	}()
 
 	h := httpapi.NewServer(httpapi.ServerConfig{
-		Projects:      &projectapp.Service{Projects: projects, Now: now, NewID: newID},
+		Projects:      projectSvc,
 		Runs:          runSvc,
-		States:        &stateapp.Service{Projects: projects, States: states, Now: now},
+		States:        stateSvc,
 		Contexts:      contextSvc,
 		Policies:      policySvc,
 		Dependencies:  dependencySvc,

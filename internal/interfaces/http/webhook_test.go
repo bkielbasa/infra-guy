@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"infra-guy/internal/application/installation"
+	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
@@ -305,7 +306,8 @@ func TestGitHubWebhook(t *testing.T) {
 	_ = projects.Save(ctx, p4)
 
 	open := &fakeOpen{}
-	h := New(nil, open, projects, WithWebhook(instSvc, secret))
+	projSvc := &projectapp.Service{Projects: projects, Now: time.Now}
+	h := New(nil, open, projSvc, WithWebhook(instSvc, secret))
 
 	pushPayload := []byte(`{
 		"ref":"refs/heads/main",
