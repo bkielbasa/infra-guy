@@ -479,16 +479,22 @@ func TestIdentityStore(t *testing.T) {
 	n := time.Now().UnixNano()
 	suffix := fmt.Sprintf("%d", n)
 
-	u, err := store.UpsertUser(ctx, user.User{ID: "usr-" + suffix, GitHubUserID: n, Login: "ada"}, user.GitHubIdentity("usr-"+suffix, n), now)
+	u, err := store.UpsertUser(ctx, user.User{ID: "usr-" + suffix, Login: "ada"}, user.GitHubIdentity("usr-"+suffix, n), now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := store.UpsertUser(ctx, user.User{ID: "usr-other-" + suffix, GitHubUserID: n, Login: "ada2", DisplayName: "Ada"}, user.GitHubIdentity("usr-other-"+suffix, n), now)
+	again, err := store.UpsertUser(ctx, user.User{ID: "usr-other-" + suffix, Login: "ada2", DisplayName: "Ada"}, user.GitHubIdentity("usr-other-"+suffix, n), now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if again.ID != u.ID || again.Login != "ada2" || again.DisplayName != "Ada" {
 		t.Fatalf("user upsert: %#v then %#v", u, again)
+	}
+	if has, err := store.HasIdentity(ctx, u.ID, "github", "https://github.com", fmt.Sprintf("%d", n)); err != nil || !has {
+		t.Fatalf("HasIdentity true: has=%v err=%v", has, err)
+	}
+	if has, err := store.HasIdentity(ctx, u.ID, "github", "https://github.com", "wrong"); err != nil || has {
+		t.Fatalf("HasIdentity false: has=%v err=%v", has, err)
 	}
 
 	ten, err := store.UpsertTenant(ctx, tenant.Tenant{ID: "ten-" + suffix, Name: "acme", AccountType: "organization", GitHubAccountID: n}, now)
@@ -522,22 +528,44 @@ func TestIdentityStore(t *testing.T) {
 	if listed, err := store.ListActiveInstallations(ctx); err != nil || !containsInstallation(listed, n+1) || containsInstallation(listed, n) {
 		t.Fatalf("list active: %v %#v", err, listed)
 	}
+
+	if err := store.UpsertMembership(ctx, tenant.Membership{TenantID: ten.ID, UserID: u.ID, Role: "member"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMembership(ctx, tenant.Membership{TenantID: ten.ID, UserID: u.ID, Role: "admin"}, now); err != nil {
+		t.Fatal(err)
+	}
+	mem, err := store.GetMembership(ctx, ten.ID, u.ID)
+	if err != nil || mem == nil || mem.Role != "admin" || mem.TenantName != "acme" {
+		t.Fatalf("GetMembership: %v %#v", err, mem)
+	}
+	mems, err := store.ListUserMemberships(ctx, u.ID)
+	if err != nil || len(mems) != 1 || mems[0].TenantID != ten.ID || mems[0].Role != "admin" || mems[0].TenantName != "acme" {
+		t.Fatalf("ListUserMemberships: %v %#v", err, mems)
+	}
+
 	if err := store.DeactivateInstallation(ctx, n+1, now); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := store.ActiveInstallation(ctx, ten.ID); err != nil || got != nil {
 		t.Fatalf("after deactivate: %v %#v", err, got)
 	}
+	if got, err := store.GetMembership(ctx, ten.ID, u.ID); err != nil || got != nil {
+		t.Fatalf("GetMembership after deactivate: %v %#v", err, got)
+	}
+	if err := store.DeleteMembership(ctx, ten.ID, u.ID); err != nil {
+		t.Fatal(err)
+	}
 	if got, err := store.InstallationByGitHubID(ctx, n+99); err != nil || got != nil {
 		t.Fatalf("missing installation: %v %#v", err, got)
 	}
 
-	sess := Session{ID: "sess-" + suffix, UserID: u.ID, Login: "ada2", AccessToken: "tok", ExpiresAt: now.Add(time.Hour)}
+	sess := Session{ID: "sess-" + suffix, UserID: u.ID, Login: "ada2", ExpiresAt: now.Add(time.Hour)}
 	if err := store.SaveSession(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.GetSession(ctx, sess.ID)
-	if err != nil || got == nil || got.TenantID != "" || got.AccessToken != "tok" || !got.ExpiresAt.Equal(sess.ExpiresAt) {
+	if err != nil || got == nil || got.TenantID != "" || !got.ExpiresAt.Equal(sess.ExpiresAt) {
 		t.Fatalf("session: %v %#v", err, got)
 	}
 	sess.TenantID, sess.Role = ten.ID, "admin"

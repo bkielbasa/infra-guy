@@ -20,6 +20,13 @@ type Installation struct {
 	Active               bool
 }
 
+type Membership struct {
+	TenantID   string
+	TenantName string
+	UserID     string
+	Role       string
+}
+
 func ParseAccountType(githubType string) (string, error) {
 	switch githubType {
 	case "User":

@@ -8,11 +8,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"infra-guy/internal/domain/access"
 	"infra-guy/internal/domain/tenant"
 	"infra-guy/internal/domain/user"
+)
+
+const (
+	DefaultSessionTTL     = 7 * 24 * time.Hour
+	DefaultRenewThreshold = time.Hour
 )
 
 // Session is the server-side sign-in record. TenantID stays empty until one
@@ -22,10 +28,15 @@ type Session = user.Session
 // Store is the identity store already persisted in Postgres.
 type Store interface {
 	UpsertUser(ctx context.Context, u user.User, ident user.Identity, now time.Time) (user.User, error)
+	HasIdentity(ctx context.Context, userID, provider, issuer, subject string) (bool, error)
 	UpsertTenant(ctx context.Context, t tenant.Tenant, now time.Time) (tenant.Tenant, error)
 	UpsertInstallation(ctx context.Context, in tenant.Installation, now time.Time) error
 	ActiveInstallation(ctx context.Context, tenantID string) (*tenant.Installation, error)
 	ListActiveInstallations(ctx context.Context) ([]tenant.Installation, error)
+	UpsertMembership(ctx context.Context, m tenant.Membership, now time.Time) error
+	DeleteMembership(ctx context.Context, tenantID, userID string) error
+	GetMembership(ctx context.Context, tenantID, userID string) (*tenant.Membership, error)
+	ListUserMemberships(ctx context.Context, userID string) ([]tenant.Membership, error)
 	SaveSession(ctx context.Context, sess Session) error
 	GetSession(ctx context.Context, id string) (*Session, error)
 	SaveOAuthState(ctx context.Context, state string, expiresAt time.Time) error
@@ -42,12 +53,14 @@ type Client interface {
 }
 
 type Service struct {
-	Store         Store
-	GitHub        Client
-	Now           func() time.Time
-	NewID         func() string
-	PublicBaseURL string
-	ClientID      string
+	Store          Store
+	GitHub         Client
+	Now            func() time.Time
+	NewID          func() string
+	PublicBaseURL  string
+	ClientID       string
+	SessionTTL     time.Duration
+	RenewThreshold time.Duration
 }
 
 // TenantChoice is one installation the signed-in user may enter.
@@ -61,7 +74,8 @@ var (
 	errOAuthState = errors.New("invalid oauth state")
 	errNoSession  = errors.New("session not found")
 	errExpired    = errors.New("session expired")
-	errDenied     = errors.New("tenant access denied")
+	ErrDenied     = errors.New("tenant access denied")
+	errDenied     = ErrDenied
 )
 
 // Start stores a 32-byte hex state for ten minutes and returns the GitHub
@@ -80,8 +94,9 @@ func (s *Service) Start(ctx context.Context) (redirectURL, state string, err err
 	), state, nil
 }
 
-// Complete exchanges the code, records the user, and opens the only allowed
-// tenant. Zero or several allowed tenants leave TenantID empty.
+// Complete exchanges the code, records the user, syncs tenant memberships from
+// GitHub, and opens the only allowed tenant. Zero or several allowed tenants
+// leave TenantID empty.
 func (s *Service) Complete(ctx context.Context, state, code string, now time.Time) (sessionID string, tenantCount int, err error) {
 	expiresAt, ok, err := s.Store.ConsumeOAuthState(ctx, state)
 	if err != nil {
@@ -107,12 +122,15 @@ func (s *Service) Complete(ctx context.Context, state, code string, now time.Tim
 		return "", 0, fmt.Errorf("github identity")
 	}
 	stored, err := s.Store.UpsertUser(ctx, user.User{
-		ID: candidateID, GitHubUserID: ghID, Login: login, DisplayName: name,
+		ID: candidateID, Login: login, DisplayName: name,
 	}, ident, now)
 	if err != nil {
 		return "", 0, err
 	}
-	allowed, err := s.admissions(ctx, token, ghID)
+	if err := s.syncGitHubMemberships(ctx, stored.ID, token, ghID, now); err != nil {
+		return "", 0, err
+	}
+	memberships, err := s.Store.ListUserMemberships(ctx, stored.ID)
 	if err != nil {
 		return "", 0, err
 	}
@@ -121,43 +139,37 @@ func (s *Service) Complete(ctx context.Context, state, code string, now time.Tim
 		return "", 0, err
 	}
 	sess := Session{
-		ID: sessionID, UserID: stored.ID, Login: login, AccessToken: token,
-		ExpiresAt: now.Add(time.Hour),
+		ID:        sessionID,
+		UserID:    stored.ID,
+		Login:     login,
+		ExpiresAt: now.Add(s.sessionTTL()),
 	}
-	if len(allowed) == 1 {
-		sess.TenantID = allowed[0].ID
-		sess.Role = allowed[0].Role
+	if len(memberships) == 1 {
+		sess.TenantID = memberships[0].TenantID
+		sess.Role = memberships[0].Role
 	}
 	if err := s.Store.SaveSession(ctx, sess); err != nil {
 		return "", 0, err
 	}
-	return sessionID, len(allowed), nil
+	return sessionID, len(memberships), nil
 }
 
-// Select rechecks one tenant with the stored user token and records the role.
-// It does not move ExpiresAt.
+// Select checks the stored membership for one tenant and records the role on
+// the session. It does not move ExpiresAt.
 func (s *Service) Select(ctx context.Context, sessionID, tenantID string, now time.Time) error {
 	sess, err := s.open(ctx, sessionID, now)
 	if err != nil {
 		return err
 	}
-	in, err := s.Store.ActiveInstallation(ctx, tenantID)
+	m, err := s.Store.GetMembership(ctx, tenantID, sess.UserID)
 	if err != nil {
 		return err
 	}
-	if in == nil {
-		return errDenied
-	}
-	ghID, _, _, err := s.GitHub.CurrentUser(ctx, sess.AccessToken)
-	if err != nil {
-		return err
-	}
-	role, ok := s.decide(ctx, sess.AccessToken, ghID, *in)
-	if !ok {
-		return errDenied
+	if m == nil {
+		return ErrDenied
 	}
 	sess.TenantID = tenantID
-	sess.Role = role
+	sess.Role = m.Role
 	return s.Store.SaveSession(ctx, *sess)
 }
 
@@ -188,6 +200,27 @@ func (s *Service) EnterInstallation(ctx context.Context, sessionID string, insta
 		return "", err
 	}
 	if sessionID != "" {
+		sess, err := s.open(ctx, sessionID, now)
+		if err != nil {
+			return "", err
+		}
+		m, err := s.Store.GetMembership(ctx, ten.ID, sess.UserID)
+		if err != nil {
+			return "", err
+		}
+		if m == nil && accountType == "user" {
+			owns, err := s.Store.HasIdentity(ctx, sess.UserID, "github", "https://github.com", strconv.FormatInt(accountID, 10))
+			if err != nil {
+				return "", err
+			}
+			if owns {
+				if err := s.Store.UpsertMembership(ctx, tenant.Membership{
+					TenantID: ten.ID, UserID: sess.UserID, Role: "admin",
+				}, now); err != nil {
+					return "", err
+				}
+			}
+		}
 		if err := s.Select(ctx, sessionID, ten.ID, now); err != nil {
 			return "", err
 		}
@@ -195,17 +228,43 @@ func (s *Service) EnterInstallation(ctx context.Context, sessionID string, insta
 	return ten.ID, nil
 }
 
-// Allowed lists installations the session user can enter.
+// Allowed lists installations the session user can enter from stored memberships.
 func (s *Service) Allowed(ctx context.Context, sessionID string, now time.Time) ([]TenantChoice, error) {
 	sess, err := s.open(ctx, sessionID, now)
 	if err != nil {
 		return nil, err
 	}
-	ghID, _, _, err := s.GitHub.CurrentUser(ctx, sess.AccessToken)
+	memberships, err := s.Store.ListUserMemberships(ctx, sess.UserID)
 	if err != nil {
 		return nil, err
 	}
-	return s.admissions(ctx, sess.AccessToken, ghID)
+	var out []TenantChoice
+	for _, m := range memberships {
+		out = append(out, TenantChoice{ID: m.TenantID, Name: m.TenantName, Role: m.Role})
+	}
+	return out, nil
+}
+
+// Authenticate loads a session, returning nil when missing or expired. When at
+// least RenewThreshold of the session's TTL has elapsed, it slides ExpiresAt
+// forward by SessionTTL, persists the session, and reports renewed=true.
+func (s *Service) Authenticate(ctx context.Context, sessionID string, now time.Time) (sess *Session, renewed bool, err error) {
+	sess, err = s.Store.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, false, err
+	}
+	if sess == nil || sess.ExpiresAt.Before(now) {
+		return nil, false, nil
+	}
+	ttl := s.sessionTTL()
+	if sess.ExpiresAt.Sub(now) <= ttl-s.renewThreshold() {
+		sess.ExpiresAt = now.Add(ttl)
+		if err := s.Store.SaveSession(ctx, *sess); err != nil {
+			return nil, false, err
+		}
+		return sess, true, nil
+	}
+	return sess, false, nil
 }
 
 // InstallURL is the GitHub App installation page for this server's app slug.
@@ -236,25 +295,32 @@ func (s *Service) open(ctx context.Context, sessionID string, now time.Time) (*S
 	return sess, nil
 }
 
-func (s *Service) admissions(ctx context.Context, token string, ghUserID int64) ([]TenantChoice, error) {
+func (s *Service) syncGitHubMemberships(ctx context.Context, userID, token string, ghUserID int64, now time.Time) error {
 	installs, err := s.Store.ListActiveInstallations(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var out []TenantChoice
 	for _, in := range installs {
 		if !in.Active {
 			continue
 		}
-		role, ok := s.decide(ctx, token, ghUserID, in)
+		role, ok, failed := s.decide(ctx, token, ghUserID, in)
 		if ok {
-			out = append(out, TenantChoice{ID: in.TenantID, Name: in.AccountLogin, Role: role})
+			if err := s.Store.UpsertMembership(ctx, tenant.Membership{
+				TenantID: in.TenantID, UserID: userID, Role: role,
+			}, now); err != nil {
+				return err
+			}
+		} else if !failed {
+			if err := s.Store.DeleteMembership(ctx, in.TenantID, userID); err != nil {
+				return err
+			}
 		}
 	}
-	return out, nil
+	return nil
 }
 
-func (s *Service) decide(ctx context.Context, token string, ghUserID int64, in tenant.Installation) (string, bool) {
+func (s *Service) decide(ctx context.Context, token string, ghUserID int64, in tenant.Installation) (role string, ok, failed bool) {
 	var fact access.Fact
 	switch in.AccountType {
 	case "user":
@@ -274,10 +340,24 @@ func (s *Service) decide(ctx context.Context, token string, ghUserID int64, in t
 			fact.OrgRole = role
 		}
 	default:
-		return "", false
+		return "", false, false
 	}
-	role, ok := access.Decide(fact)
-	return string(role), ok
+	r, allowed := access.Decide(fact)
+	return string(r), allowed, fact.Failed
+}
+
+func (s *Service) sessionTTL() time.Duration {
+	if s.SessionTTL > 0 {
+		return s.SessionTTL
+	}
+	return DefaultSessionTTL
+}
+
+func (s *Service) renewThreshold() time.Duration {
+	if s.RenewThreshold > 0 {
+		return s.RenewThreshold
+	}
+	return DefaultRenewThreshold
 }
 
 func (s *Service) now() time.Time {

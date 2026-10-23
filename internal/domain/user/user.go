@@ -6,10 +6,9 @@ import (
 )
 
 type User struct {
-	ID           string
-	GitHubUserID int64
-	Login        string
-	DisplayName  string
+	ID          string
+	Login       string
+	DisplayName string
 }
 
 type Identity struct {
@@ -27,11 +26,10 @@ func GitHubIdentity(userID string, githubUserID int64) Identity {
 }
 
 type Session struct {
-	ID          string
-	UserID      string
-	TenantID    string
-	Role        string
-	Login       string
-	AccessToken string
-	ExpiresAt   time.Time
+	ID        string
+	UserID    string
+	TenantID  string
+	Role      string
+	Login     string
+	ExpiresAt time.Time
 }

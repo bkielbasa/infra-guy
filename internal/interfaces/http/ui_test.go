@@ -602,6 +602,8 @@ func TestHomeWithoutTenant(t *testing.T) {
 		{ID: "i1", TenantID: "ten-1", AccountLogin: "acme", AccountType: "organization", GitHubInstallationID: 9, Active: true},
 		{ID: "i2", TenantID: "ten-2", AccountLogin: "other", AccountType: "organization", GitHubInstallationID: 10, Active: true},
 	}
+	_ = store.UpsertMembership(context.Background(), tenant.Membership{TenantID: "ten-1", UserID: "user-1", Role: "admin"}, time.Now())
+	_ = store.UpsertMembership(context.Background(), tenant.Membership{TenantID: "ten-2", UserID: "user-1", Role: "admin"}, time.Now())
 	rr = getUI(t, h, "/")
 	body = rr.Body.String()
 	if rr.Code != http.StatusOK || !strings.Contains(body, "acme") || !strings.Contains(body, "other") || strings.Contains(body, "Install GitHub App") {
@@ -756,41 +758,104 @@ func uiWithAuth(t *testing.T, projects *memProjects, store *uiIdentity, gh *uiGi
 
 type uiIdentity struct {
 	users         []user.User
+	identities    map[string]user.Identity
 	tenants       []tenant.Tenant
 	installations []tenant.Installation
+	memberships   map[string]tenant.Membership
 	sessions      map[string]authapp.Session
 	states        map[string]time.Time
 }
 
 func newUIIdentity(login, tenantID string) *uiIdentity {
 	var installs []tenant.Installation
+	memberships := map[string]tenant.Membership{}
 	if tenantID != "" {
 		installs = append(installs, tenant.Installation{
 			ID: "inst-" + tenantID, TenantID: tenantID, AccountLogin: login, AccountType: "user", GitHubInstallationID: 100, Active: true,
 		})
+		memberships[tenantID+":user-1"] = tenant.Membership{
+			TenantID: tenantID, TenantName: login, UserID: "user-1", Role: "admin",
+		}
 	}
 	return &uiIdentity{
+		identities: map[string]user.Identity{
+			"github:https://github.com:4": user.GitHubIdentity("user-1", 4),
+		},
+		memberships: memberships,
 		sessions: map[string]authapp.Session{
 			uiSessionID: {
 				ID: uiSessionID, UserID: "user-1", TenantID: tenantID, Role: "admin",
-				Login: login, AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour),
+				Login: login, ExpiresAt: time.Now().Add(time.Hour),
 			},
 		},
 		installations: installs,
 	}
 }
 
-func (m *uiIdentity) UpsertUser(_ context.Context, u user.User, _ user.Identity, _ time.Time) (user.User, error) {
-	for i, existing := range m.users {
-		if existing.GitHubUserID == u.GitHubUserID {
-			existing.Login = u.Login
-			existing.DisplayName = u.DisplayName
-			m.users[i] = existing
-			return existing, nil
+func (m *uiIdentity) UpsertUser(_ context.Context, u user.User, ident user.Identity, _ time.Time) (user.User, error) {
+	if m.identities == nil {
+		m.identities = map[string]user.Identity{}
+	}
+	key := ident.Provider + ":" + ident.Issuer + ":" + ident.Subject
+	if existingIdent, ok := m.identities[key]; ok {
+		for i, existing := range m.users {
+			if existing.ID == existingIdent.UserID {
+				existing.Login = u.Login
+				existing.DisplayName = u.DisplayName
+				m.users[i] = existing
+				return existing, nil
+			}
 		}
 	}
 	m.users = append(m.users, u)
+	ident.UserID = u.ID
+	m.identities[key] = ident
 	return u, nil
+}
+
+func (m *uiIdentity) HasIdentity(_ context.Context, userID, provider, issuer, subject string) (bool, error) {
+	ident, ok := m.identities[provider+":"+issuer+":"+subject]
+	return ok && ident.UserID == userID, nil
+}
+
+func (m *uiIdentity) UpsertMembership(_ context.Context, mem tenant.Membership, _ time.Time) error {
+	if m.memberships == nil {
+		m.memberships = map[string]tenant.Membership{}
+	}
+	m.memberships[mem.TenantID+":"+mem.UserID] = mem
+	return nil
+}
+
+func (m *uiIdentity) DeleteMembership(_ context.Context, tenantID, userID string) error {
+	delete(m.memberships, tenantID+":"+userID)
+	return nil
+}
+
+func (m *uiIdentity) GetMembership(ctx context.Context, tenantID, userID string) (*tenant.Membership, error) {
+	mem, ok := m.memberships[tenantID+":"+userID]
+	if !ok {
+		return nil, nil
+	}
+	in, err := m.ActiveInstallation(ctx, tenantID)
+	if err != nil || in == nil {
+		return nil, err
+	}
+	mem.TenantName = in.AccountLogin
+	return &mem, nil
+}
+
+func (m *uiIdentity) ListUserMemberships(_ context.Context, userID string) ([]tenant.Membership, error) {
+	var out []tenant.Membership
+	for _, in := range m.installations {
+		if !in.Active {
+			continue
+		}
+		if mem, ok := m.memberships[in.TenantID+":"+userID]; ok {
+			mem.TenantName = in.AccountLogin
+			out = append(out, mem)
+		}
+	}
+	return out, nil
 }
 
 func (m *uiIdentity) UpsertTenant(_ context.Context, ten tenant.Tenant, _ time.Time) (tenant.Tenant, error) {
