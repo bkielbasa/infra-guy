@@ -156,3 +156,30 @@ func TestOutputsChangedAndForceUnlock(t *testing.T) {
 	}
 }
 
+func TestMetadataAndImport(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(200, 0).UTC()
+	states := &memStates{items: map[string]*state.State{}}
+	svc := &Service{States: states, Now: func() time.Time { return now }}
+
+	meta, err := svc.Metadata(ctx, "p1")
+	if err != nil || meta.Exists {
+		t.Fatalf("expected empty metadata, got %+v, err=%v", meta, err)
+	}
+
+	if err := svc.Import(ctx, "p1", []byte("not-json")); err != state.ErrInvalidState {
+		t.Fatalf("expected ErrInvalidState, got %v", err)
+	}
+
+	raw := []byte(`{"version":4,"serial":12,"outputs":{"out1":{"value":"val1"}}}`)
+	if err := svc.Import(ctx, "p1", raw); err != nil {
+		t.Fatalf("Import failed: %v", err)
+	}
+
+	meta, err = svc.Metadata(ctx, "p1")
+	if err != nil || !meta.Exists || meta.Serial == nil || *meta.Serial != 12 || meta.Size != len(raw) || !meta.UpdatedAt.Equal(now) {
+		t.Fatalf("unexpected metadata after import: %+v, err=%v", meta, err)
+	}
+}
+
+

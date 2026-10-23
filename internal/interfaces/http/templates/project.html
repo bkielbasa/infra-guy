@@ -20,7 +20,7 @@
   <nav class="tabs">
     <a href="/projects/{{.ID}}" hx-get="/projects/{{.ID}}/tabs/tracked" hx-target="#tab-panel" hx-swap="outerHTML">Tracked runs</a>
     <a href="/projects/{{.ID}}/tabs/pulls" hx-get="/projects/{{.ID}}/tabs/pulls" hx-target="#tab-panel" hx-swap="outerHTML">Pull requests</a>
-    <a href="/projects/{{.ID}}/tabs/state" hx-get="/projects/{{.ID}}/tabs/state" hx-target="#tab-panel" hx-swap="outerHTML">State history</a>
+    <a href="/projects/{{.ID}}/tabs/state" hx-get="/projects/{{.ID}}/tabs/state" hx-target="#tab-panel" hx-swap="outerHTML">State</a>
     <a href="/projects/{{.ID}}/tabs/dependencies" hx-get="/projects/{{.ID}}/tabs/dependencies" hx-target="#tab-panel" hx-swap="outerHTML">Dependencies</a>
   </nav>
   {{.Panel}}

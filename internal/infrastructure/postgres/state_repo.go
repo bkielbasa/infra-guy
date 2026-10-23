@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -21,10 +22,11 @@ func (r *StateRepo) Load(ctx context.Context, projectID string) (*state.State, e
 	var s state.Snapshot
 	var updated *time.Time
 	var lockID *string
+	var rawChanged []byte
 	err := r.pool.QueryRow(ctx, `
-		SELECT data, lock_id, lock_info, serial, updated_at
+		SELECT data, lock_id, lock_info, serial, updated_at, changed_outputs
 		FROM states WHERE project_id = $1`, projectID,
-	).Scan(&s.Data, &lockID, &s.LockInfo, &s.Serial, &updated)
+	).Scan(&s.Data, &lockID, &s.LockInfo, &s.Serial, &updated, &rawChanged)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -38,16 +40,25 @@ func (r *StateRepo) Load(ctx context.Context, projectID string) (*state.State, e
 	if updated != nil {
 		s.UpdatedAt = utcTime(*updated)
 	}
-	history, err := r.loadHistory(ctx, projectID)
-	if err != nil {
-		return nil, err
+	if len(rawChanged) > 0 {
+		var changed map[string]bool
+		if err := json.Unmarshal(rawChanged, &changed); err == nil {
+			s.ChangedOutputs = changed
+		}
 	}
-	s.History = history
 	return state.Restore(s), nil
 }
 
 func (r *StateRepo) Save(ctx context.Context, st *state.State) error {
 	s := st.Snapshot()
+	changedJSON := []byte("{}")
+	if len(s.ChangedOutputs) > 0 {
+		b, err := json.Marshal(s.ChangedOutputs)
+		if err != nil {
+			return err
+		}
+		changedJSON = b
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -62,45 +73,11 @@ func (r *StateRepo) Save(ctx context.Context, st *state.State) error {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE states SET data = $2, lock_id = $3, lock_info = $4, serial = $5, updated_at = $6
+		UPDATE states SET data = $2, lock_id = $3, lock_info = $4, serial = $5, updated_at = $6, changed_outputs = $7
 		WHERE project_id = $1`,
-		s.ProjectID, s.Data, s.LockID, s.LockInfo, s.Serial, s.UpdatedAt,
+		s.ProjectID, s.Data, s.LockID, s.LockInfo, s.Serial, s.UpdatedAt, changedJSON,
 	); err != nil {
 		return err
 	}
-	for _, h := range st.NewHistory() {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO state_history (project_id, run_id, serial, data, created_at)
-			VALUES ($1,$2,$3,$4,$5)`,
-			s.ProjectID, h.RunID, h.Serial, h.Data, h.CreatedAt,
-		); err != nil {
-			return err
-		}
-	}
 	return tx.Commit(ctx)
-}
-
-func (r *StateRepo) loadHistory(ctx context.Context, projectID string) ([]state.HistoryEntry, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT run_id, serial, data, created_at
-		FROM state_history WHERE project_id = $1 ORDER BY id`, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var history []state.HistoryEntry
-	for rows.Next() {
-		var h state.HistoryEntry
-		var created time.Time
-		var runID *string
-		if err := rows.Scan(&runID, &h.Serial, &h.Data, &created); err != nil {
-			return nil, err
-		}
-		if runID != nil {
-			h.RunID = *runID
-		}
-		h.CreatedAt = utcTime(created)
-		history = append(history, h)
-	}
-	return history, rows.Err()
 }

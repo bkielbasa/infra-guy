@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2179,6 +2181,82 @@ func TestGitHubSetupRedirectsToLoginWhenOrgMembershipUnsynced(t *testing.T) {
 		t.Fatalf("expected active installation 99 upserted, got %+v", store.installations)
 	}
 }
+
+func postMultipartState(t *testing.T, h http.Handler, path, filename string, content []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("state_file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.AddCookie(&http.Cookie{Name: "session", Value: uiSessionID})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestStateTabAndImport(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+	h := uiHandler(t, projects, runs, states, "")
+
+	// 1. Empty state tab renders "No stored state." and import form
+	rr := getUI(t, h, "/projects/p1/tabs/state")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "No stored state.") || !strings.Contains(rr.Body.String(), `/projects/p1/state/import`) {
+		t.Fatalf("empty state tab: %d %s", rr.Code, rr.Body.String())
+	}
+
+	// 2. Invalid JSON returns 400
+	rr = postMultipartState(t, h, "/projects/p1/state/import", "terraform.tfstate", []byte("not-json"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid json import = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+
+	// 3. Valid state JSON imports and redirects to /projects/p1/tabs/state
+	tfstate := []byte(`{"version":4,"serial":42,"outputs":{"secret_key":{"value":"top-secret-value","sensitive":true}}}`)
+	rr = postMultipartState(t, h, "/projects/p1/state/import", "terraform.tfstate", tfstate)
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/projects/p1/tabs/state" {
+		t.Fatalf("valid import = %d (loc=%q), want 303: %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+
+	// 4. State tab shows metadata (Serial 42, Size) and does NOT leak raw state JSON / secret values
+	rr = getUI(t, h, "/projects/p1/tabs/state")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || !strings.Contains(body, "42") || !strings.Contains(body, fmt.Sprintf("%d B", len(tfstate))) {
+		t.Fatalf("state tab after import: %d %s", rr.Code, body)
+	}
+	if strings.Contains(body, "top-secret-value") {
+		t.Fatalf("state tab leaked raw state JSON: %s", body)
+	}
+
+	// 5. Importing while a run is active returns 409 Conflict
+	runs.items["r-active"] = run.Restore(needsApprovalSnap("r-active"))
+	rr = postMultipartState(t, h, "/projects/p1/state/import", "terraform.tfstate", tfstate)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("import during active run = %d, want 409", rr.Code)
+	}
+	delete(runs.items, "r-active")
+
+	// 6. Importing while state is locked returns 409 Conflict
+	st, _ := states.Load(context.Background(), "p1")
+	_, _ = st.Lock([]byte(`{"ID":"lock-1"}`))
+	_ = states.Save(context.Background(), st)
+	rr = postMultipartState(t, h, "/projects/p1/state/import", "terraform.tfstate", tfstate)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("import while state locked = %d, want 409", rr.Code)
+	}
+}
+
 
 
 

@@ -145,8 +145,8 @@ func TestStateHTTP(t *testing.T) {
 		t.Fatalf("put %d %s", rr.Code, rr.Body.Bytes())
 	}
 	st, _ := states.Load(context.Background(), "p1")
-	if hist := st.Snapshot().History; len(hist) != 1 || hist[0].RunID != "" {
-		t.Fatalf("runID %#v", st.Snapshot().History)
+	if st.Snapshot().Serial == nil || *st.Snapshot().Serial != 3 {
+		t.Fatalf("serial %#v", st.Snapshot())
 	}
 
 	rr = doState(t, h, http.MethodGet, "/api/projects/p1/state", "terraform", "tok", nil)
@@ -185,8 +185,8 @@ func TestStateHTTP(t *testing.T) {
 		t.Fatalf("put with run %d", rr.Code)
 	}
 	st, _ = states.Load(context.Background(), "p1")
-	if hist := st.Snapshot().History; len(hist) != 3 || hist[2].RunID != "run-9" {
-		t.Fatalf("run query not recorded %#v", hist)
+	if st.Snapshot().Serial == nil || *st.Snapshot().Serial != 5 {
+		t.Fatalf("serial not recorded %#v", st.Snapshot())
 	}
 
 	rr = doState(t, h, "UNLOCK", "/api/projects/p1/state/lock", "terraform", "tok", []byte(`{"ID":"L1"}`))

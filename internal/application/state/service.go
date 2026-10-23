@@ -56,15 +56,26 @@ func conflict(err error, lockJSON []byte) (Outcome, bool) {
 	return Outcome{}, false
 }
 
-func (s *Service) History(ctx context.Context, projectID string) ([]state.HistoryEntry, error) {
+func (s *Service) Metadata(ctx context.Context, projectID string) (state.Metadata, error) {
 	st, err := s.States.Load(ctx, projectID)
 	if err != nil {
-		return nil, err
+		return state.Metadata{}, err
 	}
 	if st == nil {
-		return nil, nil
+		return state.Metadata{}, nil
 	}
-	return st.Snapshot().History, nil
+	return st.Snapshot().Metadata(), nil
+}
+
+func (s *Service) Import(ctx context.Context, projectID string, data []byte) error {
+	st, err := s.loadState(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if err := st.Import(data, s.Now()); err != nil {
+		return err
+	}
+	return s.States.Save(ctx, st)
 }
 
 func (s *Service) Outputs(ctx context.Context, projectID string) (map[string]state.OutputValue, error) {

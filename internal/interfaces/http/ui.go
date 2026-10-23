@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -63,11 +64,12 @@ type tabView struct {
 	ProjectID string
 	Poll      bool
 	Groups    []runGroup
-	Entries   []stateRow
+	State     *stateSummaryView
 }
 
-type stateRow struct {
-	Time, RunID, Serial, Size, JSON string
+type stateSummaryView struct {
+	Time, Serial, Size string
+	Locked             bool
 }
 
 type stepView struct {
@@ -113,6 +115,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /projects/{id}/tabs/tracked", u.tabTracked)
 	mux.HandleFunc("GET /projects/{id}/tabs/pulls", u.tabPulls)
 	mux.HandleFunc("GET /projects/{id}/tabs/state", u.tabState)
+	mux.HandleFunc("POST /projects/{id}/state/import", u.importState)
 	mux.HandleFunc("GET /projects/{id}/tabs/dependencies", u.tabDependencies)
 	mux.HandleFunc("POST /projects/{id}/dependencies", u.createDependency)
 	mux.HandleFunc("POST /projects/{id}/dependencies/{depID}/trigger-mode", u.updateDependencyTriggerMode)
@@ -366,12 +369,57 @@ func (u *ui) tabState(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	hist, err := u.cfg.States.History(r.Context(), string(p.Snapshot().ID))
+	ps := p.Snapshot()
+	meta, err := u.cfg.States.Metadata(r.Context(), string(ps.ID))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	u.fragment(w, "state_history", stateTab(p.Snapshot().ID, hist, anyNonTerminal(runs)))
+	u.fragment(w, "state_history", stateTab(ps.ID, meta, anyNonTerminal(runs)))
+}
+
+func (u *ui) importState(w http.ResponseWriter, r *http.Request) {
+	p, runs, err := u.loadProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if ps.Locked || anyNonTerminal(runs) {
+		http.Error(w, "cannot import state while project is locked or a run is active", http.StatusConflict)
+		return
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "invalid multipart form", http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("state_file")
+	if err != nil {
+		http.Error(w, "state_file is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 32<<20))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := u.cfg.States.Import(r.Context(), string(ps.ID), data); err != nil {
+		if errors.Is(err, state.ErrLocked) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if errors.Is(err, state.ErrInvalidState) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if r.Header.Get("HX-Request") == "true" {
+		u.tabState(w, r)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/state", http.StatusSeeOther)
 }
 
 func (u *ui) details(w http.ResponseWriter, r *http.Request) {
@@ -760,28 +808,28 @@ func (u *ui) loadRun(w http.ResponseWriter, r *http.Request) (*run.Run, *project
 func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, panel template.HTML) map[string]any {
 	tracked := filterRuns(runs, isTracked)
 	latest := latestSnapshot(tracked)
-	hist, _ := u.cfg.States.History(r.Context(), string(ps.ID))
+	meta, _ := u.cfg.States.Metadata(r.Context(), string(ps.ID))
 	return map[string]any{
 		"ID": string(ps.ID), "Name": ps.Name, "Locked": ps.Locked,
 		"LatestLabel": latestLabel(latest), "LatestClass": latestClass(latest),
-		"Meta": projectMeta(ps, latest, hist), "Empty": len(runs) == 0,
+		"Meta": projectMeta(ps, latest, meta), "Empty": len(runs) == 0,
 		"Panel": panel,
 		"Poll":  anyNonTerminal(runs),
 	}
 }
 
 func (u *ui) runView(r *http.Request, ps project.Snapshot, rs run.Snapshot, evalView *runPolicyEvalView, panel template.HTML) map[string]any {
-	hist, _ := u.cfg.States.History(r.Context(), string(ps.ID))
+	meta, _ := u.cfg.States.Metadata(r.Context(), string(ps.ID))
 	return map[string]any{
 		"ID": string(rs.ID), "ProjectID": string(ps.ID), "ProjectName": ps.Name,
 		"Title": runTitle(rs), "Status": rs.Status.Label(), "StatusClass": statusClass(rs.Status),
-		"Meta": runMeta(ps, rs, hist), "ChangesLabel": template.HTML(changesLabel(rs)), "Panel": panel,
+		"Meta": runMeta(ps, rs, meta), "ChangesLabel": template.HTML(changesLabel(rs)), "Panel": panel,
 		"Poll":       !rs.Status.Terminal(),
 		"PolicyEval": evalView,
 	}
 }
 
-func projectMeta(ps project.Snapshot, latest *run.Snapshot, hist []state.HistoryEntry) metaView {
+func projectMeta(ps project.Snapshot, latest *run.Snapshot, meta state.Metadata) metaView {
 	m := metaView{
 		TerraformVersion: ps.TerraformVersion,
 		Repo:             ps.Repo.String(),
@@ -797,19 +845,19 @@ func projectMeta(ps project.Snapshot, latest *run.Snapshot, hist []state.History
 			m.Branch = latest.Branch
 		}
 	}
-	if n := len(hist); n > 0 {
-		m.StateUpdated = fmtTime(hist[n-1].CreatedAt)
+	if meta.Exists && !meta.UpdatedAt.IsZero() {
+		m.StateUpdated = fmtTime(meta.UpdatedAt)
 	}
 	return m
 }
 
-func runMeta(ps project.Snapshot, rs run.Snapshot, hist []state.HistoryEntry) metaView {
+func runMeta(ps project.Snapshot, rs run.Snapshot, meta state.Metadata) metaView {
 	m := metaView{
 		TerraformVersion: rs.TerraformVersion, Repo: ps.Repo.String(), Workdir: ps.WorkingDirectory,
 		Branch: firstNonEmpty(rs.Branch, ps.DefaultBranch), SHA: shortSHA(rs.SHA),
 	}
-	if n := len(hist); n > 0 {
-		m.StateUpdated = fmtTime(hist[n-1].CreatedAt)
+	if meta.Exists && !meta.UpdatedAt.IsZero() {
+		m.StateUpdated = fmtTime(meta.UpdatedAt)
 	}
 	return m
 }
@@ -828,20 +876,21 @@ func pullsTab(id project.ID, runs []*run.Run) tabView {
 	}
 }
 
-func stateTab(id project.ID, hist []state.HistoryEntry, poll bool) tabView {
-	entries := make([]stateRow, 0, len(hist))
-	for i := len(hist) - 1; i >= 0; i-- {
-		h := hist[i]
+func stateTab(id project.ID, meta state.Metadata, poll bool) tabView {
+	var summary *stateSummaryView
+	if meta.Exists {
 		serial := ""
-		if h.Serial != nil {
-			serial = strconv.FormatInt(*h.Serial, 10)
+		if meta.Serial != nil {
+			serial = strconv.FormatInt(*meta.Serial, 10)
 		}
-		entries = append(entries, stateRow{
-			Time: fmtTime(h.CreatedAt), RunID: h.RunID, Serial: serial,
-			Size: fmt.Sprintf("%d B", len(h.Data)), JSON: string(h.Data),
-		})
+		summary = &stateSummaryView{
+			Time:   fmtTime(meta.UpdatedAt),
+			Serial: serial,
+			Size:   fmt.Sprintf("%d B", meta.Size),
+			Locked: meta.Locked,
+		}
 	}
-	return tabView{ProjectID: string(id), Poll: poll, Entries: entries}
+	return tabView{ProjectID: string(id), Poll: poll, State: summary}
 }
 
 func groupRuns(runs []*run.Run, keyFn, titleFn func(run.Snapshot) string) []runGroup {

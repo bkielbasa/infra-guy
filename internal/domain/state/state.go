@@ -10,28 +10,29 @@ import (
 var (
 	ErrLocked       = errors.New("state already locked")
 	ErrLockMismatch = errors.New("lock id mismatch")
+	ErrInvalidState = errors.New("invalid terraform state JSON")
 )
 
-type HistoryEntry struct {
-	RunID     string
+type Metadata struct {
+	Exists    bool
 	Serial    *int64
-	Data      []byte
-	CreatedAt time.Time
+	Size      int
+	Locked    bool
+	UpdatedAt time.Time
 }
 
 type Snapshot struct {
-	ProjectID string
-	Data      []byte
-	LockID    string
-	LockInfo  []byte
-	Serial    *int64
-	UpdatedAt time.Time
-	History   []HistoryEntry
+	ProjectID      string
+	Data           []byte
+	LockID         string
+	LockInfo       []byte
+	Serial         *int64
+	UpdatedAt      time.Time
+	ChangedOutputs map[string]bool
 }
 
 type State struct {
-	s        Snapshot
-	restored int
+	s Snapshot
 }
 
 func New(projectID string) *State { return &State{s: Snapshot{ProjectID: projectID}} }
@@ -44,48 +45,65 @@ func cloneInt64(p *int64) *int64 {
 	return &v
 }
 
+func cloneBoolMap(m map[string]bool) map[string]bool {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 func cloneSnapshot(s Snapshot) Snapshot {
 	out := s
 	out.Data = append([]byte(nil), s.Data...)
 	out.LockInfo = append([]byte(nil), s.LockInfo...)
 	out.Serial = cloneInt64(s.Serial)
-	if len(s.History) == 0 {
-		out.History = nil
-	} else {
-		out.History = make([]HistoryEntry, len(s.History))
-		for i, h := range s.History {
-			out.History[i] = HistoryEntry{
-				RunID:     h.RunID,
-				Serial:    cloneInt64(h.Serial),
-				Data:      append([]byte(nil), h.Data...),
-				CreatedAt: h.CreatedAt,
-			}
-		}
-	}
+	out.ChangedOutputs = cloneBoolMap(s.ChangedOutputs)
 	return out
 }
 
-func Restore(s Snapshot) *State { return &State{s: cloneSnapshot(s), restored: len(s.History)} }
+func Restore(s Snapshot) *State { return &State{s: cloneSnapshot(s)} }
 
 func (s *State) Snapshot() Snapshot { return cloneSnapshot(s.s) }
 
-func (s *State) NewHistory() []HistoryEntry {
-	return cloneSnapshot(Snapshot{History: s.s.History[s.restored:]}).History
-}
-
 func (s *State) Empty() bool { return len(s.s.Data) == 0 }
 
-func (s *State) Put(data []byte, lockID, runID string, now time.Time) error {
+func (s Snapshot) Metadata() Metadata {
+	return Metadata{
+		Exists:    len(s.Data) > 0,
+		Serial:    cloneInt64(s.Serial),
+		Size:      len(s.Data),
+		Locked:    s.LockID != "",
+		UpdatedAt: s.UpdatedAt,
+	}
+}
+
+func (s *State) Put(data []byte, lockID, _ string, now time.Time) error {
 	if s.s.LockID != "" && lockID != s.s.LockID {
 		return ErrLockMismatch
 	}
-	serial := readSerial(data)
+	s.s.ChangedOutputs = diffOutputs(s.s.Data, data)
 	s.s.Data = append([]byte(nil), data...)
-	s.s.Serial = serial
+	s.s.Serial = readSerial(data)
 	s.s.UpdatedAt = now
-	s.s.History = append(s.s.History, HistoryEntry{
-		RunID: runID, Serial: serial, Data: append([]byte(nil), data...), CreatedAt: now,
-	})
+	return nil
+}
+
+func (s *State) Import(data []byte, now time.Time) error {
+	if s.s.LockID != "" {
+		return ErrLocked
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil || obj == nil {
+		return ErrInvalidState
+	}
+	s.s.ChangedOutputs = diffOutputs(s.s.Data, data)
+	s.s.Data = append([]byte(nil), data...)
+	s.s.Serial = readSerial(data)
+	s.s.UpdatedAt = now
 	return nil
 }
 
@@ -180,16 +198,19 @@ func (s Snapshot) Outputs() map[string]OutputValue {
 	return outs
 }
 
-func (s Snapshot) ChangedOutputsSincePrevious() map[string]bool {
-	curr := s.Outputs()
+func diffOutputs(prevData, nextData []byte) map[string]bool {
+	curr, err := ExtractOutputs(nextData)
+	if err != nil {
+		curr = map[string]OutputValue{}
+	}
 	changed := make(map[string]bool, len(curr))
-	if len(s.History) <= 1 {
+	if len(bytes.TrimSpace(prevData)) == 0 {
 		for k := range curr {
 			changed[k] = true
 		}
 		return changed
 	}
-	prev, err := ExtractOutputs(s.History[len(s.History)-2].Data)
+	prev, err := ExtractOutputs(prevData)
 	if err != nil {
 		for k := range curr {
 			changed[k] = true
@@ -206,6 +227,18 @@ func (s Snapshot) ChangedOutputsSincePrevious() map[string]bool {
 		if _, ok := curr[k]; !ok {
 			changed[k] = true
 		}
+	}
+	return changed
+}
+
+func (s Snapshot) ChangedOutputsSincePrevious() map[string]bool {
+	if s.ChangedOutputs != nil {
+		return cloneBoolMap(s.ChangedOutputs)
+	}
+	curr := s.Outputs()
+	changed := make(map[string]bool, len(curr))
+	for k := range curr {
+		changed[k] = true
 	}
 	return changed
 }

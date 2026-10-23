@@ -202,16 +202,8 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	snap := loaded.Snapshot()
-	if string(snap.Data) != string(body) || snap.Serial == nil || *snap.Serial != 7 {
+	if string(snap.Data) != string(body) || snap.Serial == nil || *snap.Serial != 7 || !snap.UpdatedAt.Equal(now) {
 		t.Fatalf("state %#v", snap)
-	}
-	if len(snap.History) != 1 {
-		t.Fatalf("history rows: %d %#v", len(snap.History), snap.History)
-	}
-	h := snap.History[0]
-	if h.RunID != string(opened.Snapshot().ID) || string(h.Data) != string(body) ||
-		h.Serial == nil || *h.Serial != 7 || !h.CreatedAt.Equal(now) {
-		t.Fatalf("history %#v", h)
 	}
 }
 
@@ -353,7 +345,7 @@ func TestProjectSettingsSaveKeepsActiveRunAndLock(t *testing.T) {
 	}
 }
 
-func TestStateHistoryOnlyGrows(t *testing.T) {
+func TestStateSaveAndImportPreservesChangedOutputs(t *testing.T) {
 	ctx := context.Background()
 	pool := openTestPool(t, ctx)
 	if err := Migrate(ctx, pool); err != nil {
@@ -361,51 +353,39 @@ func TestStateHistoryOnlyGrows(t *testing.T) {
 	}
 	projects := NewProjectRepo(pool)
 	states := NewStateRepo(pool)
-	id := string(newTestProject(t, ctx, pool, projects, "proj-history").Snapshot().ID)
+	id := string(newTestProject(t, ctx, pool, projects, "proj-state").Snapshot().ID)
 
-	for i, body := range []string{`{"serial":1}`, `{"serial":2}`} {
-		st, err := states.Load(ctx, id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if st == nil {
-			st = state.New(id)
-		}
-		if err := st.Put([]byte(body), "", fmt.Sprintf("run-%d", i), time.Unix(int64(1_700_000_000+i), 0).UTC()); err != nil {
-			t.Fatal(err)
-		}
-		if err := states.Save(ctx, st); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var firstID int64
-	if err := pool.QueryRow(ctx, `SELECT min(id) FROM state_history WHERE project_id = $1`, id).Scan(&firstID); err != nil {
-		t.Fatal(err)
-	}
-	st, err := states.Load(ctx, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Lock([]byte(`{"ID":"L1"}`)); err != nil {
+	st := state.New(id)
+	if err := st.Put([]byte(`{"serial":1,"outputs":{"vpc":{"value":"v1"}}}`), "", "run-0", time.Unix(1_700_000_000, 0).UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := states.Save(ctx, st); err != nil {
 		t.Fatal(err)
 	}
-	var rows int
-	var minID int64
-	if err := pool.QueryRow(ctx, `SELECT count(*), min(id) FROM state_history WHERE project_id = $1`, id).Scan(&rows, &minID); err != nil {
-		t.Fatal(err)
-	}
-	if rows != 2 || minID != firstID {
-		t.Fatalf("history rows %d first id %d (was %d)", rows, minID, firstID)
-	}
 	loaded, err := states.Load(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h := loaded.Snapshot().History; len(h) != 2 || h[0].RunID != "run-0" || h[1].RunID != "run-1" || loaded.Snapshot().LockID != "L1" {
-		t.Fatalf("loaded %#v", loaded.Snapshot())
+	if !loaded.Snapshot().ChangedOutputsSincePrevious()["vpc"] {
+		t.Fatalf("expected vpc marked changed after first put: %#v", loaded.Snapshot())
+	}
+
+	if err := loaded.Import([]byte(`{"serial":2,"outputs":{"vpc":{"value":"v1"},"subnet":{"value":"s1"}}}`), time.Unix(1_700_000_001, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loaded.Lock([]byte(`{"ID":"L1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := states.Save(ctx, loaded); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = states.Load(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := loaded.Snapshot().ChangedOutputsSincePrevious()
+	if changed["vpc"] || !changed["subnet"] || loaded.Snapshot().LockID != "L1" {
+		t.Fatalf("loaded %#v (changed=%+v)", loaded.Snapshot(), changed)
 	}
 }
 

@@ -6,16 +6,23 @@ import (
 	"time"
 )
 
-func TestPutWithoutLockAppendsHistory(t *testing.T) {
+func TestPutWithoutLockUpdatesStateAndMetadata(t *testing.T) {
 	s := New("p1")
+	if s.Snapshot().Metadata().Exists {
+		t.Fatal("expected Exists=false on empty state")
+	}
 	now := time.Unix(5, 0).UTC()
 	body := []byte(`{"version":4,"serial":7}`)
 	if err := s.Put(body, "", "run-1", now); err != nil {
 		t.Fatal(err)
 	}
 	snap := s.Snapshot()
-	if snap.Serial == nil || *snap.Serial != 7 || len(snap.History) != 1 {
+	if snap.Serial == nil || *snap.Serial != 7 || !snap.UpdatedAt.Equal(now) {
 		t.Fatalf("%#v", snap)
+	}
+	meta := snap.Metadata()
+	if !meta.Exists || meta.Serial == nil || *meta.Serial != 7 || meta.Size != len(body) || meta.Locked || !meta.UpdatedAt.Equal(now) {
+		t.Fatalf("unexpected metadata: %#v", meta)
 	}
 	if s.Empty() {
 		t.Fatal("empty after put")
@@ -64,22 +71,57 @@ func TestLockConflictReturnsExisting(t *testing.T) {
 
 func TestSnapshotIsolatedFromCallerMutation(t *testing.T) {
 	s := New("p1")
-	body := []byte(`{"version":4,"serial":7}`)
+	body := []byte(`{"version":4,"serial":7,"outputs":{"k":{"value":"v"}}}`)
 	if err := s.Put(body, "", "run-1", time.Unix(5, 0).UTC()); err != nil {
 		t.Fatal(err)
 	}
 	snap := s.Snapshot()
 	snap.Data[0] = 'X'
-	snap.History[0].Data[0] = 'Y'
 	*snap.Serial = 99
-	*snap.History[0].Serial = 99
+	snap.ChangedOutputs["k"] = false
 
 	again := s.Snapshot()
-	if again.Data[0] != '{' || again.History[0].Data[0] != '{' {
-		t.Fatalf("data mutated: %q %q", again.Data, again.History[0].Data)
+	if again.Data[0] != '{' {
+		t.Fatalf("data mutated: %q", again.Data)
 	}
-	if *again.Serial != 7 || *again.History[0].Serial != 7 {
-		t.Fatalf("serial mutated: %d %d", *again.Serial, *again.History[0].Serial)
+	if *again.Serial != 7 {
+		t.Fatalf("serial mutated: %d", *again.Serial)
+	}
+	if !again.ChangedOutputs["k"] {
+		t.Fatalf("changed outputs mutated: %+v", again.ChangedOutputs)
+	}
+}
+
+func TestImportState(t *testing.T) {
+	s := New("p1")
+	now := time.Unix(10, 0).UTC()
+
+	// Invalid JSON or non-object JSON rejected
+	for _, bad := range [][]byte{nil, []byte(""), []byte("not-json"), []byte("[]"), []byte("123"), []byte("null")} {
+		if err := s.Import(bad, now); err != ErrInvalidState {
+			t.Fatalf("Import(%q) = %v, want ErrInvalidState", bad, err)
+		}
+	}
+
+	// Valid state JSON imports cleanly and computes changed outputs
+	v1 := []byte(`{"version":4,"serial":5,"outputs":{"vpc_id":{"value":"vpc-1"}}}`)
+	if err := s.Import(v1, now); err != nil {
+		t.Fatalf("Import v1: %v", err)
+	}
+	snap := s.Snapshot()
+	if snap.Serial == nil || *snap.Serial != 5 || !snap.UpdatedAt.Equal(now) {
+		t.Fatalf("unexpected snapshot after import: %#v", snap)
+	}
+	if !snap.ChangedOutputsSincePrevious()["vpc_id"] {
+		t.Fatalf("expected vpc_id marked changed after import: %+v", snap.ChangedOutputsSincePrevious())
+	}
+
+	// Importing while locked fails with ErrLocked
+	if _, err := s.Lock([]byte(`{"ID":"lock-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Import(v1, now); err != ErrLocked {
+		t.Fatalf("Import while locked = %v, want ErrLocked", err)
 	}
 }
 

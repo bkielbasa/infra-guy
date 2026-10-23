@@ -1,31 +1,29 @@
 {{define "state_history"}}
 <div id="tab-panel"{{if .Poll}} hx-get="/projects/{{.ProjectID}}/tabs/state" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
-  {{if .Entries}}
+  {{if .State}}
   <table>
     <thead>
-      <tr><th>Time</th><th>Run</th><th>Serial</th><th>Size</th></tr>
+      <tr><th>Serial</th><th>Size</th><th>Updated</th><th>Lock</th></tr>
     </thead>
     <tbody>
-      {{range .Entries}}
       <tr>
-        <td>{{.Time}}</td>
-        <td>{{if .RunID}}<a href="/runs/{{.RunID}}">{{.RunID}}</a>{{end}}</td>
-        <td>{{.Serial}}</td>
-        <td>{{.Size}}</td>
+        <td>{{.State.Serial}}</td>
+        <td>{{.State.Size}}</td>
+        <td>{{.State.Time}}</td>
+        <td>{{if .State.Locked}}Locked{{else}}Unlocked{{end}}</td>
       </tr>
-      <tr>
-        <td colspan="4">
-          <details>
-            <summary>JSON</summary>
-            <pre>{{.JSON}}</pre>
-          </details>
-        </td>
-      </tr>
-      {{end}}
     </tbody>
   </table>
   {{else}}
   <p class="empty">No stored state.</p>
   {{end}}
+
+  <form method="post" action="/projects/{{.ProjectID}}/state/import" enctype="multipart/form-data" hx-post="/projects/{{.ProjectID}}/state/import" hx-encoding="multipart/form-data" hx-target="#tab-panel" hx-swap="outerHTML">
+    <label>Import state file (.tfstate / .json)</label>
+    <input type="file" name="state_file" accept=".tfstate,.json,application/json" required>
+    <div class="actions">
+      <button type="submit">Import state</button>
+    </div>
+  </form>
 </div>
 {{end}}
