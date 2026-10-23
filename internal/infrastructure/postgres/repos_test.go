@@ -583,7 +583,7 @@ func TestContextRepoCRUDAndEncryption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := NewContextRepo(pool, sealer)
+	repo := NewContextRepo(pool)
 	projects := NewProjectRepo(pool)
 
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -610,8 +610,16 @@ func TestContextRepoCRUDAndEncryption(t *testing.T) {
 	}
 
 	ePlain, _ := tfcontext.NewEntry("e1-"+suffix, tfcontext.KindPlainEnv, "TF_VAR_env", "staging", now)
-	eSec, _ := tfcontext.NewEntry("e2-"+suffix, tfcontext.KindSecretEnv, "AWS_SECRET_ACCESS_KEY", "s3cr3t", now)
-	eFile, _ := tfcontext.NewEntry("e3-"+suffix, tfcontext.KindSecretFile, "~/.kube/config", "kube-yaml-1", now)
+	eSec, _ := tfcontext.NewEntry("e2-"+suffix, tfcontext.KindSecretEnv, "AWS_SECRET_ACCESS_KEY", "", now)
+	eSec.Ciphertext, err = sealer.Seal([]byte("s3cr3t"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eFile, _ := tfcontext.NewEntry("e3-"+suffix, tfcontext.KindSecretFile, "~/.kube/config", "", now)
+	eFile.Ciphertext, err = sealer.Seal([]byte("kube-yaml-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, e := range []tfcontext.Entry{ePlain, eSec, eFile} {
 		if err := repo.UpsertEntry(ctx, c1.Snapshot().ID, e); err != nil {
 			t.Fatal(err)
@@ -632,14 +640,17 @@ func TestContextRepoCRUDAndEncryption(t *testing.T) {
 		t.Fatalf("secret stored in plaintext or missing ciphertext: text=%q cipherLen=%d", rawText, len(rawCipher))
 	}
 
-	// Get with decryptSecrets=false masks secret values
-	masked, err := repo.Get(ctx, c1.Snapshot().ID, false)
+	// Get returns empty Value and stored Ciphertext for secret entries
+	masked, err := repo.Get(ctx, c1.Snapshot().ID)
 	if err != nil || masked == nil {
 		t.Fatalf("get masked: %v", err)
 	}
 	for _, e := range masked.Snapshot().Entries {
 		if e.Secret && e.Value != "" {
 			t.Fatalf("expected masked secret to have empty value, got %q", e.Value)
+		}
+		if e.Secret && len(e.Ciphertext) == 0 {
+			t.Fatalf("expected secret %s to have ciphertext", e.Key)
 		}
 		if !e.Secret && e.Value != "staging" {
 			t.Fatalf("plain value = %q, want staging", e.Value)
@@ -657,9 +668,22 @@ func TestContextRepoCRUDAndEncryption(t *testing.T) {
 	if err := repo.SetProjectContexts(ctx, p.Snapshot().ID, []tfcontext.ID{c1.Snapshot().ID, c2.Snapshot().ID}); err != nil {
 		t.Fatal(err)
 	}
-	attached, err := repo.ListByProject(ctx, p.Snapshot().ID, true)
+	attached, err := repo.ListByProject(ctx, p.Snapshot().ID)
 	if err != nil || len(attached) != 2 {
 		t.Fatalf("ListByProject: %v len=%d", err, len(attached))
+	}
+	for _, c := range attached {
+		entries := c.Snapshot().Entries
+		for i := range entries {
+			if entries[i].Secret && len(entries[i].Ciphertext) > 0 {
+				pt, err := sealer.Open(entries[i].Ciphertext)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entries[i].Value = string(pt)
+			}
+		}
+		c.SetEntries(entries)
 	}
 	env, files := tfcontext.Resolve(attached)
 	if env["TF_VAR_env"] != "production" || env["AWS_SECRET_ACCESS_KEY"] != "s3cr3t" || string(files[".kube/config"]) != "kube-yaml-1" {
@@ -673,14 +697,14 @@ func TestContextRepoCRUDAndEncryption(t *testing.T) {
 	if err := repo.DeleteEntry(ctx, c1.Snapshot().ID, ePlain.ID); err != nil {
 		t.Fatal(err)
 	}
-	afterEntryDel, err := repo.Get(ctx, c1.Snapshot().ID, false)
+	afterEntryDel, err := repo.Get(ctx, c1.Snapshot().ID)
 	if err != nil || len(afterEntryDel.Snapshot().Entries) != 2 {
 		t.Fatalf("after DeleteEntry: %v len=%d", err, len(afterEntryDel.Snapshot().Entries))
 	}
 	if err := repo.Delete(ctx, c2.Snapshot().ID); err != nil {
 		t.Fatal(err)
 	}
-	deleted, err := repo.Get(ctx, c2.Snapshot().ID, false)
+	deleted, err := repo.Get(ctx, c2.Snapshot().ID)
 	if err != nil || deleted != nil {
 		t.Fatalf("after Delete: err=%v got=%#v", err, deleted)
 	}

@@ -136,8 +136,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	contextRepo := postgres.NewContextRepo(pool, sealer)
-	contextSvc := &tfcontextapp.Service{Contexts: contextRepo, Now: now, NewID: newID}
+	contextRepo := postgres.NewContextRepo(pool)
+	contextSvc := &tfcontextapp.Service{Contexts: contextRepo, Sealer: sealer, Now: now, NewID: newID}
 
 	policyRepo := postgres.NewPolicyRepo(pool)
 	opaEngine := &opa.Evaluator{}

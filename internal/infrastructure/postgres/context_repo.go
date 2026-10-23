@@ -10,18 +10,16 @@ import (
 
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/tfcontext"
-	"infra-guy/internal/infrastructure/crypto"
 )
 
 var _ tfcontext.Repository = (*ContextRepo)(nil)
 
 type ContextRepo struct {
-	pool   *pgxpool.Pool
-	sealer *crypto.Sealer
+	pool *pgxpool.Pool
 }
 
-func NewContextRepo(pool *pgxpool.Pool, sealer *crypto.Sealer) *ContextRepo {
-	return &ContextRepo{pool: pool, sealer: sealer}
+func NewContextRepo(pool *pgxpool.Pool) *ContextRepo {
+	return &ContextRepo{pool: pool}
 }
 
 func (r *ContextRepo) Create(ctx context.Context, c *tfcontext.Context) error {
@@ -34,7 +32,7 @@ func (r *ContextRepo) Create(ctx context.Context, c *tfcontext.Context) error {
 	return err
 }
 
-func (r *ContextRepo) Get(ctx context.Context, id tfcontext.ID, decryptSecrets bool) (*tfcontext.Context, error) {
+func (r *ContextRepo) Get(ctx context.Context, id tfcontext.ID) (*tfcontext.Context, error) {
 	var s tfcontext.Snapshot
 	var created, updated time.Time
 	err := r.pool.QueryRow(ctx, `
@@ -49,7 +47,7 @@ func (r *ContextRepo) Get(ctx context.Context, id tfcontext.ID, decryptSecrets b
 	}
 	s.CreatedAt = utcTime(created)
 	s.UpdatedAt = utcTime(updated)
-	entries, err := r.loadEntries(ctx, s.ID, decryptSecrets)
+	entries, err := r.loadEntries(ctx, s.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +78,7 @@ func (r *ContextRepo) ListByTenant(ctx context.Context, tenantID string) ([]*tfc
 		return nil, err
 	}
 	for _, c := range out {
-		entries, err := r.loadEntries(ctx, c.Snapshot().ID, false)
+		entries, err := r.loadEntries(ctx, c.Snapshot().ID)
 		if err != nil {
 			return nil, err
 		}
@@ -95,17 +93,6 @@ func (r *ContextRepo) Delete(ctx context.Context, id tfcontext.ID) error {
 }
 
 func (r *ContextRepo) UpsertEntry(ctx context.Context, contextID tfcontext.ID, e tfcontext.Entry) error {
-	var textVal string
-	var cipherVal []byte
-	if e.Secret {
-		ct, err := r.sealer.Seal([]byte(e.Value))
-		if err != nil {
-			return err
-		}
-		cipherVal = ct
-	} else {
-		textVal = e.Value
-	}
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO context_entries (id, context_id, kind, key, value_text, value_ciphertext, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -113,7 +100,7 @@ func (r *ContextRepo) UpsertEntry(ctx context.Context, contextID tfcontext.ID, e
 			value_text = EXCLUDED.value_text,
 			value_ciphertext = EXCLUDED.value_ciphertext,
 			updated_at = EXCLUDED.updated_at`,
-		e.ID, contextID, e.Kind, e.Key, textVal, cipherVal, e.CreatedAt, e.UpdatedAt,
+		e.ID, contextID, e.Kind, e.Key, e.Value, e.Ciphertext, e.CreatedAt, e.UpdatedAt,
 	)
 	return err
 }
@@ -132,24 +119,17 @@ func (r *ContextRepo) SetProjectContexts(ctx context.Context, projectID project.
 	if _, err := tx.Exec(ctx, `DELETE FROM project_contexts WHERE project_id = $1`, projectID); err != nil {
 		return err
 	}
-	seen := make(map[tfcontext.ID]bool, len(contextIDs))
-	pos := 0
-	for _, cid := range contextIDs {
-		if cid == "" || seen[cid] {
-			continue
-		}
-		seen[cid] = true
+	for i, cid := range contextIDs {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO project_contexts (project_id, context_id, position)
-			VALUES ($1, $2, $3)`, projectID, cid, pos); err != nil {
+			VALUES ($1, $2, $3)`, projectID, cid, i); err != nil {
 			return err
 		}
-		pos++
 	}
 	return tx.Commit(ctx)
 }
 
-func (r *ContextRepo) ListByProject(ctx context.Context, projectID project.ID, decryptSecrets bool) ([]*tfcontext.Context, error) {
+func (r *ContextRepo) ListByProject(ctx context.Context, projectID project.ID) ([]*tfcontext.Context, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT c.id, c.tenant_id, c.name, c.created_at, c.updated_at
 		FROM project_contexts pc
@@ -175,7 +155,7 @@ func (r *ContextRepo) ListByProject(ctx context.Context, projectID project.ID, d
 		return nil, err
 	}
 	for _, c := range out {
-		entries, err := r.loadEntries(ctx, c.Snapshot().ID, decryptSecrets)
+		entries, err := r.loadEntries(ctx, c.Snapshot().ID)
 		if err != nil {
 			return nil, err
 		}
@@ -184,7 +164,7 @@ func (r *ContextRepo) ListByProject(ctx context.Context, projectID project.ID, d
 	return out, nil
 }
 
-func (r *ContextRepo) loadEntries(ctx context.Context, contextID tfcontext.ID, decryptSecrets bool) ([]tfcontext.Entry, error) {
+func (r *ContextRepo) loadEntries(ctx context.Context, contextID tfcontext.ID) ([]tfcontext.Entry, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, kind, key, value_text, value_ciphertext, created_at, updated_at
 		FROM context_entries WHERE context_id = $1 ORDER BY created_at, id`, contextID)
@@ -195,26 +175,13 @@ func (r *ContextRepo) loadEntries(ctx context.Context, contextID tfcontext.ID, d
 	var out []tfcontext.Entry
 	for rows.Next() {
 		var e tfcontext.Entry
-		var textVal string
-		var cipherVal []byte
 		var created, updated time.Time
-		if err := rows.Scan(&e.ID, &e.Kind, &e.Key, &textVal, &cipherVal, &created, &updated); err != nil {
+		if err := rows.Scan(&e.ID, &e.Kind, &e.Key, &e.Value, &e.Ciphertext, &created, &updated); err != nil {
 			return nil, err
 		}
 		e.CreatedAt = utcTime(created)
 		e.UpdatedAt = utcTime(updated)
 		e.Secret = e.Kind == tfcontext.KindSecretEnv || e.Kind == tfcontext.KindSecretFile
-		if e.Secret {
-			if decryptSecrets && len(cipherVal) > 0 {
-				pt, err := r.sealer.Open(cipherVal)
-				if err != nil {
-					return nil, err
-				}
-				e.Value = string(pt)
-			}
-		} else {
-			e.Value = textVal
-		}
 		out = append(out, e)
 	}
 	return out, rows.Err()

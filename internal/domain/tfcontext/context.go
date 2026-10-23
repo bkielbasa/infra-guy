@@ -49,13 +49,14 @@ var reservedEnvKeys = map[string]bool{
 }
 
 type Entry struct {
-	ID        string
-	Kind      EntryKind
-	Key       string
-	Value     string
-	Secret    bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID         string
+	Kind       EntryKind
+	Key        string
+	Value      string
+	Ciphertext []byte
+	Secret     bool
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type Snapshot struct {
@@ -181,11 +182,11 @@ func Resolve(contexts []*Context) (map[string]string, map[string][]byte) {
 
 type Repository interface {
 	Create(ctx context.Context, c *Context) error
-	Get(ctx context.Context, id ID, decryptSecrets bool) (*Context, error)
+	Get(ctx context.Context, id ID) (*Context, error)
 	ListByTenant(ctx context.Context, tenantID string) ([]*Context, error)
 	Delete(ctx context.Context, id ID) error
 	UpsertEntry(ctx context.Context, contextID ID, entry Entry) error
 	DeleteEntry(ctx context.Context, contextID ID, entryID string) error
 	SetProjectContexts(ctx context.Context, projectID project.ID, contextIDs []ID) error
-	ListByProject(ctx context.Context, projectID project.ID, decryptSecrets bool) ([]*Context, error)
+	ListByProject(ctx context.Context, projectID project.ID) ([]*Context, error)
 }

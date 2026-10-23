@@ -1,6 +1,7 @@
 package tfcontextapp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,19 @@ import (
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/tfcontext"
 )
+
+type fakeSealer struct{}
+
+func (fakeSealer) Seal(plaintext []byte) ([]byte, error) {
+	return append([]byte("enc:"), plaintext...), nil
+}
+
+func (fakeSealer) Open(ciphertext []byte) ([]byte, error) {
+	if !bytes.HasPrefix(ciphertext, []byte("enc:")) {
+		return nil, errors.New("invalid ciphertext")
+	}
+	return bytes.TrimPrefix(ciphertext, []byte("enc:")), nil
+}
 
 type memRepo struct {
 	items    map[tfcontext.ID]*tfcontext.Context
@@ -28,27 +42,19 @@ func (m *memRepo) Create(_ context.Context, c *tfcontext.Context) error {
 	return nil
 }
 
-func (m *memRepo) Get(_ context.Context, id tfcontext.ID, decryptSecrets bool) (*tfcontext.Context, error) {
+func (m *memRepo) Get(_ context.Context, id tfcontext.ID) (*tfcontext.Context, error) {
 	c, ok := m.items[id]
 	if !ok {
 		return nil, nil
 	}
-	s := c.Snapshot()
-	if !decryptSecrets {
-		for i := range s.Entries {
-			if s.Entries[i].Secret {
-				s.Entries[i].Value = ""
-			}
-		}
-	}
-	return tfcontext.Restore(s), nil
+	return tfcontext.Restore(c.Snapshot()), nil
 }
 
 func (m *memRepo) ListByTenant(_ context.Context, tenantID string) ([]*tfcontext.Context, error) {
 	var out []*tfcontext.Context
 	for _, c := range m.items {
 		if c.Snapshot().TenantID == tenantID {
-			cp, _ := m.Get(context.Background(), c.Snapshot().ID, false)
+			cp, _ := m.Get(context.Background(), c.Snapshot().ID)
 			out = append(out, cp)
 		}
 	}
@@ -97,10 +103,10 @@ func (m *memRepo) SetProjectContexts(_ context.Context, projectID project.ID, co
 	return nil
 }
 
-func (m *memRepo) ListByProject(_ context.Context, projectID project.ID, decryptSecrets bool) ([]*tfcontext.Context, error) {
+func (m *memRepo) ListByProject(_ context.Context, projectID project.ID) ([]*tfcontext.Context, error) {
 	var out []*tfcontext.Context
 	for _, id := range m.attached[projectID] {
-		c, _ := m.Get(context.Background(), id, decryptSecrets)
+		c, _ := m.Get(context.Background(), id)
 		if c != nil {
 			out = append(out, c)
 		}
@@ -114,6 +120,7 @@ func TestServiceTenantIsolationAndResolution(t *testing.T) {
 	seq := 0
 	svc := &Service{
 		Contexts: repo,
+		Sealer:   fakeSealer{},
 		Now:      func() time.Time { return time.Unix(100, 0).UTC() },
 		NewID: func() string {
 			seq++
@@ -164,6 +171,7 @@ func TestServiceCRUDAndEntryOperations(t *testing.T) {
 	seq := 0
 	svc := &Service{
 		Contexts: repo,
+		Sealer:   fakeSealer{},
 		Now:      func() time.Time { return time.Unix(100, 0).UTC() },
 		NewID: func() string {
 			seq++
@@ -213,7 +221,7 @@ func TestServiceCRUDAndEntryOperations(t *testing.T) {
 		t.Fatalf("expected 1 entry after delete, got %d", len(gotAfter.Snapshot().Entries))
 	}
 
-	// ListByProject masks secrets (decryptSecrets=false)
+	// ListByProject masks secrets (sealed in UpsertEntry)
 	if err := svc.SetProjectContexts(ctx, "ten-1", "proj-1", []tfcontext.ID{"", c1.Snapshot().ID}); err != nil {
 		t.Fatalf("SetProjectContexts failed: %v", err)
 	}
@@ -231,5 +239,62 @@ func TestServiceCRUDAndEntryOperations(t *testing.T) {
 	}
 	if gotDeleted, err := svc.Get(ctx, "ten-1", c1.Snapshot().ID); err != nil || gotDeleted != nil {
 		t.Fatalf("expected nil after delete, got %v, err=%v", gotDeleted, err)
+	}
+}
+
+func TestServiceSealsSecretsAndDeduplicatesProjectContexts(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemRepo()
+	seq := 0
+	svc := &Service{
+		Contexts: repo,
+		Sealer:   fakeSealer{},
+		Now:      func() time.Time { return time.Unix(100, 0).UTC() },
+		NewID: func() string {
+			seq++
+			return fmt.Sprintf("id-%d", seq)
+		},
+	}
+
+	c1, err := svc.Create(ctx, "t-1", "aws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cid := c1.Snapshot().ID
+	if err := svc.UpsertEntry(ctx, "t-1", cid, tfcontext.KindSecretEnv, "AWS_SECRET", "super-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpsertEntry(ctx, "t-1", cid, tfcontext.KindPlainEnv, "AWS_REGION", "eu-west-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, err := svc.Get(ctx, "t-1", cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range stored.Snapshot().Entries {
+		if e.Key == "AWS_SECRET" {
+			if e.Value != "" {
+				t.Fatalf("expected empty plaintext Value on stored secret, got %q", e.Value)
+			}
+			if string(e.Ciphertext) != "enc:super-secret" {
+				t.Fatalf("expected sealed Ciphertext, got %q", string(e.Ciphertext))
+			}
+		}
+	}
+
+	if err := svc.SetProjectContexts(ctx, "t-1", "p-1", []tfcontext.ID{"", cid, cid, ""}); err != nil {
+		t.Fatal(err)
+	}
+	if got := repo.attached["p-1"]; len(got) != 1 || got[0] != cid {
+		t.Fatalf("expected deduplicated [%s], got %v", cid, got)
+	}
+
+	env, _, err := svc.ResolveForProject(ctx, "p-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["AWS_SECRET"] != "super-secret" || env["AWS_REGION"] != "eu-west-1" {
+		t.Fatalf("unexpected resolved env: %+v", env)
 	}
 }

@@ -949,27 +949,19 @@ func (m *uiMemContexts) Create(_ context.Context, c *tfcontext.Context) error {
 	return nil
 }
 
-func (m *uiMemContexts) Get(_ context.Context, id tfcontext.ID, decryptSecrets bool) (*tfcontext.Context, error) {
+func (m *uiMemContexts) Get(_ context.Context, id tfcontext.ID) (*tfcontext.Context, error) {
 	c, ok := m.items[id]
 	if !ok {
 		return nil, nil
 	}
-	s := c.Snapshot()
-	if !decryptSecrets {
-		for i := range s.Entries {
-			if s.Entries[i].Secret {
-				s.Entries[i].Value = ""
-			}
-		}
-	}
-	return tfcontext.Restore(s), nil
+	return tfcontext.Restore(c.Snapshot()), nil
 }
 
 func (m *uiMemContexts) ListByTenant(_ context.Context, tenantID string) ([]*tfcontext.Context, error) {
 	var out []*tfcontext.Context
 	for _, c := range m.items {
 		if c.Snapshot().TenantID == tenantID {
-			cp, _ := m.Get(context.Background(), c.Snapshot().ID, false)
+			cp, _ := m.Get(context.Background(), c.Snapshot().ID)
 			out = append(out, cp)
 		}
 	}
@@ -1018,10 +1010,10 @@ func (m *uiMemContexts) SetProjectContexts(_ context.Context, projectID project.
 	return nil
 }
 
-func (m *uiMemContexts) ListByProject(_ context.Context, projectID project.ID, decryptSecrets bool) ([]*tfcontext.Context, error) {
+func (m *uiMemContexts) ListByProject(_ context.Context, projectID project.ID) ([]*tfcontext.Context, error) {
 	var out []*tfcontext.Context
 	for _, id := range m.attached[projectID] {
-		c, _ := m.Get(context.Background(), id, decryptSecrets)
+		c, _ := m.Get(context.Background(), id)
 		if c != nil {
 			out = append(out, c)
 		}
