@@ -14,23 +14,15 @@ import (
 
 // Session is a signed-in user's server-side session. TenantID is empty until a
 // tenant has been selected.
-type Session struct {
-	ID          string
-	UserID      string
-	TenantID    string
-	Role        string
-	Login       string
-	AccessToken string
-	ExpiresAt   time.Time
-}
+type Session = user.Session
 
 type IdentityStore struct{ pool *pgxpool.Pool }
 
 func NewIdentityStore(pool *pgxpool.Pool) *IdentityStore { return &IdentityStore{pool: pool} }
 
 // UpsertUser inserts or updates by GitHub user id and keeps the stored id and
-// GitHub identity row. It returns the stored user.
-func (s *IdentityStore) UpsertUser(ctx context.Context, u user.User, now time.Time) (user.User, error) {
+// identity row. It returns the stored user.
+func (s *IdentityStore) UpsertUser(ctx context.Context, u user.User, ident user.Identity, now time.Time) (user.User, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return user.User{}, err
@@ -49,7 +41,7 @@ func (s *IdentityStore) UpsertUser(ctx context.Context, u user.User, now time.Ti
 	).Scan(&out.ID, &out.GitHubUserID, &out.Login, &out.DisplayName); err != nil {
 		return user.User{}, err
 	}
-	ident := user.GitHubIdentity(out.ID, out.GitHubUserID)
+	ident.UserID = out.ID
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO identities (user_id, provider, issuer, subject)
 		VALUES ($1, $2, $3, $4)
@@ -211,16 +203,16 @@ func (s *IdentityStore) SaveOAuthState(ctx context.Context, state string, expire
 	return err
 }
 
-// ConsumeOAuthState deletes the state and reports whether it existed and had
-// not expired at now.
-func (s *IdentityStore) ConsumeOAuthState(ctx context.Context, state string, now time.Time) (bool, error) {
+// ConsumeOAuthState deletes the state and returns its expiration time when it
+// existed.
+func (s *IdentityStore) ConsumeOAuthState(ctx context.Context, state string) (time.Time, bool, error) {
 	var expires time.Time
 	err := s.pool.QueryRow(ctx, `DELETE FROM oauth_states WHERE state = $1 RETURNING expires_at`, state).Scan(&expires)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return time.Time{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return time.Time{}, false, err
 	}
-	return !expires.Before(now), nil
+	return utcTime(expires), true, nil
 }

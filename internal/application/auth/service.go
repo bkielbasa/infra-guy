@@ -17,19 +17,11 @@ import (
 
 // Session is the server-side sign-in record. TenantID stays empty until one
 // tenant is selected.
-type Session struct {
-	ID          string
-	UserID      string
-	TenantID    string
-	Role        string
-	Login       string
-	AccessToken string
-	ExpiresAt   time.Time
-}
+type Session = user.Session
 
 // Store is the identity store already persisted in Postgres.
 type Store interface {
-	UpsertUser(ctx context.Context, u user.User, now time.Time) (user.User, error)
+	UpsertUser(ctx context.Context, u user.User, ident user.Identity, now time.Time) (user.User, error)
 	UpsertTenant(ctx context.Context, t tenant.Tenant, now time.Time) (tenant.Tenant, error)
 	UpsertInstallation(ctx context.Context, in tenant.Installation, now time.Time) error
 	ActiveInstallation(ctx context.Context, tenantID string) (*tenant.Installation, error)
@@ -37,7 +29,7 @@ type Store interface {
 	SaveSession(ctx context.Context, sess Session) error
 	GetSession(ctx context.Context, id string) (*Session, error)
 	SaveOAuthState(ctx context.Context, state string, expiresAt time.Time) error
-	ConsumeOAuthState(ctx context.Context, state string, now time.Time) (bool, error)
+	ConsumeOAuthState(ctx context.Context, state string) (expiresAt time.Time, ok bool, err error)
 }
 
 // Client is the GitHub OAuth and App API used during sign-in.
@@ -91,11 +83,11 @@ func (s *Service) Start(ctx context.Context) (redirectURL, state string, err err
 // Complete exchanges the code, records the user, and opens the only allowed
 // tenant. Zero or several allowed tenants leave TenantID empty.
 func (s *Service) Complete(ctx context.Context, state, code string, now time.Time) (sessionID string, tenantCount int, err error) {
-	ok, err := s.Store.ConsumeOAuthState(ctx, state, now)
+	expiresAt, ok, err := s.Store.ConsumeOAuthState(ctx, state)
 	if err != nil {
 		return "", 0, err
 	}
-	if !ok {
+	if !ok || expiresAt.Before(now) {
 		return "", 0, errOAuthState
 	}
 	token, err := s.GitHub.Exchange(ctx, code)
@@ -109,15 +101,16 @@ func (s *Service) Complete(ctx context.Context, state, code string, now time.Tim
 	if s.NewID == nil {
 		return "", 0, fmt.Errorf("missing id generator")
 	}
-	stored, err := s.Store.UpsertUser(ctx, user.User{
-		ID: s.NewID(), GitHubUserID: ghID, Login: login, DisplayName: name,
-	}, now)
-	if err != nil {
-		return "", 0, err
-	}
-	ident := user.GitHubIdentity(stored.ID, stored.GitHubUserID)
+	candidateID := s.NewID()
+	ident := user.GitHubIdentity(candidateID, ghID)
 	if ident.Provider != "github" || ident.Subject == "" {
 		return "", 0, fmt.Errorf("github identity")
+	}
+	stored, err := s.Store.UpsertUser(ctx, user.User{
+		ID: candidateID, GitHubUserID: ghID, Login: login, DisplayName: name,
+	}, ident, now)
+	if err != nil {
+		return "", 0, err
 	}
 	allowed, err := s.admissions(ctx, token, ghID)
 	if err != nil {

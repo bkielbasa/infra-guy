@@ -33,8 +33,6 @@ import (
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
-	"infra-guy/internal/domain/tenant"
-	"infra-guy/internal/domain/user"
 	"infra-guy/internal/infrastructure/crypto"
 	"infra-guy/internal/infrastructure/git"
 	"infra-guy/internal/infrastructure/github"
@@ -158,7 +156,7 @@ func main() {
 		ClientSecret: clientSecret,
 	}
 	tokens := &github.Tokens{Client: gh}
-	identStore := identityAdapter{store: postgres.NewIdentityStore(pool)}
+	identStore := postgres.NewIdentityStore(pool)
 	tokenSource := tenantTokenSource{store: identStore, tokens: tokens}
 
 	s3Cache, err := s3.NewFromEnv(os.Getenv)
@@ -361,7 +359,7 @@ func buildWorkerPassThroughEnv(getenv func(string) string, internalURL string) m
 }
 
 type tenantTokenSource struct {
-	store  identityAdapter
+	store  *postgres.IdentityStore
 	tokens *github.Tokens
 }
 
@@ -397,62 +395,6 @@ func loadAppKey(path string) (*rsa.PrivateKey, error) {
 		return nil, fmt.Errorf("GITHUB_APP_PRIVATE_KEY_FILE: not an RSA key")
 	}
 	return key, nil
-}
-
-type identityAdapter struct{ store *postgres.IdentityStore }
-
-func (a identityAdapter) UpsertUser(ctx context.Context, u user.User, now time.Time) (user.User, error) {
-	return a.store.UpsertUser(ctx, u, now)
-}
-
-func (a identityAdapter) UpsertTenant(ctx context.Context, t tenant.Tenant, now time.Time) (tenant.Tenant, error) {
-	return a.store.UpsertTenant(ctx, t, now)
-}
-
-func (a identityAdapter) UpsertInstallation(ctx context.Context, in tenant.Installation, now time.Time) error {
-	return a.store.UpsertInstallation(ctx, in, now)
-}
-
-func (a identityAdapter) ActiveInstallation(ctx context.Context, tenantID string) (*tenant.Installation, error) {
-	return a.store.ActiveInstallation(ctx, tenantID)
-}
-
-func (a identityAdapter) ListActiveInstallations(ctx context.Context) ([]tenant.Installation, error) {
-	return a.store.ListActiveInstallations(ctx)
-}
-
-func (a identityAdapter) SaveSession(ctx context.Context, sess authapp.Session) error {
-	return a.store.SaveSession(ctx, postgres.Session{
-		ID: sess.ID, UserID: sess.UserID, TenantID: sess.TenantID, Role: sess.Role,
-		Login: sess.Login, AccessToken: sess.AccessToken, ExpiresAt: sess.ExpiresAt,
-	})
-}
-
-func (a identityAdapter) GetSession(ctx context.Context, id string) (*authapp.Session, error) {
-	sess, err := a.store.GetSession(ctx, id)
-	if err != nil || sess == nil {
-		return nil, err
-	}
-	return &authapp.Session{
-		ID: sess.ID, UserID: sess.UserID, TenantID: sess.TenantID, Role: sess.Role,
-		Login: sess.Login, AccessToken: sess.AccessToken, ExpiresAt: sess.ExpiresAt,
-	}, nil
-}
-
-func (a identityAdapter) SaveOAuthState(ctx context.Context, state string, expiresAt time.Time) error {
-	return a.store.SaveOAuthState(ctx, state, expiresAt)
-}
-
-func (a identityAdapter) ConsumeOAuthState(ctx context.Context, state string, now time.Time) (bool, error) {
-	return a.store.ConsumeOAuthState(ctx, state, now)
-}
-
-func (a identityAdapter) InstallationByGitHubID(ctx context.Context, githubInstallationID int64) (*tenant.Installation, error) {
-	return a.store.InstallationByGitHubID(ctx, githubInstallationID)
-}
-
-func (a identityAdapter) DeactivateInstallation(ctx context.Context, githubInstallationID int64, now time.Time) error {
-	return a.store.DeactivateInstallation(ctx, githubInstallationID, now)
 }
 
 type githubAdapter struct{ client *github.Client }

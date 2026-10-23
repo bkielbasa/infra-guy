@@ -779,7 +779,7 @@ func newUIIdentity(login, tenantID string) *uiIdentity {
 	}
 }
 
-func (m *uiIdentity) UpsertUser(_ context.Context, u user.User, _ time.Time) (user.User, error) {
+func (m *uiIdentity) UpsertUser(_ context.Context, u user.User, _ user.Identity, _ time.Time) (user.User, error) {
 	for i, existing := range m.users {
 		if existing.GitHubUserID == u.GitHubUserID {
 			existing.Login = u.Login
@@ -855,13 +855,13 @@ func (m *uiIdentity) SaveOAuthState(_ context.Context, state string, expiresAt t
 	return nil
 }
 
-func (m *uiIdentity) ConsumeOAuthState(_ context.Context, state string, now time.Time) (bool, error) {
+func (m *uiIdentity) ConsumeOAuthState(_ context.Context, state string) (time.Time, bool, error) {
 	exp, ok := m.states[state]
 	if !ok {
-		return false, nil
+		return time.Time{}, false, nil
 	}
 	delete(m.states, state)
-	return !exp.Before(now), nil
+	return exp, true, nil
 }
 
 func (m *uiIdentity) InstallationByGitHubID(_ context.Context, githubInstallationID int64) (*tenant.Installation, error) {

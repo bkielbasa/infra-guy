@@ -1,6 +1,9 @@
 package user
 
-import "strconv"
+import (
+	"strconv"
+	"time"
+)
 
 type User struct {
 	ID           string
@@ -21,4 +24,14 @@ func GitHubIdentity(userID string, githubUserID int64) Identity {
 		UserID: userID, Provider: "github",
 		Issuer: "https://github.com", Subject: strconv.FormatInt(githubUserID, 10),
 	}
+}
+
+type Session struct {
+	ID          string
+	UserID      string
+	TenantID    string
+	Role        string
+	Login       string
+	AccessToken string
+	ExpiresAt   time.Time
 }

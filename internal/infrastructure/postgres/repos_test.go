@@ -475,11 +475,11 @@ func TestIdentityStore(t *testing.T) {
 	n := time.Now().UnixNano()
 	suffix := fmt.Sprintf("%d", n)
 
-	u, err := store.UpsertUser(ctx, user.User{ID: "usr-" + suffix, GitHubUserID: n, Login: "ada"}, now)
+	u, err := store.UpsertUser(ctx, user.User{ID: "usr-" + suffix, GitHubUserID: n, Login: "ada"}, user.GitHubIdentity("usr-"+suffix, n), now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := store.UpsertUser(ctx, user.User{ID: "usr-other-" + suffix, GitHubUserID: n, Login: "ada2", DisplayName: "Ada"}, now)
+	again, err := store.UpsertUser(ctx, user.User{ID: "usr-other-" + suffix, GitHubUserID: n, Login: "ada2", DisplayName: "Ada"}, user.GitHubIdentity("usr-other-"+suffix, n), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,17 +550,11 @@ func TestIdentityStore(t *testing.T) {
 	if err := store.SaveOAuthState(ctx, "st-"+suffix, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := store.ConsumeOAuthState(ctx, "st-"+suffix, now); err != nil || !ok {
-		t.Fatalf("consume: %v %v", ok, err)
+	if exp, ok, err := store.ConsumeOAuthState(ctx, "st-"+suffix); err != nil || !ok || !exp.Equal(now.Add(time.Minute)) {
+		t.Fatalf("consume: exp=%v ok=%v err=%v", exp, ok, err)
 	}
-	if ok, err := store.ConsumeOAuthState(ctx, "st-"+suffix, now); err != nil || ok {
+	if _, ok, err := store.ConsumeOAuthState(ctx, "st-"+suffix); err != nil || ok {
 		t.Fatalf("second consume: %v %v", ok, err)
-	}
-	if err := store.SaveOAuthState(ctx, "old-"+suffix, now.Add(-time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := store.ConsumeOAuthState(ctx, "old-"+suffix, now); err != nil || ok {
-		t.Fatalf("expired consume: %v %v", ok, err)
 	}
 }
 

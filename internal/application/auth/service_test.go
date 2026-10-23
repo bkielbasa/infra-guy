@@ -32,6 +32,34 @@ func TestCompleteAdmitsOrgAdmin(t *testing.T) {
 	if _, _, err := svc.Complete(context.Background(), "st", "code", time.Unix(100, 0)); err == nil {
 		t.Fatal("reused state")
 	}
+	ident, ok := store.identities["github:4"]
+	if !ok || ident.UserID != "user-1" || ident.Issuer != "https://github.com" || ident.Subject != "4" {
+		t.Fatalf("expected github identity persisted, got %+v (ok=%v)", ident, ok)
+	}
+}
+
+func TestOAuthFlowRejectsExpiredState(t *testing.T) {
+	store := newMemIdentity()
+	gh := &fakeGitHub{userID: 4, login: "ada"}
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	svc := &Service{
+		Store:         store,
+		GitHub:        gh,
+		Now:           func() time.Time { return now },
+		NewID:         func() string { return "user-1" },
+		PublicBaseURL: "https://infra.example",
+		ClientID:      "cid",
+	}
+
+	_, state, err := svc.Start(context.Background())
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	now = now.Add(15 * time.Minute)
+	if _, _, err := svc.Complete(context.Background(), state, "code-abc", now); err == nil {
+		t.Fatalf("expected error for expired OAuth state")
+	}
 }
 
 func TestCompleteMembershipErrorAdmitsNobody(t *testing.T) {
@@ -179,6 +207,7 @@ func TestEnterInstallationUpsertsAndSelects(t *testing.T) {
 
 type memIdentity struct {
 	users         []user.User
+	identities    map[string]user.Identity
 	tenants       []tenant.Tenant
 	installations []tenant.Installation
 	sessions      map[string]Session
@@ -186,19 +215,30 @@ type memIdentity struct {
 }
 
 func newMemIdentity() *memIdentity {
-	return &memIdentity{sessions: map[string]Session{}, states: map[string]time.Time{}}
+	return &memIdentity{
+		identities: map[string]user.Identity{},
+		sessions:   map[string]Session{},
+		states:     map[string]time.Time{},
+	}
 }
 
-func (m *memIdentity) UpsertUser(_ context.Context, u user.User, _ time.Time) (user.User, error) {
+func (m *memIdentity) UpsertUser(_ context.Context, u user.User, ident user.Identity, _ time.Time) (user.User, error) {
+	if m.identities == nil {
+		m.identities = map[string]user.Identity{}
+	}
 	for i, existing := range m.users {
 		if existing.GitHubUserID == u.GitHubUserID {
 			existing.Login = u.Login
 			existing.DisplayName = u.DisplayName
 			m.users[i] = existing
+			ident.UserID = existing.ID
+			m.identities[ident.Provider+":"+ident.Subject] = ident
 			return existing, nil
 		}
 	}
 	m.users = append(m.users, u)
+	ident.UserID = u.ID
+	m.identities[ident.Provider+":"+ident.Subject] = ident
 	return u, nil
 }
 
@@ -279,13 +319,13 @@ func (m *memIdentity) SaveOAuthState(_ context.Context, state string, expiresAt 
 	return nil
 }
 
-func (m *memIdentity) ConsumeOAuthState(_ context.Context, state string, now time.Time) (bool, error) {
+func (m *memIdentity) ConsumeOAuthState(_ context.Context, state string) (time.Time, bool, error) {
 	exp, ok := m.states[state]
 	if !ok {
-		return false, nil
+		return time.Time{}, false, nil
 	}
 	delete(m.states, state)
-	return !exp.Before(now), nil
+	return exp, true, nil
 }
 
 type fakeGitHub struct {
