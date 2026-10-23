@@ -11,6 +11,7 @@ const DefaultTerraformVersion = "1.9.8"
 
 var (
 	ErrBusy                    = errors.New("another run is active")
+	ErrLocked                  = errors.New("project is locked")
 	ErrActiveRunMismatch       = errors.New("active run does not match")
 	ErrInvalidTerraformVersion = errors.New("invalid terraform version")
 )
@@ -148,6 +149,9 @@ func (p *Project) Unlock()                           { p.s.Locked = false }
 func (p *Project) ClaimActiveRun(runID string) error {
 	if runID == "" {
 		return fmt.Errorf("missing run id")
+	}
+	if p.s.Locked {
+		return ErrLocked
 	}
 	if p.s.ActiveRunID != "" && p.s.ActiveRunID != runID {
 		return ErrBusy

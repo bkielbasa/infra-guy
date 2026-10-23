@@ -15,12 +15,7 @@ import (
 
 var _ runapp.Scheduler = (*Queue)(nil)
 
-type Job struct {
-	ID       int64
-	RunID    run.ID
-	Step     run.StepName
-	Attempts int
-}
+type Job = run.Job
 
 type Queue struct{ pool *pgxpool.Pool }
 
@@ -33,14 +28,14 @@ func (q *Queue) Enqueue(ctx context.Context, id run.ID, step run.StepName) error
 	return err
 }
 
-func (q *Queue) Claim(ctx context.Context, workerID string, projects project.Repository) (*Job, error) {
+func (q *Queue) Claim(ctx context.Context, workerID string, retryDelay time.Duration) (*run.Job, error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
 
-	var job Job
+	var job run.Job
 	err = tx.QueryRow(ctx, `
 		SELECT id, run_id, step_name, attempts
 		FROM jobs
@@ -65,13 +60,10 @@ func (q *Queue) Claim(ctx context.Context, workerID string, projects project.Rep
 		return nil, err
 	}
 
-	var claimErr error
-	if !p.Snapshot().Locked {
-		claimErr = p.ClaimActiveRun(string(job.RunID))
-	}
-	if p.Snapshot().Locked || errors.Is(claimErr, project.ErrBusy) {
+	claimErr := p.ClaimActiveRun(string(job.RunID))
+	if errors.Is(claimErr, project.ErrLocked) || errors.Is(claimErr, project.ErrBusy) {
 		if _, err := tx.Exec(ctx, `
-			UPDATE jobs SET available_at = now() + interval '5 seconds' WHERE id = $1`, job.ID); err != nil {
+			UPDATE jobs SET available_at = now() + make_interval(secs => $2) WHERE id = $1`, job.ID, retryDelay.Seconds()); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -100,8 +92,8 @@ func (q *Queue) Claim(ctx context.Context, workerID string, projects project.Rep
 	return &job, nil
 }
 
-func (q *Queue) Get(ctx context.Context, jobID int64) (*Job, error) {
-	var job Job
+func (q *Queue) Get(ctx context.Context, jobID int64) (*run.Job, error) {
+	var job run.Job
 	err := q.pool.QueryRow(ctx, `
 		SELECT id, run_id, step_name, attempts
 		FROM jobs
@@ -127,7 +119,7 @@ func (q *Queue) Complete(ctx context.Context, jobID int64) error {
 	return err
 }
 
-func (q *Queue) Reap(ctx context.Context, staleAfter time.Duration) (requeue []Job, failed []Job, err error) {
+func (q *Queue) Reap(ctx context.Context, staleAfter time.Duration, decide func(run.Job) run.ReapDecision) (requeue []run.Job, failed []run.Job, err error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -144,9 +136,9 @@ func (q *Queue) Reap(ctx context.Context, staleAfter time.Duration) (requeue []J
 	}
 	defer rows.Close()
 
-	var stale []Job
+	var stale []run.Job
 	for rows.Next() {
-		var job Job
+		var job run.Job
 		if err := rows.Scan(&job.ID, &job.RunID, &job.Step, &job.Attempts); err != nil {
 			return nil, nil, err
 		}
@@ -158,13 +150,10 @@ func (q *Queue) Reap(ctx context.Context, staleAfter time.Duration) (requeue []J
 	rows.Close()
 
 	for _, job := range stale {
-		if job.Step == run.StepApply || job.Attempts >= 2 {
-			lastError := "worker lost the step"
-			if job.Step == run.StepApply {
-				lastError = "worker lost the apply; check state before starting another run"
-			}
+		d := decide(job)
+		if d.Fail {
 			if _, err := tx.Exec(ctx, `
-				UPDATE jobs SET status = 'failed', last_error = $2 WHERE id = $1`, job.ID, lastError); err != nil {
+				UPDATE jobs SET status = 'failed', last_error = $2 WHERE id = $1`, job.ID, d.Reason); err != nil {
 				return nil, nil, err
 			}
 			failed = append(failed, job)

@@ -54,10 +54,10 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	}
 	p.SetAutoApprove(true)
 	p.SetStateToken("st-token")
-	p.Lock()
 	if err := p.ClaimActiveRun("run-" + suffix); err != nil {
 		t.Fatal(err)
 	}
+	p.Lock()
 	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, name, github_account_id, account_type, created_at, updated_at)
 		VALUES ($1, 'acme', $2, 'organization', now(), now())`, "ten-"+suffix, time.Now().UnixNano()); err != nil {
 		t.Fatal(err)

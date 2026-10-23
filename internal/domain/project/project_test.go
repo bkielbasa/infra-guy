@@ -1,6 +1,7 @@
 package project
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -67,6 +68,14 @@ func TestClaimAndRelease(t *testing.T) {
 	p.Unlock()
 	if p.Snapshot().Locked {
 		t.Fatal("still locked")
+	}
+}
+
+func TestClaimActiveRunRejectsLockedProject(t *testing.T) {
+	p := sample(t)
+	p.Lock()
+	if err := p.ClaimActiveRun("run-1"); !errors.Is(err, ErrLocked) {
+		t.Fatalf("expected ErrLocked, got %v", err)
 	}
 }
 

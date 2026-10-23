@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"infra-guy/internal/application/worker"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 )
@@ -58,7 +59,7 @@ func TestQueueClaimBusyDelayReap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	job, err := q.Claim(ctx, "worker-1", projects)
+	job, err := q.Claim(ctx, "worker-1", 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestQueueClaimBusyDelayReap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	busy, err := q.Claim(ctx, "worker-1", projects)
+	busy, err := q.Claim(ctx, "worker-1", 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +119,7 @@ func TestQueueClaimBusyDelayReap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requeue, failed, err := q.Reap(ctx, 2*time.Minute)
+	requeue, failed, err := q.Reap(ctx, 2*time.Minute, worker.ReapPolicy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestQueueClaimBusyDelayReap(t *testing.T) {
 		t.Fatalf("requeue %#v", requeue)
 	}
 
-	claimedAgain, err := q.Claim(ctx, "worker-1", projects)
+	claimedAgain, err := q.Claim(ctx, "worker-1", 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func TestQueueClaimBusyDelayReap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requeue, failed, err = q.Reap(ctx, 2*time.Minute)
+	requeue, failed, err = q.Reap(ctx, 2*time.Minute, worker.ReapPolicy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +186,7 @@ func TestQueueClaimBusyDelayReap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requeue, failed, err = q.Reap(ctx, 2*time.Minute)
+	requeue, failed, err = q.Reap(ctx, 2*time.Minute, worker.ReapPolicy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,22 +263,14 @@ func TestQueueHeartbeatAndComplete(t *testing.T) {
 	if gotPending, err := q.Get(ctx, pendingID); err != nil || gotPending != nil {
 		t.Fatalf("Get on pending job = %#v, err = %v; want nil, nil", gotPending, err)
 	}
-	wq := WorkerQueue{Queue: q}
-	if gotPendingW, err := wq.Get(ctx, pendingID); err != nil || gotPendingW != nil {
-		t.Fatalf("WorkerQueue.Get on pending job = %#v, err = %v; want nil, nil", gotPendingW, err)
-	}
 
-	job, err := q.Claim(ctx, "worker-hb", projects)
+	job, err := q.Claim(ctx, "worker-hb", 5*time.Second)
 	if err != nil || job == nil || job.RunID != runID || job.Step != run.StepPlan {
 		t.Fatalf("claim: job=%#v err=%v", job, err)
 	}
 	gotRunning, err := q.Get(ctx, job.ID)
 	if err != nil || gotRunning == nil || *gotRunning != *job {
 		t.Fatalf("Get on running job = %#v, err = %v; want %#v", gotRunning, err, job)
-	}
-	gotRunningW, err := wq.Get(ctx, job.ID)
-	if err != nil || gotRunningW == nil || gotRunningW.ID != job.ID || gotRunningW.RunID != job.RunID || gotRunningW.Step != job.Step || gotRunningW.Attempts != job.Attempts {
-		t.Fatalf("WorkerQueue.Get on running job = %#v, err = %v; want %#v", gotRunningW, err, job)
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE jobs SET locked_at = now() - interval '1 minute' WHERE id = $1`, job.ID); err != nil {

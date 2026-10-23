@@ -117,13 +117,13 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	if projects.items["p1"].Snapshot().ApprovalPolicyID != "" {
 		t.Fatalf("UpdateApprovalPolicy clear = %q, want empty", projects.items["p1"].Snapshot().ApprovalPolicyID)
 	}
-	if err := svc.SetLocked(ctx, "p1", true); err != nil || !projects.items["p1"].Snapshot().Locked {
-		t.Fatalf("lock: %v", err)
-	}
 	if err := created.ClaimActiveRun("run-1"); err != nil {
 		t.Fatal(err)
 	}
 	_ = projects.Save(ctx, created)
+	if err := svc.SetLocked(ctx, "p1", true); err != nil || !projects.items["p1"].Snapshot().Locked {
+		t.Fatalf("lock: %v", err)
+	}
 	st := state.New("p1")
 	_, _ = st.Lock([]byte(`{"ID":"L1"}`))
 	_ = states.Save(ctx, st)

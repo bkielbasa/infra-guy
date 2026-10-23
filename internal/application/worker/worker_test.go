@@ -83,7 +83,7 @@ type fakeQueue struct {
 	staleAfter time.Duration
 }
 
-func (q *fakeQueue) Claim(context.Context, string, project.Repository) (*Job, error) {
+func (q *fakeQueue) Claim(context.Context, string, time.Duration) (*Job, error) {
 	return q.claim, nil
 }
 func (q *fakeQueue) Get(_ context.Context, jobID int64) (*Job, error) {
@@ -105,7 +105,7 @@ func (q *fakeQueue) Complete(_ context.Context, jobID int64) error {
 	q.completed = append(q.completed, jobID)
 	return nil
 }
-func (q *fakeQueue) Reap(_ context.Context, staleAfter time.Duration) ([]Job, []Job, error) {
+func (q *fakeQueue) Reap(_ context.Context, staleAfter time.Duration, _ func(Job) run.ReapDecision) ([]Job, []Job, error) {
 	q.staleAfter = staleAfter
 	return q.requeue, q.failed, nil
 }
@@ -233,6 +233,18 @@ func TestStepTimeout(t *testing.T) {
 	}
 	if StepTimeout(run.StepInit) != 10*time.Minute || StepTimeout(run.StepPlan) != 20*time.Minute || StepTimeout(run.StepApply) != 60*time.Minute {
 		t.Fatal("timeouts")
+	}
+}
+
+func TestReapPolicy(t *testing.T) {
+	if d := ReapPolicy(run.Job{Step: run.StepPlan, Attempts: 1}); d.Fail {
+		t.Fatalf("expected plan attempt 1 to requeue, got %+v", d)
+	}
+	if d := ReapPolicy(run.Job{Step: run.StepPlan, Attempts: 2}); !d.Fail || d.Reason == "" {
+		t.Fatalf("expected plan attempt 2 to fail with reason, got %+v", d)
+	}
+	if d := ReapPolicy(run.Job{Step: run.StepApply, Attempts: 1}); !d.Fail || d.Reason == "" {
+		t.Fatalf("expected apply attempt 1 to fail immediately, got %+v", d)
 	}
 }
 

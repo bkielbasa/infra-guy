@@ -201,7 +201,7 @@ func main() {
 	}
 	dependencySvc.Runs = runSvc
 	w := &worker.Worker{
-		WorkerID: workerID(), Queue: postgres.WorkerQueue{Queue: queue},
+		WorkerID: workerID(), Queue: queue,
 		Projects: projects, Runs: runs, Service: runSvc,
 		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{Binary: tfInstaller}},
 		Tokens:          tokenSource,

@@ -17,8 +17,12 @@ import (
 	"infra-guy/internal/domain/run"
 )
 
-const HeartbeatEvery = 20 * time.Second
-const StaleAfter = 2 * time.Minute
+const (
+	HeartbeatEvery  = 20 * time.Second
+	StaleAfter      = 2 * time.Minute
+	ClaimRetryDelay = 5 * time.Second
+	MaxStepAttempts = 2
+)
 
 func StepTimeout(step run.StepName) time.Duration {
 	switch step {
@@ -31,11 +35,22 @@ func StepTimeout(step run.StepName) time.Duration {
 	}
 }
 
-type Job struct {
-	ID       int64
-	RunID    run.ID
-	Step     run.StepName
-	Attempts int
+type Job = run.Job
+
+func ReapPolicy(job run.Job) run.ReapDecision {
+	if job.Step == run.StepApply {
+		return run.ReapDecision{
+			Fail:   true,
+			Reason: "worker lost the apply; check state before starting another run",
+		}
+	}
+	if job.Attempts >= MaxStepAttempts {
+		return run.ReapDecision{
+			Fail:   true,
+			Reason: "worker lost the step",
+		}
+	}
+	return run.ReapDecision{Fail: false}
 }
 
 type Request struct {
@@ -56,11 +71,11 @@ type Result struct {
 }
 
 type Queue interface {
-	Claim(ctx context.Context, workerID string, projects project.Repository) (*Job, error)
-	Get(ctx context.Context, jobID int64) (*Job, error)
+	Claim(ctx context.Context, workerID string, retryDelay time.Duration) (*run.Job, error)
+	Get(ctx context.Context, jobID int64) (*run.Job, error)
 	Heartbeat(ctx context.Context, jobID int64) error
 	Complete(ctx context.Context, jobID int64) error
-	Reap(ctx context.Context, staleAfter time.Duration) (requeue []Job, failed []Job, err error)
+	Reap(ctx context.Context, staleAfter time.Duration, decide func(run.Job) run.ReapDecision) (requeue []run.Job, failed []run.Job, err error)
 }
 
 type Dispatcher interface {
@@ -132,16 +147,12 @@ func (w *Worker) Loop(ctx context.Context) {
 }
 
 func (w *Worker) Tick(ctx context.Context) error {
-	_, failed, err := w.Queue.Reap(ctx, StaleAfter)
+	_, failed, err := w.Queue.Reap(ctx, StaleAfter, ReapPolicy)
 	if err != nil {
 		return err
 	}
 	for _, job := range failed {
-		msg := "worker lost the step"
-		if job.Step == run.StepApply {
-			msg = "worker lost the apply; check state before starting another run"
-		}
-		if err := w.Service.Fail(ctx, job.RunID, job.Step, msg); err != nil {
+		if err := w.Service.Fail(ctx, job.RunID, job.Step, ReapPolicy(job).Reason); err != nil {
 			return err
 		}
 		if err := w.removeIfTerminal(ctx, job.RunID); err != nil {
@@ -149,7 +160,7 @@ func (w *Worker) Tick(ctx context.Context) error {
 		}
 	}
 
-	job, err := w.Queue.Claim(ctx, w.WorkerID, w.Projects)
+	job, err := w.Queue.Claim(ctx, w.WorkerID, ClaimRetryDelay)
 	if err != nil || job == nil {
 		return err
 	}

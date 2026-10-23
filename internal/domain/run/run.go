@@ -421,3 +421,15 @@ func (r *Run) skip(name StepName, now time.Time) {
 		st.FinishedAt = &now
 	}
 }
+
+type Job struct {
+	ID       int64
+	RunID    ID
+	Step     StepName
+	Attempts int
+}
+
+type ReapDecision struct {
+	Fail   bool
+	Reason string
+}
