@@ -157,6 +157,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /contexts", u.contexts)
 	mux.HandleFunc("POST /contexts", u.createContext)
 	mux.HandleFunc("GET /contexts/{id}", u.contextDetails)
+	mux.HandleFunc("POST /contexts/{id}", u.updateContext)
 	mux.HandleFunc("POST /contexts/{id}/entries", u.upsertContextEntry)
 	mux.HandleFunc("POST /contexts/{id}/entries/{entryID}/delete", u.deleteContextEntry)
 	mux.HandleFunc("POST /contexts/{id}/delete", u.deleteContext)
@@ -314,14 +315,46 @@ func collectKnownTags(items []*project.Project) []string {
 }
 
 func (u *ui) knownTags(ctx context.Context, tenantID string) []string {
-	if u.cfg.Projects == nil || tenantID == "" {
+	if tenantID == "" {
 		return nil
 	}
-	items, err := u.cfg.Projects.List(ctx, tenantID)
-	if err != nil {
+	seen := make(map[string]struct{})
+	if u.cfg.Projects != nil {
+		if items, err := u.cfg.Projects.List(ctx, tenantID); err == nil {
+			for _, p := range items {
+				for _, t := range project.TagList(p.Snapshot().Tags) {
+					seen[t] = struct{}{}
+				}
+			}
+		}
+	}
+	if u.cfg.Contexts != nil {
+		if items, err := u.cfg.Contexts.List(ctx, tenantID); err == nil {
+			for _, c := range items {
+				for _, t := range project.TagList(c.Snapshot().Tags) {
+					seen[t] = struct{}{}
+				}
+			}
+		}
+	}
+	if u.cfg.Policies != nil {
+		if items, err := u.cfg.Policies.List(ctx, tenantID); err == nil {
+			for _, p := range items {
+				for _, t := range project.TagList(p.Snapshot().Tags) {
+					seen[t] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(seen) == 0 {
 		return nil
 	}
-	return collectKnownTags(items)
+	out := make([]string, 0, len(seen))
+	for t := range seen {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func matchesProjectFilter(name, branch string, tags []string, filterName, filterBranch, filterTag string) bool {
@@ -1319,6 +1352,8 @@ type contextRow struct {
 	Name       string
 	EntryCount int
 	UpdatedAt  string
+	Tags       []string
+	TagsCSV    string
 }
 
 type contextEntryRow struct {
@@ -1384,6 +1419,8 @@ func (u *ui) contexts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
 	}
+	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
+	filterTag := strings.TrimSpace(strings.Join(r.URL.Query()["tag"], ", "))
 	var rows []contextRow
 	if u.cfg.Contexts != nil {
 		items, err := u.cfg.Contexts.List(r.Context(), tenantID)
@@ -1394,15 +1431,27 @@ func (u *ui) contexts(w http.ResponseWriter, r *http.Request) {
 		rows = make([]contextRow, 0, len(items))
 		for _, c := range items {
 			cs := c.Snapshot()
+			tags := project.TagList(cs.Tags)
+			if !matchesProjectFilter(cs.Name, "", tags, filterName, "", filterTag) {
+				continue
+			}
 			rows = append(rows, contextRow{
 				ID:         string(cs.ID),
 				Name:       cs.Name,
 				EntryCount: len(cs.Entries),
 				UpdatedAt:  fmtTime(cs.UpdatedAt),
+				Tags:       tags,
+				TagsCSV:    strings.Join(tags, ","),
 			})
 		}
 	}
-	u.page(w, "Contexts", "contexts", map[string]any{"Contexts": rows})
+	u.page(w, "Contexts", "contexts", map[string]any{
+		"Contexts":   rows,
+		"FilterName": filterName,
+		"FilterTag":  filterTag,
+		"KnownTags":  u.knownTags(r.Context(), tenantID),
+		"CountAll":   len(rows),
+	})
 }
 
 func (u *ui) createContext(w http.ResponseWriter, r *http.Request) {
@@ -1419,7 +1468,12 @@ func (u *ui) createContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "contexts service not configured", http.StatusInternalServerError)
 		return
 	}
-	c, err := u.cfg.Contexts.Create(r.Context(), tenantID, r.FormValue("name"))
+	tags, err := project.ParseTags(r.FormValue("tags"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	c, err := u.cfg.Contexts.Create(r.Context(), tenantID, r.FormValue("name"), tags)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1463,10 +1517,45 @@ func (u *ui) contextDetails(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	u.page(w, cs.Name, "context", map[string]any{
-		"ID":      string(cs.ID),
-		"Name":    cs.Name,
-		"Entries": entries,
+		"ID":        string(cs.ID),
+		"Name":      cs.Name,
+		"Tags":      project.FormatTags(cs.Tags),
+		"TagList":   project.TagList(cs.Tags),
+		"KnownTags": u.knownTags(r.Context(), tenantID),
+		"UpdatedAt": fmtTime(cs.UpdatedAt),
+		"Entries":   entries,
 	})
+}
+
+func (u *ui) updateContext(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.Contexts == nil {
+		http.Error(w, "contexts service not configured", http.StatusInternalServerError)
+		return
+	}
+	tags, err := project.ParseTags(r.FormValue("tags"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	id := tfcontext.ID(r.PathValue("id"))
+	if _, err := u.cfg.Contexts.Update(r.Context(), tenantID, id, r.FormValue("name"), tags); err != nil {
+		if errors.Is(err, tfcontextapp.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/contexts/"+string(id), http.StatusSeeOther)
 }
 
 func (u *ui) upsertContextEntry(w http.ResponseWriter, r *http.Request) {
@@ -1557,6 +1646,8 @@ type policyRow struct {
 	Name        string
 	Description string
 	UpdatedAt   string
+	Tags        []string
+	TagsCSV     string
 }
 
 const defaultSampleRego = `package infraguy.approval
@@ -1713,6 +1804,9 @@ func (u *ui) policies(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
 	}
+	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
+	filterDescription := strings.TrimSpace(r.URL.Query().Get("description"))
+	filterTag := strings.TrimSpace(strings.Join(r.URL.Query()["tag"], ", "))
 	var rows []policyRow
 	if u.cfg.Policies != nil {
 		items, err := u.cfg.Policies.List(r.Context(), tenantID)
@@ -1723,19 +1817,30 @@ func (u *ui) policies(w http.ResponseWriter, r *http.Request) {
 		rows = make([]policyRow, 0, len(items))
 		for _, p := range items {
 			ps := p.Snapshot()
+			tags := project.TagList(ps.Tags)
+			if !matchesProjectFilter(ps.Name, ps.Description, tags, filterName, filterDescription, filterTag) {
+				continue
+			}
 			rows = append(rows, policyRow{
 				ID:          string(ps.ID),
 				Name:        ps.Name,
 				Description: ps.Description,
 				UpdatedAt:   fmtTime(ps.UpdatedAt),
+				Tags:        tags,
+				TagsCSV:     strings.Join(tags, ","),
 			})
 		}
 	}
 	u.page(w, "Policies", "policies", map[string]any{
-		"Policies":        rows,
-		"DefaultRego":     defaultSampleRego,
-		"SampleRego":      defaultSampleRego,
-		"SampleInputJSON": defaultSampleInputJSON,
+		"Policies":          rows,
+		"FilterName":        filterName,
+		"FilterDescription": filterDescription,
+		"FilterTag":         filterTag,
+		"KnownTags":         u.knownTags(r.Context(), tenantID),
+		"CountAll":          len(rows),
+		"DefaultRego":       defaultSampleRego,
+		"SampleRego":        defaultSampleRego,
+		"SampleInputJSON":   defaultSampleInputJSON,
 	})
 }
 
@@ -1753,11 +1858,17 @@ func (u *ui) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "policies service not configured", http.StatusInternalServerError)
 		return
 	}
+	tags, err := project.ParseTags(r.FormValue("tags"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	p, err := u.cfg.Policies.Create(r.Context(), policyapp.CreateInput{
 		TenantID:    tenantID,
 		Name:        r.FormValue("name"),
 		Description: r.FormValue("description"),
 		Rego:        r.FormValue("rego"),
+		Tags:        tags,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1857,6 +1968,9 @@ func (u *ui) policyDetails(w http.ResponseWriter, r *http.Request) {
 		"Name":            ps.Name,
 		"Description":     ps.Description,
 		"Rego":            ps.Rego,
+		"Tags":            project.FormatTags(ps.Tags),
+		"TagList":         project.TagList(ps.Tags),
+		"KnownTags":       u.knownTags(r.Context(), tenantID),
 		"UpdatedAt":       fmtTime(ps.UpdatedAt),
 		"SampleInputJSON": defaultSampleInputJSON,
 	})
@@ -1876,6 +1990,11 @@ func (u *ui) updatePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "policies service not configured", http.StatusInternalServerError)
 		return
 	}
+	tags, err := project.ParseTags(r.FormValue("tags"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	id := policy.ID(r.PathValue("id"))
 	if _, err := u.cfg.Policies.Update(r.Context(), policyapp.UpdateInput{
 		ID:          id,
@@ -1883,6 +2002,7 @@ func (u *ui) updatePolicy(w http.ResponseWriter, r *http.Request) {
 		Name:        r.FormValue("name"),
 		Description: r.FormValue("description"),
 		Rego:        r.FormValue("rego"),
+		Tags:        tags,
 	}); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
 			http.NotFound(w, r)

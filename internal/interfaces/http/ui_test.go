@@ -2603,6 +2603,188 @@ func TestProjectsSidebarFiltersAndProfilePage(t *testing.T) {
 	}
 }
 
+func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
+	p1 := listProject(t)
+	_ = p1.SetTags(map[string]string{"env": "prod", "team": "platform"})
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p1}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+
+	ctxRepo := newUIMemContexts()
+	ctxSeq := 0
+	ctxSvc := &tfcontextapp.Service{
+		Contexts: ctxRepo,
+		Now:      time.Now,
+		NewID: func() string {
+			ctxSeq++
+			return fmt.Sprintf("ctx-%d", ctxSeq)
+		},
+	}
+
+	polRepo := newUIMemPolicies(projects)
+	polSeq := 0
+	polSvc := &policyapp.Service{
+		Policies: polRepo,
+		Engine:   opa.NewEvaluator(),
+		Now:      time.Now,
+		NewID: func() string {
+			polSeq++
+			return fmt.Sprintf("pol-%d", polSeq)
+		},
+	}
+
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc, Runs: runsSvc, States: stSvc,
+		Contexts: ctxSvc, Policies: polSvc,
+		Checkout:      &stubTip{sha: "abc1234"},
+		Lookup:        &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// 1. Create two contexts with tags
+	rr := postUI(t, h, "/contexts", strings.NewReader("name=aws-prod&tags=env%3Aprod%2C+cloud%3Aaws"))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/contexts/ctx-1" {
+		t.Fatalf("create context aws-prod = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+	rr = postUI(t, h, "/contexts", strings.NewReader("name=gcp-staging&tags=env%3Astaging%2C+cloud%3Agcp"))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/contexts/ctx-2" {
+		t.Fatalf("create context gcp-staging = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+
+	// Invalid tag format on context create returns 400
+	rrBadCtx := postUI(t, h, "/contexts", strings.NewReader("name=bad-ctx&tags=invalid-tag"))
+	if rrBadCtx.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid context tag, got %d", rrBadCtx.Code)
+	}
+
+	// 2. GET /contexts renders unified layout with sidebar filters, search, and tag pills
+	rr = getUI(t, h, "/contexts")
+	ctxListBody := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /contexts = %d: %s", rr.Code, ctxListBody)
+	}
+	for _, want := range []string{
+		`class="projects-layout"`,
+		`class="filters-sidebar"`,
+		`id="toggle-new-context"`,
+		`id="filter-query"`,
+		`id="filter-name"`,
+		`id="filter-tag"`,
+		`id="contexts-table"`,
+		`aws-prod`,
+		`gcp-staging`,
+		`cloud:aws`,
+		`cloud:gcp`,
+	} {
+		if !strings.Contains(ctxListBody, want) {
+			t.Fatalf("expected GET /contexts to contain %q, got:\n%s", want, ctxListBody)
+		}
+	}
+
+	// 3. Filter contexts by multi-tag query
+	rr = getUI(t, h, "/contexts?tag=env:prod,cloud:aws")
+	filteredCtxBody := rr.Body.String()
+	if !strings.Contains(filteredCtxBody, "aws-prod") || strings.Contains(filteredCtxBody, "gcp-staging") {
+		t.Fatalf("expected /contexts?tag=env:prod,cloud:aws to match only aws-prod, got:\n%s", filteredCtxBody)
+	}
+
+	// 4. Update context name and tags via POST /contexts/ctx-1
+	rr = postUI(t, h, "/contexts/ctx-1", strings.NewReader("name=aws-production&tags=env%3Aprod%2C+cloud%3Aaws%2C+tier%3Acore"))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/contexts/ctx-1" {
+		t.Fatalf("POST /contexts/ctx-1 = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+	rr = getUI(t, h, "/contexts/ctx-1")
+	ctxDetailBody := rr.Body.String()
+	for _, want := range []string{"aws-production", "tier:core", `action="/contexts/ctx-1"`} {
+		if !strings.Contains(ctxDetailBody, want) {
+			t.Fatalf("expected /contexts/ctx-1 to contain %q, got:\n%s", want, ctxDetailBody)
+		}
+	}
+
+	// 5. Create two policies with tags
+	validRego := "package infraguy.approval\nimport rego.v1\ndefault allow := true\n"
+	rr = postUI(t, h, "/policies", strings.NewReader(url.Values{
+		"name":        {"prod-guard"},
+		"description": {"Production guardrails"},
+		"tags":        {"env:prod, compliance:soc2"},
+		"rego":        {validRego},
+	}.Encode()))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/policies/pol-1" {
+		t.Fatalf("create policy prod-guard = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+	rr = postUI(t, h, "/policies", strings.NewReader(url.Values{
+		"name":        {"staging-guard"},
+		"description": {"Staging guardrails"},
+		"tags":        {"env:staging"},
+		"rego":        {validRego},
+	}.Encode()))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/policies/pol-2" {
+		t.Fatalf("create policy staging-guard = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+
+	// 6. GET /policies renders unified layout with sidebar filters, search, and tag pills
+	rr = getUI(t, h, "/policies")
+	polListBody := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /policies = %d: %s", rr.Code, polListBody)
+	}
+	for _, want := range []string{
+		`class="projects-layout"`,
+		`class="filters-sidebar"`,
+		`id="toggle-new-policy"`,
+		`id="filter-query"`,
+		`id="filter-name"`,
+		`id="filter-description"`,
+		`id="filter-tag"`,
+		`id="policies-table"`,
+		`prod-guard`,
+		`staging-guard`,
+		`compliance:soc2`,
+	} {
+		if !strings.Contains(polListBody, want) {
+			t.Fatalf("expected GET /policies to contain %q, got:\n%s", want, polListBody)
+		}
+	}
+
+	// 7. Filter policies by multi-tag query and description
+	rr = getUI(t, h, "/policies?tag=env:prod,compliance:soc2")
+	filteredPolBody := rr.Body.String()
+	if !strings.Contains(filteredPolBody, "prod-guard") || strings.Contains(filteredPolBody, "staging-guard") {
+		t.Fatalf("expected /policies?tag=env:prod,compliance:soc2 to match only prod-guard, got:\n%s", filteredPolBody)
+	}
+
+	// 8. Update policy tags via POST /policies/pol-1
+	rr = postUI(t, h, "/policies/pol-1", strings.NewReader(url.Values{
+		"name":        {"prod-guard"},
+		"description": {"Production guardrails"},
+		"tags":        {"env:prod, compliance:iso27001"},
+		"rego":        {validRego},
+	}.Encode()))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/policies/pol-1" {
+		t.Fatalf("POST /policies/pol-1 = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+	rr = getUI(t, h, "/policies/pol-1")
+	polDetailBody := rr.Body.String()
+	if !strings.Contains(polDetailBody, "compliance:iso27001") {
+		t.Fatalf("expected /policies/pol-1 to contain updated tag compliance:iso27001, got:\n%s", polDetailBody)
+	}
+}
+
+
 
 
 

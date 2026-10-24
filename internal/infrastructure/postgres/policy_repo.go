@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -22,14 +23,20 @@ func NewPolicyRepo(pool *pgxpool.Pool) *PolicyRepo {
 	return &PolicyRepo{pool: pool}
 }
 
-const policyColumns = `id, tenant_id, name, description, rego, created_at, updated_at`
+const policyColumns = `id, tenant_id, name, description, rego, tags, created_at, updated_at`
 
 func (r *PolicyRepo) Insert(ctx context.Context, p *policy.Policy) error {
 	s := p.Snapshot()
+	tagsJSON := []byte("{}")
+	if len(s.Tags) > 0 {
+		if b, err := json.Marshal(s.Tags); err == nil {
+			tagsJSON = b
+		}
+	}
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO policies (`+policyColumns+`)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		s.ID, s.TenantID, s.Name, s.Description, s.Rego, s.CreatedAt, s.UpdatedAt,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		s.ID, s.TenantID, s.Name, s.Description, s.Rego, tagsJSON, s.CreatedAt, s.UpdatedAt,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -43,15 +50,22 @@ func (r *PolicyRepo) Insert(ctx context.Context, p *policy.Policy) error {
 
 func (r *PolicyRepo) Update(ctx context.Context, p *policy.Policy) error {
 	s := p.Snapshot()
+	tagsJSON := []byte("{}")
+	if len(s.Tags) > 0 {
+		if b, err := json.Marshal(s.Tags); err == nil {
+			tagsJSON = b
+		}
+	}
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE policies SET
 			tenant_id = $2,
 			name = $3,
 			description = $4,
 			rego = $5,
-			updated_at = $6
+			tags = $6,
+			updated_at = $7
 		WHERE id = $1`,
-		s.ID, s.TenantID, s.Name, s.Description, s.Rego, s.UpdatedAt,
+		s.ID, s.TenantID, s.Name, s.Description, s.Rego, tagsJSON, s.UpdatedAt,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -107,11 +121,15 @@ type policyScanner interface {
 
 func scanPolicy(row policyScanner) (*policy.Policy, error) {
 	var s policy.Snapshot
+	var tagsRaw []byte
 	var created, updated time.Time
 	if err := row.Scan(
-		&s.ID, &s.TenantID, &s.Name, &s.Description, &s.Rego, &created, &updated,
+		&s.ID, &s.TenantID, &s.Name, &s.Description, &s.Rego, &tagsRaw, &created, &updated,
 	); err != nil {
 		return nil, err
+	}
+	if len(tagsRaw) > 0 {
+		_ = json.Unmarshal(tagsRaw, &s.Tags)
 	}
 	s.CreatedAt = utcTime(created)
 	s.UpdatedAt = utcTime(updated)

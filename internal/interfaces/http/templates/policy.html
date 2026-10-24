@@ -4,14 +4,16 @@
   <div class="headline headline-spread form-header">
     <div>
       <h1>{{.Name}}</h1>
-      <p class="sub">Edit policy rules and test against sample Terraform plan JSON.</p>
+      <p class="sub">Edit policy rules, tags, and test against sample Terraform plan JSON.</p>
+      {{if .TagList}}
+      <div class="tag-pills" style="margin-top: 8px;">
+        {{range .TagList}}<span class="tag-pill">{{.}}</span>{{end}}
+      </div>
+      {{end}}
     </div>
-    <form method="post" action="/policies/{{.ID}}/delete" class="inline">
-      <button type="submit" class="btn-danger">Delete</button>
-    </form>
   </div>
 
-  <form method="post" action="/policies/{{.ID}}">
+  <form method="post" action="/policies/{{.ID}}" class="project-form">
     <section class="form-section">
       <h2>Policy Definition</h2>
       <div class="form-grid">
@@ -24,7 +26,19 @@
           <input id="policy-description" type="text" name="description" value="{{.Description}}">
         </div>
       </div>
-      <div class="field">
+      <div class="field" style="margin-top: 14px;">
+        <label for="tags-input">Tags (key:value)</label>
+        <div class="repo-Combobox" id="tag-combobox">
+          <input type="text" id="tags-input" name="tags" value="{{.Tags}}" placeholder="env:prod, compliance:soc2" autocomplete="off">
+          <div id="tag-results" class="repo-results" role="listbox"></div>
+          <div id="known-tags-data" hidden>
+            {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
+          </div>
+        </div>
+        <div id="tags-preview" class="tag-pills"></div>
+        <span class="field-hint">Comma-separated <code>key:value</code> pairs used to organize and filter policies.</span>
+      </div>
+      <div class="field" style="margin-top: 14px;">
         <label for="policy-rego">Rego</label>
         <textarea id="policy-rego" name="rego" rows="14" data-code-editor="rego" required>{{.Rego}}</textarea>
       </div>
@@ -39,6 +53,19 @@
       <div id="policy-test-result" class="meta"></div>
     </section>
   </form>
+
+  <section class="form-section danger-zone">
+    <h2>Danger Zone</h2>
+    <div class="danger-row">
+      <div>
+        <strong>Delete policy</strong>
+        <span class="field-hint">Permanently remove this policy. Policies attached to projects must be detached first.</span>
+      </div>
+      <form method="post" action="/policies/{{.ID}}/delete" class="inline">
+        <button type="submit" class="btn-danger">Delete policy</button>
+      </form>
+    </div>
+  </section>
 </div>
 
 <script>
@@ -84,5 +111,133 @@ async function runPolicyTest() {
     setPolicyTestResult(resultEl, 'pill-failed', 'Error', String(err));
   }
 }
+
+(function() {
+  function fuzzyMatch(query, text) {
+    if (!query) return { score: 1, indices: [] };
+    const q = query.toLowerCase();
+    const t = text.toLowerCase();
+    let qi = 0, score = 0, streak = 0;
+    const indices = [];
+    for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+      if (t[ti] === q[qi]) {
+        indices.push(ti);
+        streak++;
+        score += 10 + streak * 5 + (ti === 0 || t[ti - 1] === ':' || t[ti - 1] === '-' || t[ti - 1] === '_' ? 15 : 0);
+        qi++;
+      } else {
+        streak = 0;
+        score -= 1;
+      }
+    }
+    return qi === q.length ? { score, indices } : null;
+  }
+
+  function highlight(text, indices) {
+    if (!indices || !indices.length) return text;
+    const set = new Set(indices);
+    let out = '';
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      out += set.has(i) ? '<mark>' + ch + '</mark>' : ch;
+    }
+    return out;
+  }
+
+  const tagsInput = document.getElementById('tags-input');
+  const tagsPreview = document.getElementById('tags-preview');
+  const tagResults = document.getElementById('tag-results');
+  const knownTags = Array.from(document.querySelectorAll('#known-tags-data [data-tag]')).map(el => el.dataset.tag).filter(Boolean);
+  if (tagsInput && tagsPreview) {
+    let tagActiveIdx = 0;
+    let tagFiltered = [];
+
+    function updatePreview() {
+      const tokens = tagsInput.value.split(/[,\n\r]+/).map(s => s.trim()).filter(Boolean);
+      tagsPreview.innerHTML = tokens.map(t => {
+        const valid = /^[^:\s,]+\:[^:\s,]+$/.test(t);
+        const safe = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return '<span class="tag-pill' + (valid ? '' : ' tag-pill-invalid') + '">' + safe + '</span>';
+      }).join('');
+    }
+
+    function renderTagSuggestions() {
+      if (!tagResults || !knownTags.length) return;
+      const parts = tagsInput.value.split(',');
+      const current = parts[parts.length - 1].trim();
+      const used = new Set(parts.slice(0, -1).map(s => s.trim().toLowerCase()).filter(Boolean));
+      tagFiltered = [];
+      for (const t of knownTags) {
+        if (used.has(t.toLowerCase())) continue;
+        const m = fuzzyMatch(current, t);
+        if (m) tagFiltered.push({ tag: t, score: m.score, indices: m.indices });
+      }
+      if (current) tagFiltered.sort((a, b) => b.score - a.score);
+      if (tagActiveIdx >= tagFiltered.length) tagActiveIdx = Math.max(0, tagFiltered.length - 1);
+
+      if (!tagFiltered.length) {
+        tagResults.classList.remove('open');
+        tagResults.innerHTML = '';
+        return;
+      }
+      tagResults.innerHTML = tagFiltered.map((item, idx) =>
+        '<div class="repo-option' + (idx === tagActiveIdx ? ' active' : '') + '" data-tag="' + item.tag + '">' +
+          highlight(item.tag, item.indices) +
+        '</div>'
+      ).join('');
+      tagResults.classList.add('open');
+    }
+
+    function chooseTag(tag) {
+      if (!tag) return;
+      const parts = tagsInput.value.split(',').map(s => s.trim()).filter((_, idx, arr) => idx < arr.length - 1);
+      parts.push(tag);
+      tagsInput.value = parts.join(', ') + ', ';
+      updatePreview();
+      if (tagResults) tagResults.classList.remove('open');
+      tagsInput.focus();
+    }
+
+    tagsInput.addEventListener('focus', renderTagSuggestions);
+    tagsInput.addEventListener('input', () => {
+      tagActiveIdx = 0;
+      updatePreview();
+      renderTagSuggestions();
+    });
+    tagsInput.addEventListener('keydown', (e) => {
+      if (!tagResults || !tagResults.classList.contains('open')) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        tagActiveIdx = Math.min(tagFiltered.length - 1, tagActiveIdx + 1);
+        renderTagSuggestions();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        tagActiveIdx = Math.max(0, tagActiveIdx - 1);
+        renderTagSuggestions();
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        if (tagFiltered[tagActiveIdx]) {
+          e.preventDefault();
+          chooseTag(tagFiltered[tagActiveIdx].tag);
+        }
+      } else if (e.key === 'Escape') {
+        tagResults.classList.remove('open');
+      }
+    });
+    if (tagResults) {
+      tagResults.addEventListener('mousedown', (e) => {
+        const opt = e.target.closest('.repo-option');
+        if (!opt) return;
+        e.preventDefault();
+        chooseTag(opt.dataset.tag);
+      });
+    }
+    document.addEventListener('click', (e) => {
+      if (tagResults && !e.target.closest('#tag-combobox')) {
+        tagResults.classList.remove('open');
+      }
+    });
+    updatePreview();
+  }
+})();
 </script>
 {{end}}

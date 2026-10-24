@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -24,26 +25,42 @@ func NewContextRepo(pool *pgxpool.Pool) *ContextRepo {
 
 func (r *ContextRepo) Create(ctx context.Context, c *tfcontext.Context) error {
 	s := c.Snapshot()
-	_, err := r.pool.Exec(ctx, `
-		INSERT INTO contexts (id, tenant_id, name, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5)`,
-		s.ID, s.TenantID, s.Name, s.CreatedAt, s.UpdatedAt,
+	tagsMap := s.Tags
+	if tagsMap == nil {
+		tagsMap = map[string]string{}
+	}
+	tagsJSON, err := json.Marshal(tagsMap)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `
+		INSERT INTO contexts (id, tenant_id, name, tags, created_at, updated_at)
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+		ON CONFLICT (id) DO UPDATE SET
+			name = EXCLUDED.name,
+			tags = EXCLUDED.tags,
+			updated_at = EXCLUDED.updated_at`,
+		s.ID, s.TenantID, s.Name, string(tagsJSON), s.CreatedAt, s.UpdatedAt,
 	)
 	return err
 }
 
 func (r *ContextRepo) Get(ctx context.Context, id tfcontext.ID) (*tfcontext.Context, error) {
 	var s tfcontext.Snapshot
+	var tagsRaw []byte
 	var created, updated time.Time
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, name, created_at, updated_at
+		SELECT id, tenant_id, name, tags, created_at, updated_at
 		FROM contexts WHERE id = $1`, id,
-	).Scan(&s.ID, &s.TenantID, &s.Name, &created, &updated)
+	).Scan(&s.ID, &s.TenantID, &s.Name, &tagsRaw, &created, &updated)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if len(tagsRaw) > 0 {
+		_ = json.Unmarshal(tagsRaw, &s.Tags)
 	}
 	s.CreatedAt = utcTime(created)
 	s.UpdatedAt = utcTime(updated)
@@ -57,7 +74,7 @@ func (r *ContextRepo) Get(ctx context.Context, id tfcontext.ID) (*tfcontext.Cont
 
 func (r *ContextRepo) ListByTenant(ctx context.Context, tenantID string) ([]*tfcontext.Context, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, tenant_id, name, created_at, updated_at
+		SELECT id, tenant_id, name, tags, created_at, updated_at
 		FROM contexts WHERE tenant_id = $1 ORDER BY created_at, id`, tenantID)
 	if err != nil {
 		return nil, err
@@ -66,9 +83,13 @@ func (r *ContextRepo) ListByTenant(ctx context.Context, tenantID string) ([]*tfc
 	var out []*tfcontext.Context
 	for rows.Next() {
 		var s tfcontext.Snapshot
+		var tagsRaw []byte
 		var created, updated time.Time
-		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &created, &updated); err != nil {
+		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &tagsRaw, &created, &updated); err != nil {
 			return nil, err
+		}
+		if len(tagsRaw) > 0 {
+			_ = json.Unmarshal(tagsRaw, &s.Tags)
 		}
 		s.CreatedAt = utcTime(created)
 		s.UpdatedAt = utcTime(updated)
@@ -131,7 +152,7 @@ func (r *ContextRepo) SetProjectContexts(ctx context.Context, projectID project.
 
 func (r *ContextRepo) ListByProject(ctx context.Context, projectID project.ID) ([]*tfcontext.Context, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT c.id, c.tenant_id, c.name, c.created_at, c.updated_at
+		SELECT c.id, c.tenant_id, c.name, c.tags, c.created_at, c.updated_at
 		FROM project_contexts pc
 		JOIN contexts c ON c.id = pc.context_id
 		WHERE pc.project_id = $1
@@ -143,9 +164,13 @@ func (r *ContextRepo) ListByProject(ctx context.Context, projectID project.ID) (
 	var out []*tfcontext.Context
 	for rows.Next() {
 		var s tfcontext.Snapshot
+		var tagsRaw []byte
 		var created, updated time.Time
-		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &created, &updated); err != nil {
+		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &tagsRaw, &created, &updated); err != nil {
 			return nil, err
+		}
+		if len(tagsRaw) > 0 {
+			_ = json.Unmarshal(tagsRaw, &s.Tags)
 		}
 		s.CreatedAt = utcTime(created)
 		s.UpdatedAt = utcTime(updated)

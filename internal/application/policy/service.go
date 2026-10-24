@@ -31,6 +31,7 @@ type CreateInput struct {
 	Name        string
 	Description string
 	Rego        string
+	Tags        map[string]string
 }
 
 type UpdateInput struct {
@@ -39,6 +40,7 @@ type UpdateInput struct {
 	Name        string
 	Description string
 	Rego        string
+	Tags        map[string]string
 }
 
 type UserInfo struct {
@@ -103,6 +105,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*policy.Policy, e
 		Name:        in.Name,
 		Description: in.Description,
 		Rego:        in.Rego,
+		Tags:        in.Tags,
 		Now:         s.now(),
 	})
 	if err != nil {
@@ -124,6 +127,9 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*policy.Policy, e
 	}
 	if err := p.Update(in.Name, in.Description, in.Rego, s.now()); err != nil {
 		return nil, err
+	}
+	if in.Tags != nil {
+		p.SetTags(in.Tags)
 	}
 	if err := s.engine().Validate(in.Rego); err != nil {
 		return nil, fmt.Errorf("%w: %v", policy.ErrInvalidRego, err)

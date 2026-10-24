@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"infra-guy/internal/domain/project"
 )
 
 var (
@@ -24,6 +26,7 @@ type Snapshot struct {
 	Name        string
 	Description string
 	Rego        string
+	Tags        map[string]string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -34,6 +37,7 @@ type NewInput struct {
 	Name        string
 	Description string
 	Rego        string
+	Tags        map[string]string
 	Now         time.Time
 }
 
@@ -57,7 +61,7 @@ func New(in NewInput) (*Policy, error) {
 	if strings.TrimSpace(in.Rego) == "" {
 		return nil, ErrInvalidRego
 	}
-	return &Policy{
+	p := &Policy{
 		s: Snapshot{
 			ID:          id,
 			TenantID:    tenantID,
@@ -67,19 +71,27 @@ func New(in NewInput) (*Policy, error) {
 			CreatedAt:   in.Now,
 			UpdatedAt:   in.Now,
 		},
-	}, nil
+	}
+	if err := p.SetTags(in.Tags); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 func Rehydrate(s Snapshot) *Policy {
-	return &Policy{s: s}
+	cp := s
+	cp.Tags = cloneTags(s.Tags)
+	return &Policy{s: cp}
 }
 
 func Restore(s Snapshot) *Policy {
-	return &Policy{s: s}
+	return Rehydrate(s)
 }
 
 func (p *Policy) Snapshot() Snapshot {
-	return p.s
+	cp := p.s
+	cp.Tags = cloneTags(p.s.Tags)
+	return cp
 }
 
 func (p *Policy) ID() ID               { return p.s.ID }
@@ -89,6 +101,15 @@ func (p *Policy) Description() string  { return p.s.Description }
 func (p *Policy) Rego() string         { return p.s.Rego }
 func (p *Policy) CreatedAt() time.Time { return p.s.CreatedAt }
 func (p *Policy) UpdatedAt() time.Time { return p.s.UpdatedAt }
+
+func (p *Policy) SetTags(tags map[string]string) error {
+	norm, err := project.ParseTags(project.FormatTags(tags))
+	if err != nil {
+		return err
+	}
+	p.s.Tags = norm
+	return nil
+}
 
 func (p *Policy) Update(name, description, rego string, now time.Time) error {
 	name = strings.TrimSpace(name)
@@ -103,6 +124,17 @@ func (p *Policy) Update(name, description, rego string, now time.Time) error {
 	p.s.Rego = rego
 	p.s.UpdatedAt = now
 	return nil
+}
+
+func cloneTags(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 type Repository interface {

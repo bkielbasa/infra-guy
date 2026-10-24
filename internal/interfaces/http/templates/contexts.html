@@ -1,40 +1,335 @@
 {{define "contexts"}}
-<div class="panel form-panel">
-  <div class="headline headline-spread form-header">
+<div class="projects-page">
+  <div class="projects-header">
     <div>
       <h1>Contexts</h1>
-      <p class="sub">Reusable sets of environment variables and mounted files shared across projects.</p>
+      <p class="settings-card-desc">Reusable sets of environment variables and mounted files shared across projects.</p>
+    </div>
+    <button type="button" class="btn btn-trigger" id="toggle-new-context">New context</button>
+  </div>
+
+  <div id="new-context-panel" class="panel form-panel" style="margin-bottom: 18px;"{{if .Contexts}} hidden{{end}}>
+    <div class="form-header">
+      <h2>New context</h2>
+      <p class="sub">Create a shared environment and file bundle that can be attached to multiple projects.</p>
+    </div>
+    <form method="post" action="/contexts" class="project-form">
+      <section class="form-section">
+        <div class="form-grid">
+          <div class="field">
+            <label for="context-name">Name</label>
+            <input type="text" id="context-name" name="name" placeholder="e.g. aws-prod" aria-label="New context name" required>
+            <span class="field-hint">Unique identifier for this context within your organization.</span>
+          </div>
+          <div class="field">
+            <label for="tags-input">Tags (key:value)</label>
+            <div class="repo-Combobox" id="tag-combobox">
+              <input type="text" id="tags-input" name="tags" placeholder="env:prod, team:platform" autocomplete="off">
+              <div id="tag-results" class="repo-results" role="listbox"></div>
+              <div id="known-tags-data" hidden>
+                {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
+              </div>
+            </div>
+            <div id="tags-preview" class="tag-pills"></div>
+            <span class="field-hint">Optional comma-separated <code>key:value</code> pairs.</span>
+          </div>
+        </div>
+      </section>
+      <div class="actions">
+        <button type="submit" class="btn-trigger">Create context</button>
+        <button type="button" class="btn" id="cancel-new-context">Cancel</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="projects-topbar">
+    <div class="projects-search-wrap">
+      <input type="search" id="filter-query" class="projects-search-input" placeholder="Search contexts by name or tag..." autocomplete="off">
+    </div>
+    <div class="status-filter-tabs" role="tablist" aria-label="Contexts summary">
+      <button type="button" class="status-tab active" data-status-filter="all">All <span class="status-tab-count">{{.CountAll}}</span></button>
     </div>
   </div>
 
-  <section class="form-section">
-    <h2>Create Context</h2>
-    <form method="post" action="/contexts" class="inline-form-row">
-      <input type="text" name="name" placeholder="e.g. aws-prod" aria-label="New context name" required>
-      <button type="submit" class="btn-trigger">Create context</button>
-    </form>
-  </section>
+  <div class="projects-layout">
+    <aside class="filters-sidebar">
+      <div class="filters-sidebar-head">
+        <span>Filters</span>
+        <button type="button" class="filters-reset-btn" id="filters-reset">Reset</button>
+      </div>
+      <form method="get" action="/contexts" id="contexts-filter-form" class="filters-sidebar-form">
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Name</summary>
+          <div class="filter-group-body">
+            <input type="text" id="filter-name" name="name" value="{{.FilterName}}" placeholder="Filter by name..." autocomplete="off">
+          </div>
+        </details>
 
-  <section class="form-section">
-    <h2>Existing Contexts</h2>
-    {{if .Contexts}}
-    <table>
-      <thead>
-        <tr><th>Name</th><th>Entries</th><th>Updated</th></tr>
-      </thead>
-      <tbody>
-        {{range .Contexts}}
-        <tr>
-          <td><a href="/contexts/{{.ID}}">{{.Name}}</a></td>
-          <td>{{.EntryCount}}</td>
-          <td>{{.UpdatedAt}}</td>
-        </tr>
-        {{end}}
-      </tbody>
-    </table>
-    {{else}}
-    <p class="empty">No contexts created yet.</p>
-    {{end}}
-  </section>
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Tags</summary>
+          <div class="filter-group-body">
+            <input type="text" id="filter-tag" name="tag" value="{{.FilterTag}}" placeholder="Filter by key:value..." list="known-tags" autocomplete="off">
+            {{if .KnownTags}}
+            <datalist id="known-tags">
+              {{range .KnownTags}}<option value="{{.}}">{{end}}
+            </datalist>
+            <div class="filter-tag-chips">
+              {{range .KnownTags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
+            </div>
+            {{end}}
+          </div>
+        </details>
+      </form>
+    </aside>
+
+    <div class="projects-main panel">
+      <table id="contexts-table">
+        <thead>
+          <tr><th>Name</th><th>Tags</th><th>Entries</th><th>Updated</th></tr>
+        </thead>
+        <tbody>
+          {{range .Contexts}}
+          <tr class="context-row" data-name="{{.Name}}" data-tags="{{.TagsCSV}}">
+            <td><a href="/contexts/{{.ID}}"><strong>{{.Name}}</strong></a></td>
+            <td>
+              {{if .Tags}}
+              <div class="tag-pills">
+                {{range .Tags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
+              </div>
+              {{else}}
+              <span class="muted">&mdash;</span>
+              {{end}}
+            </td>
+            <td><span class="pill">{{.EntryCount}}</span></td>
+            <td class="muted">{{if .UpdatedAt}}{{.UpdatedAt}}{{else}}&mdash;{{end}}</td>
+          </tr>
+          {{else}}
+          <tr>
+            <td colspan="4" class="empty">No contexts created yet.</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
+<script>
+(function() {
+  const toggleBtn = document.getElementById('toggle-new-context');
+  const cancelBtn = document.getElementById('cancel-new-context');
+  const panel = document.getElementById('new-context-panel');
+  const nameField = document.getElementById('context-name');
+  if (toggleBtn && panel) {
+    toggleBtn.addEventListener('click', () => {
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden && nameField) nameField.focus();
+    });
+  }
+  if (cancelBtn && panel) {
+    cancelBtn.addEventListener('click', () => {
+      panel.hidden = true;
+    });
+  }
+
+  const queryInput = document.getElementById('filter-query');
+  const nameInput = document.getElementById('filter-name');
+  const tagInput = document.getElementById('filter-tag');
+  const resetBtn = document.getElementById('filters-reset');
+  const rows = Array.from(document.querySelectorAll('#contexts-table tbody .context-row'));
+  const tagBtns = Array.from(document.querySelectorAll('.tag-filter-btn'));
+
+  function parseTagTokens(raw) {
+    return (raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  }
+
+  function syncTagButtons() {
+    if (!tagInput) return;
+    const selected = new Set(parseTagTokens(tagInput.value).map(s => s.toLowerCase()));
+    for (const btn of tagBtns) {
+      const t = (btn.dataset.tag || '').toLowerCase();
+      btn.classList.toggle('active', selected.has(t));
+    }
+  }
+
+  function applyFilter() {
+    if (!nameInput || !tagInput) return;
+    const q = (queryInput ? queryInput.value : '').trim().toLowerCase();
+    const n = nameInput.value.trim().toLowerCase();
+    const tagTokens = parseTagTokens(tagInput.value.toLowerCase());
+
+    syncTagButtons();
+
+    for (const row of rows) {
+      const rName = (row.dataset.name || '').toLowerCase();
+      const rTagsRaw = (row.dataset.tags || '').toLowerCase();
+      const rTags = rTagsRaw.split(',').filter(Boolean);
+
+      const matchQuery = !q || rName.includes(q) || rTagsRaw.includes(q);
+      const matchName = !n || rName.includes(n);
+      const matchTag = tagTokens.length === 0 || tagTokens.every(tok => rTags.some(tag => tag.includes(tok)));
+
+      row.style.display = (matchQuery && matchName && matchTag) ? '' : 'none';
+    }
+  }
+
+  [queryInput, nameInput, tagInput].forEach(inp => {
+    if (inp) inp.addEventListener('input', applyFilter);
+  });
+
+  tagBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!tagInput) return;
+      const tag = (btn.dataset.tag || '').trim();
+      if (!tag) return;
+      const current = parseTagTokens(tagInput.value);
+      const lower = tag.toLowerCase();
+      const idx = current.findIndex(t => t.toLowerCase() === lower);
+      if (idx >= 0) {
+        current.splice(idx, 1);
+      } else {
+        current.push(tag);
+      }
+      tagInput.value = current.join(', ');
+      applyFilter();
+    });
+  });
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (queryInput) queryInput.value = '';
+      if (nameInput) nameInput.value = '';
+      if (tagInput) tagInput.value = '';
+      applyFilter();
+    });
+  }
+
+  syncTagButtons();
+
+  function fuzzyMatch(query, text) {
+    if (!query) return { score: 1, indices: [] };
+    const q = query.toLowerCase();
+    const t = text.toLowerCase();
+    let qi = 0, score = 0, streak = 0;
+    const indices = [];
+    for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+      if (t[ti] === q[qi]) {
+        indices.push(ti);
+        streak++;
+        score += 10 + streak * 5 + (ti === 0 || t[ti - 1] === ':' || t[ti - 1] === '-' || t[ti - 1] === '_' ? 15 : 0);
+        qi++;
+      } else {
+        streak = 0;
+        score -= 1;
+      }
+    }
+    return qi === q.length ? { score, indices } : null;
+  }
+
+  function highlight(text, indices) {
+    if (!indices || !indices.length) return text;
+    const set = new Set(indices);
+    let out = '';
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      out += set.has(i) ? '<mark>' + ch + '</mark>' : ch;
+    }
+    return out;
+  }
+
+  const tagsInput = document.getElementById('tags-input');
+  const tagsPreview = document.getElementById('tags-preview');
+  const tagResults = document.getElementById('tag-results');
+  const knownTags = Array.from(document.querySelectorAll('#known-tags-data [data-tag]')).map(el => el.dataset.tag).filter(Boolean);
+  if (tagsInput && tagsPreview) {
+    let tagActiveIdx = 0;
+    let tagFiltered = [];
+
+    function updatePreview() {
+      const tokens = tagsInput.value.split(/[,\n\r]+/).map(s => s.trim()).filter(Boolean);
+      tagsPreview.innerHTML = tokens.map(t => {
+        const valid = /^[^:\s,]+\:[^:\s,]+$/.test(t);
+        const safe = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return '<span class="tag-pill' + (valid ? '' : ' tag-pill-invalid') + '">' + safe + '</span>';
+      }).join('');
+    }
+
+    function renderTagSuggestions() {
+      if (!tagResults || !knownTags.length) return;
+      const parts = tagsInput.value.split(',');
+      const current = parts[parts.length - 1].trim();
+      const used = new Set(parts.slice(0, -1).map(s => s.trim().toLowerCase()).filter(Boolean));
+      tagFiltered = [];
+      for (const t of knownTags) {
+        if (used.has(t.toLowerCase())) continue;
+        const m = fuzzyMatch(current, t);
+        if (m) tagFiltered.push({ tag: t, score: m.score, indices: m.indices });
+      }
+      if (current) tagFiltered.sort((a, b) => b.score - a.score);
+      if (tagActiveIdx >= tagFiltered.length) tagActiveIdx = Math.max(0, tagFiltered.length - 1);
+
+      if (!tagFiltered.length) {
+        tagResults.classList.remove('open');
+        tagResults.innerHTML = '';
+        return;
+      }
+      tagResults.innerHTML = tagFiltered.map((item, idx) =>
+        '<div class="repo-option' + (idx === tagActiveIdx ? ' active' : '') + '" data-tag="' + item.tag + '">' +
+          highlight(item.tag, item.indices) +
+        '</div>'
+      ).join('');
+      tagResults.classList.add('open');
+    }
+
+    function chooseTag(tag) {
+      if (!tag) return;
+      const parts = tagsInput.value.split(',').map(s => s.trim()).filter((_, idx, arr) => idx < arr.length - 1);
+      parts.push(tag);
+      tagsInput.value = parts.join(', ') + ', ';
+      updatePreview();
+      if (tagResults) tagResults.classList.remove('open');
+      tagsInput.focus();
+    }
+
+    tagsInput.addEventListener('focus', renderTagSuggestions);
+    tagsInput.addEventListener('input', () => {
+      tagActiveIdx = 0;
+      updatePreview();
+      renderTagSuggestions();
+    });
+    tagsInput.addEventListener('keydown', (e) => {
+      if (!tagResults || !tagResults.classList.contains('open')) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        tagActiveIdx = Math.min(tagFiltered.length - 1, tagActiveIdx + 1);
+        renderTagSuggestions();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        tagActiveIdx = Math.max(0, tagActiveIdx - 1);
+        renderTagSuggestions();
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        if (tagFiltered[tagActiveIdx]) {
+          e.preventDefault();
+          chooseTag(tagFiltered[tagActiveIdx].tag);
+        }
+      } else if (e.key === 'Escape') {
+        tagResults.classList.remove('open');
+      }
+    });
+    if (tagResults) {
+      tagResults.addEventListener('mousedown', (e) => {
+        const opt = e.target.closest('.repo-option');
+        if (!opt) return;
+        e.preventDefault();
+        chooseTag(opt.dataset.tag);
+      });
+    }
+    document.addEventListener('click', (e) => {
+      if (tagResults && !e.target.closest('#tag-combobox')) {
+        tagResults.classList.remove('open');
+      }
+    });
+    updatePreview();
+  }
+})();
+</script>
 {{end}}

@@ -63,6 +63,7 @@ type Snapshot struct {
 	ID        ID
 	TenantID  string
 	Name      string
+	Tags      map[string]string
 	Entries   []Entry
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -82,18 +83,53 @@ func New(id ID, tenantID, name string, now time.Time) (*Context, error) {
 
 func Restore(s Snapshot) *Context {
 	cp := s
+	cp.Tags = cloneTags(s.Tags)
 	cp.Entries = append([]Entry(nil), s.Entries...)
 	return &Context{s: cp}
 }
 
 func (c *Context) Snapshot() Snapshot {
 	cp := c.s
+	cp.Tags = cloneTags(c.s.Tags)
 	cp.Entries = append([]Entry(nil), c.s.Entries...)
 	return cp
 }
 
 func (c *Context) SetEntries(entries []Entry) {
 	c.s.Entries = append([]Entry(nil), entries...)
+}
+
+func (c *Context) SetTags(tags map[string]string) error {
+	norm, err := project.ParseTags(project.FormatTags(tags))
+	if err != nil {
+		return err
+	}
+	c.s.Tags = norm
+	return nil
+}
+
+func (c *Context) Update(name string, tags map[string]string, now time.Time) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("context requires name")
+	}
+	if err := c.SetTags(tags); err != nil {
+		return err
+	}
+	c.s.Name = name
+	c.s.UpdatedAt = now
+	return nil
+}
+
+func cloneTags(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func ValidateEnvKey(raw string) (string, error) {

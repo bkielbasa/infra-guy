@@ -30,7 +30,7 @@ fi
 echo "==> Target version: ${VERSION}"
 
 git add -u
-git add cmd internal scripts go.mod go.sum 2>/dev/null || true
+git add .github .dockerignore Dockerfile cmd internal scripts go.mod go.sum 2>/dev/null || true
 
 if ! git diff --cached --quiet; then
   MSG="${COMMIT_MSG:-chore: release ${VERSION}}"

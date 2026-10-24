@@ -2,6 +2,7 @@ package policy
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -57,7 +58,7 @@ func TestPolicyLifecycle(t *testing.T) {
 		}
 
 		rehydrated := Rehydrate(snap)
-		if rehydrated.Snapshot() != snap {
+		if !reflect.DeepEqual(rehydrated.Snapshot(), snap) {
 			t.Fatalf("rehydrate mismatch: %+v != %+v", rehydrated.Snapshot(), snap)
 		}
 

@@ -39,9 +39,31 @@ func (s *Service) Get(ctx context.Context, tenantID string, id tfcontext.ID) (*t
 	return c, nil
 }
 
-func (s *Service) Create(ctx context.Context, tenantID, name string) (*tfcontext.Context, error) {
+func (s *Service) Create(ctx context.Context, tenantID, name string, tags ...map[string]string) (*tfcontext.Context, error) {
 	c, err := tfcontext.New(tfcontext.ID(s.NewID()), tenantID, name, s.Now())
 	if err != nil {
+		return nil, err
+	}
+	if len(tags) > 0 && len(tags[0]) > 0 {
+		if err := c.SetTags(tags[0]); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.Contexts.Create(ctx, c); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (s *Service) Update(ctx context.Context, tenantID string, id tfcontext.ID, name string, tags map[string]string) (*tfcontext.Context, error) {
+	c, err := s.Get(ctx, tenantID, id)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, ErrNotFound
+	}
+	if err := c.Update(name, tags, s.Now()); err != nil {
 		return nil, err
 	}
 	if err := s.Contexts.Create(ctx, c); err != nil {
