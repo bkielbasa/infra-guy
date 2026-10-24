@@ -1114,6 +1114,11 @@ button.tag-filter-btn:hover {
   gap: 6px;
   margin-top: 8px;
 }
+.tag-filter-btn.active {
+  background: rgba(139, 124, 247, 0.22);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
 .projects-main {
   margin-bottom: 0;
 }

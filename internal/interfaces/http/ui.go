@@ -226,7 +226,7 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 	}
 	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
 	filterBranch := strings.TrimSpace(r.URL.Query().Get("branch"))
-	filterTag := strings.TrimSpace(r.URL.Query().Get("tag"))
+	filterTag := strings.TrimSpace(strings.Join(r.URL.Query()["tag"], ", "))
 	rows := make([]projectRow, 0, len(items))
 	var countNeedsApproval, countFailed, countInProgress, countFinished int
 	for _, p := range items {
@@ -332,16 +332,18 @@ func matchesProjectFilter(name, branch string, tags []string, filterName, filter
 		return false
 	}
 	if filterTag != "" {
-		needle := strings.ToLower(filterTag)
-		matched := false
-		for _, t := range tags {
-			if strings.Contains(strings.ToLower(t), needle) {
-				matched = true
-				break
+		needles := strings.Fields(strings.ReplaceAll(strings.ToLower(filterTag), ",", " "))
+		for _, needle := range needles {
+			matched := false
+			for _, t := range tags {
+				if strings.Contains(strings.ToLower(t), needle) {
+					matched = true
+					break
+				}
 			}
-		}
-		if !matched {
-			return false
+			if !matched {
+				return false
+			}
 		}
 	}
 	return true

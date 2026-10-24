@@ -112,13 +112,28 @@
   if (!nameInput || !branchInput || !tagInput) return;
 
   let activeStatus = 'all';
+  const tagBtns = Array.from(document.querySelectorAll('.tag-filter-btn'));
+
+  function parseTagTokens(raw) {
+    return (raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  }
+
+  function syncTagButtons() {
+    const selected = new Set(parseTagTokens(tagInput.value).map(s => s.toLowerCase()));
+    for (const btn of tagBtns) {
+      const t = (btn.dataset.tag || '').toLowerCase();
+      btn.classList.toggle('active', selected.has(t));
+    }
+  }
 
   function applyFilter() {
     const q = (queryInput ? queryInput.value : '').trim().toLowerCase();
     const n = nameInput.value.trim().toLowerCase();
     const b = branchInput.value.trim().toLowerCase();
-    const t = tagInput.value.trim().toLowerCase();
+    const tagTokens = parseTagTokens(tagInput.value.toLowerCase());
     const rp = (repoInput ? repoInput.value : '').trim().toLowerCase();
+
+    syncTagButtons();
 
     for (const row of rows) {
       const rName = (row.dataset.name || '').toLowerCase();
@@ -131,7 +146,7 @@
       const matchQuery = !q || rName.includes(q) || rRepo.includes(q) || rBranch.includes(q) || rTagsRaw.includes(q);
       const matchName = !n || rName.includes(n);
       const matchBranch = !b || rBranch.includes(b);
-      const matchTag = !t || rTags.some(tag => tag.includes(t));
+      const matchTag = tagTokens.length === 0 || tagTokens.every(tok => rTags.some(tag => tag.includes(tok)));
       const matchRepo = !rp || rRepo.includes(rp);
       const matchStatus = (activeStatus === 'all') || (rStatus === activeStatus);
 
@@ -152,10 +167,19 @@
     });
   });
 
-  document.querySelectorAll('.tag-filter-btn').forEach(btn => {
+  tagBtns.forEach(btn => {
     btn.addEventListener('click', () => {
-      const tag = btn.dataset.tag || '';
-      tagInput.value = (tagInput.value.trim() === tag) ? '' : tag;
+      const tag = (btn.dataset.tag || '').trim();
+      if (!tag) return;
+      const current = parseTagTokens(tagInput.value);
+      const lower = tag.toLowerCase();
+      const idx = current.findIndex(t => t.toLowerCase() === lower);
+      if (idx >= 0) {
+        current.splice(idx, 1);
+      } else {
+        current.push(tag);
+      }
+      tagInput.value = current.join(', ');
       applyFilter();
     });
   });
@@ -172,6 +196,8 @@
       applyFilter();
     });
   }
+
+  syncTagButtons();
 })();
 </script>
 {{end}}

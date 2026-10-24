@@ -2379,6 +2379,18 @@ func TestProjectTagsAndFilters(t *testing.T) {
 		t.Fatalf("filter by tag=env:staging failed: %s", body)
 	}
 
+	// Filter by multiple tags (comma-separated and repeated query params)
+	rr = getUI(t, h, "/?tag=env:prod,owner:platform")
+	body = rr.Body.String()
+	if !strings.Contains(body, "payments") || strings.Contains(body, "billing") || strings.Contains(body, "core-network") {
+		t.Fatalf("filter by multiple comma-separated tags failed: %s", body)
+	}
+	rr = getUI(t, h, "/?tag=env:prod&tag=tier:backend")
+	body = rr.Body.String()
+	if !strings.Contains(body, "billing") || strings.Contains(body, "payments") || strings.Contains(body, "core-network") {
+		t.Fatalf("filter by multiple tag query params failed: %s", body)
+	}
+
 	// Filter by branch=staging
 	rr = getUI(t, h, "/?branch=staging")
 	body = rr.Body.String()
