@@ -2494,6 +2494,103 @@ func TestDefaultBranchAutoDetectTagAutocompleteAndSettingsRedesign(t *testing.T)
 	}
 }
 
+func TestProjectsSidebarFiltersAndProfilePage(t *testing.T) {
+	p1 := listProject(t)
+	_ = p1.SetTags(map[string]string{"env": "prod", "team": "platform"})
+
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p1}}
+	r1 := needsApprovalSnap("r1")
+	runs := &memRuns{items: map[run.ID]*run.Run{"r1": run.Restore(r1)}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	proj, runsSvc, st := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	// Add a second organization installation & membership so tenant switching is visible on /profile
+	store.installations = append(store.installations, tenant.Installation{
+		ID: "inst-org", TenantID: "ten-org", AccountLogin: "acme-corp", AccountType: "organization", GitHubInstallationID: 200, Active: true,
+	})
+	store.memberships["ten-org:user-1"] = tenant.Membership{
+		TenantID: "ten-org", TenantName: "acme-corp", UserID: "user-1", Role: "member",
+	}
+
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// 1. GET / renders left filter sidebar, status tabs, top search, and header profile menu
+	rr := getUI(t, h, "/")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET / = %d: %s", rr.Code, body)
+	}
+	for _, want := range []string{
+		`class="projects-layout"`,
+		`class="filters-sidebar"`,
+		`id="filter-query"`,
+		`data-status-filter="all"`,
+		`data-status-filter="needs_approval"`,
+		`data-status-filter="failed"`,
+		`data-status-filter="in_progress"`,
+		`data-status-filter="finished"`,
+		`id="filter-name"`,
+		`id="filter-branch"`,
+		`id="filter-tag"`,
+		`id="filter-repo"`,
+		`data-status-cat="needs_approval"`,
+		`id="profile-menu"`,
+		`https://github.com/operator.png?size=64`,
+		`href="/profile"`,
+		`action="/github/logout"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected GET / to contain %q, got:\n%s", want, body)
+		}
+	}
+
+	// 2. GET /profile renders user account details, active & switchable organizations, and logout
+	rr = getUI(t, h, "/profile")
+	profileBody := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /profile = %d: %s", rr.Code, profileBody)
+	}
+	for _, want := range []string{
+		`https://github.com/operator.png?size=96`,
+		`operator`,
+		`acme-corp`,
+		`action="/github/tenant"`,
+		`https://github.com/apps/infra-guy/installations/new`,
+		`action="/github/logout"`,
+	} {
+		if !strings.Contains(profileBody, want) {
+			t.Fatalf("expected GET /profile to contain %q, got:\n%s", want, profileBody)
+		}
+	}
+
+	// 3. POST /github/logout invalidates the session and redirects to /github/login
+	rrLogout := postUI(t, h, "/github/logout", nil)
+	if rrLogout.Code != http.StatusSeeOther || rrLogout.Header().Get("Location") != "/github/login" {
+		t.Fatalf("POST /github/logout = %d (loc=%q): %s", rrLogout.Code, rrLogout.Header().Get("Location"), rrLogout.Body.String())
+	}
+	rrAfter := getUI(t, h, "/")
+	if rrAfter.Code != http.StatusFound || rrAfter.Header().Get("Location") != "/github/login" {
+		t.Fatalf("expected redirect to /github/login after logout, got %d (loc=%q)", rrAfter.Code, rrAfter.Header().Get("Location"))
+	}
+}
+
 
 
 

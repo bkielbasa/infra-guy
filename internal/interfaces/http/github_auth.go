@@ -104,3 +104,67 @@ func (u *ui) picker(w http.ResponseWriter, r *http.Request) {
 	}
 	u.page(w, "Tenants", "tenants", data)
 }
+
+type profileTenantView struct {
+	ID     string
+	Name   string
+	Role   string
+	Active bool
+}
+
+func (u *ui) profile(w http.ResponseWriter, r *http.Request) {
+	userID, login, tenantID, role, ok := PrincipalFrom(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/github/login", http.StatusFound)
+		return
+	}
+	var tenants []profileTenantView
+	var activeTenantName string
+	var installURL string
+	var expiresAt string
+	if u.cfg.Auth != nil {
+		if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+			if sess, err := u.cfg.Auth.Session(r.Context(), c.Value); err == nil && sess != nil {
+				expiresAt = sess.ExpiresAt.UTC().Format("2006-01-02 15:04 UTC")
+			}
+			if choices, err := u.cfg.Auth.Allowed(r.Context(), c.Value, u.now()); err == nil {
+				for _, ch := range choices {
+					active := ch.ID == tenantID
+					if active {
+						activeTenantName = ch.Name
+					}
+					tenants = append(tenants, profileTenantView{
+						ID:     ch.ID,
+						Name:   ch.Name,
+						Role:   ch.Role,
+						Active: active,
+					})
+				}
+			}
+		}
+		installURL, _ = u.cfg.Auth.InstallURL(r.Context())
+	}
+	var avatarURL string
+	if login != "" {
+		avatarURL = "https://github.com/" + login + ".png?size=96"
+	}
+	u.page(w, "Profile", "profile", map[string]any{
+		"UserID":           userID,
+		"Login":            login,
+		"Role":             role,
+		"TenantID":         tenantID,
+		"ActiveTenantName": activeTenantName,
+		"AvatarURL":        avatarURL,
+		"SessionExpiresAt": expiresAt,
+		"Tenants":          tenants,
+		"InstallURL":       installURL,
+	})
+}
+
+func (u *ui) githubLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" && u.cfg.Auth != nil {
+		_ = u.cfg.Auth.Logout(r.Context(), c.Value, u.now())
+	}
+	clearSessionCookie(w, u.cfg.PublicBaseURL)
+	http.Redirect(w, r, "/github/login", http.StatusSeeOther)
+}

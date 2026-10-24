@@ -334,6 +334,20 @@ func TestAuthenticateSlidingRenewal(t *testing.T) {
 	if err != nil || sess != nil || renewed {
 		t.Fatalf("missing session: sess=%+v renewed=%v err=%v", sess, renewed, err)
 	}
+
+	// 5. Logout expires an active session so Authenticate returns nil.
+	if err := store.SaveSession(context.Background(), Session{
+		ID: "s-logout", UserID: "user-1", TenantID: "ten-1", Role: "admin", Login: "ada", ExpiresAt: created.Add(DefaultSessionTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Logout(context.Background(), "s-logout", created); err != nil {
+		t.Fatalf("Logout error: %v", err)
+	}
+	sess, _, err = svc.Authenticate(context.Background(), "s-logout", created)
+	if err != nil || sess != nil {
+		t.Fatalf("after Logout: sess=%+v err=%v", sess, err)
+	}
 }
 
 type memIdentity struct {

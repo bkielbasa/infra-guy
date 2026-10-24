@@ -1,75 +1,156 @@
 {{define "projects"}}
-<div class="panel">
-  <div class="headline headline-spread">
-    <h1>Projects</h1>
+<div class="projects-page">
+  <div class="projects-header">
+    <div>
+      <h1>Projects</h1>
+      <p class="settings-card-desc">Filter and inspect Terraform workspaces across repositories and branches.</p>
+    </div>
     <a href="/projects/new" class="btn btn-trigger">New project</a>
   </div>
-  <form method="get" action="/" class="filter-bar" id="projects-filter-form">
-    <div class="filter-field">
-      <label for="filter-name">Name</label>
-      <input type="text" id="filter-name" name="name" value="{{.FilterName}}" placeholder="Filter by name..." autocomplete="off">
+
+  <div class="projects-topbar">
+    <div class="projects-search-wrap">
+      <input type="search" id="filter-query" class="projects-search-input" placeholder="Search by name, repository, branch, or tag..." autocomplete="off">
     </div>
-    <div class="filter-field">
-      <label for="filter-branch">Branch</label>
-      <input type="text" id="filter-branch" name="branch" value="{{.FilterBranch}}" placeholder="Filter by branch..." autocomplete="off">
+    <div class="status-filter-tabs" role="tablist" aria-label="Filter projects by latest run status">
+      <button type="button" class="status-tab active" data-status-filter="all">All <span class="status-tab-count">{{.CountAll}}</span></button>
+      <button type="button" class="status-tab" data-status-filter="needs_approval">Needs approval <span class="status-tab-count">{{.CountNeedsApproval}}</span></button>
+      <button type="button" class="status-tab" data-status-filter="failed">Failed <span class="status-tab-count">{{.CountFailed}}</span></button>
+      <button type="button" class="status-tab" data-status-filter="in_progress">In progress <span class="status-tab-count">{{.CountInProgress}}</span></button>
+      <button type="button" class="status-tab" data-status-filter="finished">Finished <span class="status-tab-count">{{.CountFinished}}</span></button>
     </div>
-    <div class="filter-field">
-      <label for="filter-tag">Tags</label>
-      <input type="text" id="filter-tag" name="tag" value="{{.FilterTag}}" placeholder="Filter by key:value..." list="known-tags" autocomplete="off">
-      {{if .KnownTags}}
-      <datalist id="known-tags">
-        {{range .KnownTags}}<option value="{{.}}">{{end}}
-      </datalist>
-      {{end}}
-    </div>
-  </form>
-  <table id="projects-table">
-    <thead>
-      <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Tags</th><th>Latest run</th></tr>
-    </thead>
-    <tbody>
-      {{range .Projects}}
-      <tr class="project-row" data-name="{{.Name}}" data-branch="{{.Branch}}" data-tags="{{.TagsCSV}}">
-        <td><a href="/projects/{{.ID}}">{{.Name}}</a></td>
-        <td>{{.Repo}}</td>
-        <td>{{.Branch}}</td>
-        <td>
-          <div class="tag-pills">
-            {{range .Tags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
+  </div>
+
+  <div class="projects-layout">
+    <aside class="filters-sidebar">
+      <div class="filters-sidebar-head">
+        <span>Filters</span>
+        <button type="button" class="filters-reset-btn" id="filters-reset">Reset</button>
+      </div>
+      <form method="get" action="/" id="projects-filter-form" class="filters-sidebar-form">
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Name</summary>
+          <div class="filter-group-body">
+            <input type="text" id="filter-name" name="name" value="{{.FilterName}}" placeholder="Filter by name..." autocomplete="off">
           </div>
-        </td>
-        <td>{{if .Status}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{end}}</td>
-      </tr>
-      {{end}}
-    </tbody>
-  </table>
+        </details>
+
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Branch</summary>
+          <div class="filter-group-body">
+            <input type="text" id="filter-branch" name="branch" value="{{.FilterBranch}}" placeholder="Filter by branch..." list="known-branches" autocomplete="off">
+            {{if .KnownBranches}}
+            <datalist id="known-branches">
+              {{range .KnownBranches}}<option value="{{.}}">{{end}}
+            </datalist>
+            {{end}}
+          </div>
+        </details>
+
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Tags</summary>
+          <div class="filter-group-body">
+            <input type="text" id="filter-tag" name="tag" value="{{.FilterTag}}" placeholder="Filter by key:value..." list="known-tags" autocomplete="off">
+            {{if .KnownTags}}
+            <datalist id="known-tags">
+              {{range .KnownTags}}<option value="{{.}}">{{end}}
+            </datalist>
+            <div class="filter-tag-chips">
+              {{range .KnownTags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
+            </div>
+            {{end}}
+          </div>
+        </details>
+
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Repository</summary>
+          <div class="filter-group-body">
+            <input type="text" id="filter-repo" name="repo" placeholder="Filter by owner/repo..." autocomplete="off">
+          </div>
+        </details>
+      </form>
+    </aside>
+
+    <div class="projects-main panel">
+      <table id="projects-table">
+        <thead>
+          <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Tags</th><th>Latest run</th></tr>
+        </thead>
+        <tbody>
+          {{range .Projects}}
+          <tr class="project-row" data-name="{{.Name}}" data-repo="{{.Repo}}" data-branch="{{.Branch}}" data-tags="{{.TagsCSV}}" data-status-cat="{{.StatusCategory}}">
+            <td><a href="/projects/{{.ID}}"><strong>{{.Name}}</strong></a></td>
+            <td class="mono">{{.Repo}}</td>
+            <td><span class="branch-badge">{{.Branch}}</span></td>
+            <td>
+              <div class="tag-pills">
+                {{range .Tags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
+              </div>
+            </td>
+            <td>{{if .Status}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{else}}<span class="muted">&mdash;</span>{{end}}</td>
+          </tr>
+          {{else}}
+          <tr>
+            <td colspan="5" class="empty">No projects found.</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 <script>
 (function() {
+  const queryInput = document.getElementById('filter-query');
   const nameInput = document.getElementById('filter-name');
   const branchInput = document.getElementById('filter-branch');
   const tagInput = document.getElementById('filter-tag');
+  const repoInput = document.getElementById('filter-repo');
+  const resetBtn = document.getElementById('filters-reset');
+  const statusTabs = Array.from(document.querySelectorAll('.status-tab[data-status-filter]'));
   const rows = Array.from(document.querySelectorAll('#projects-table tbody .project-row'));
   if (!nameInput || !branchInput || !tagInput) return;
 
+  let activeStatus = 'all';
+
   function applyFilter() {
+    const q = (queryInput ? queryInput.value : '').trim().toLowerCase();
     const n = nameInput.value.trim().toLowerCase();
     const b = branchInput.value.trim().toLowerCase();
     const t = tagInput.value.trim().toLowerCase();
+    const rp = (repoInput ? repoInput.value : '').trim().toLowerCase();
+
     for (const row of rows) {
       const rName = (row.dataset.name || '').toLowerCase();
+      const rRepo = (row.dataset.repo || '').toLowerCase();
       const rBranch = (row.dataset.branch || '').toLowerCase();
-      const rTags = (row.dataset.tags || '').toLowerCase().split(',').filter(Boolean);
+      const rTagsRaw = (row.dataset.tags || '').toLowerCase();
+      const rTags = rTagsRaw.split(',').filter(Boolean);
+      const rStatus = row.dataset.statusCat || 'none';
+
+      const matchQuery = !q || rName.includes(q) || rRepo.includes(q) || rBranch.includes(q) || rTagsRaw.includes(q);
       const matchName = !n || rName.includes(n);
       const matchBranch = !b || rBranch.includes(b);
       const matchTag = !t || rTags.some(tag => tag.includes(t));
-      row.style.display = (matchName && matchBranch && matchTag) ? '' : 'none';
+      const matchRepo = !rp || rRepo.includes(rp);
+      const matchStatus = (activeStatus === 'all') || (rStatus === activeStatus);
+
+      row.style.display = (matchQuery && matchName && matchBranch && matchTag && matchRepo && matchStatus) ? '' : 'none';
     }
   }
 
-  nameInput.addEventListener('input', applyFilter);
-  branchInput.addEventListener('input', applyFilter);
-  tagInput.addEventListener('input', applyFilter);
+  [queryInput, nameInput, branchInput, tagInput, repoInput].forEach(inp => {
+    if (inp) inp.addEventListener('input', applyFilter);
+  });
+
+  statusTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      statusTabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      activeStatus = tab.dataset.statusFilter || 'all';
+      applyFilter();
+    });
+  });
 
   document.querySelectorAll('.tag-filter-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -78,6 +159,19 @@
       applyFilter();
     });
   });
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (queryInput) queryInput.value = '';
+      nameInput.value = '';
+      branchInput.value = '';
+      tagInput.value = '';
+      if (repoInput) repoInput.value = '';
+      activeStatus = 'all';
+      statusTabs.forEach(t => t.classList.toggle('active', t.dataset.statusFilter === 'all'));
+      applyFilter();
+    });
+  }
 })();
 </script>
 {{end}}

@@ -37,8 +37,12 @@ var pages = template.Must(template.ParseFS(content, "templates/*.html"))
 type ui struct{ cfg ServerConfig }
 
 type layoutData struct {
-	Title string
-	Body  template.HTML
+	Title     string
+	Body      template.HTML
+	UserLogin string
+	UserRole  string
+	TenantID  string
+	AvatarURL string
 }
 
 type metaView struct {
@@ -48,9 +52,9 @@ type metaView struct {
 }
 
 type projectRow struct {
-	ID, Name, Repo, Branch, Status, StatusClass string
-	Tags                                        []string
-	TagsCSV                                     string
+	ID, Name, Repo, Branch, Status, StatusClass, StatusCategory string
+	Tags                                                        []string
+	TagsCSV                                                     string
 }
 
 type runRow struct {
@@ -110,6 +114,9 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /github/callback", u.githubCallback)
 	mux.HandleFunc("GET /github/setup", u.githubSetup)
 	mux.HandleFunc("POST /github/tenant", u.githubTenant)
+	mux.HandleFunc("GET /github/logout", u.githubLogout)
+	mux.HandleFunc("POST /github/logout", u.githubLogout)
+	mux.HandleFunc("GET /profile", u.profile)
 	mux.HandleFunc("GET /{$}", u.list)
 	mux.HandleFunc("GET /projects", u.list)
 	mux.HandleFunc("GET /projects/new", u.newProject)
@@ -180,8 +187,17 @@ func (u *ui) page(w http.ResponseWriter, title, name string, data any) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	ld := layoutData{Title: title, Body: template.HTML(buf.String())}
+	if sp, ok := responsePrincipal(w); ok {
+		ld.UserLogin = sp.Login
+		ld.UserRole = sp.Role
+		ld.TenantID = sp.TenantID
+		if sp.Login != "" {
+			ld.AvatarURL = "https://github.com/" + sp.Login + ".png?size=64"
+		}
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pages.ExecuteTemplate(w, "layout", layoutData{Title: title, Body: template.HTML(buf.String())}); err != nil {
+	if err := pages.ExecuteTemplate(w, "layout", ld); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -212,6 +228,7 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 	filterBranch := strings.TrimSpace(r.URL.Query().Get("branch"))
 	filterTag := strings.TrimSpace(r.URL.Query().Get("tag"))
 	rows := make([]projectRow, 0, len(items))
+	var countNeedsApproval, countFailed, countInProgress, countFinished int
 	for _, p := range items {
 		ps := p.Snapshot()
 		tags := project.TagList(ps.Tags)
@@ -230,17 +247,52 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		if latest := latestSnapshot(runs); latest != nil {
 			row.Status = latest.Status.Label()
 			row.StatusClass = statusClass(latest.Status)
+			row.StatusCategory = statusCategory(latest.Status)
+			switch row.StatusCategory {
+			case "needs_approval":
+				countNeedsApproval++
+			case "failed":
+				countFailed++
+			case "in_progress":
+				countInProgress++
+			case "finished":
+				countFinished++
+			}
 		}
 		rows = append(rows, row)
 	}
 	u.page(w, "Projects", "projects", map[string]any{
-		"Projects":     rows,
-		"Policies":     u.policyChoices(r.Context(), tenantID, ""),
-		"FilterName":   filterName,
-		"FilterBranch": filterBranch,
-		"FilterTag":    filterTag,
-		"KnownTags":    collectKnownTags(items),
+		"Projects":           rows,
+		"Policies":           u.policyChoices(r.Context(), tenantID, ""),
+		"FilterName":         filterName,
+		"FilterBranch":       filterBranch,
+		"FilterTag":          filterTag,
+		"KnownTags":          collectKnownTags(items),
+		"KnownBranches":      collectKnownBranches(items),
+		"CountAll":           len(rows),
+		"CountNeedsApproval": countNeedsApproval,
+		"CountFailed":        countFailed,
+		"CountInProgress":    countInProgress,
+		"CountFinished":      countFinished,
 	})
+}
+
+func collectKnownBranches(items []*project.Project) []string {
+	seen := make(map[string]struct{})
+	for _, p := range items {
+		if b := strings.TrimSpace(p.Snapshot().DefaultBranch); b != "" {
+			seen[b] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for b := range seen {
+		out = append(out, b)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func collectKnownTags(items []*project.Project) []string {
@@ -1177,6 +1229,23 @@ func statusClass(st run.Status) string {
 		return "pill-cancelled"
 	default:
 		return "pill"
+	}
+}
+
+func statusCategory(st run.Status) string {
+	switch st {
+	case run.StatusNeedsApproval:
+		return "needs_approval"
+	case run.StatusFailed:
+		return "failed"
+	case run.StatusQueued, run.StatusRunning:
+		return "in_progress"
+	case run.StatusSucceeded, run.StatusPlanned:
+		return "finished"
+	case run.StatusCancelled:
+		return "cancelled"
+	default:
+		return "none"
 	}
 }
 

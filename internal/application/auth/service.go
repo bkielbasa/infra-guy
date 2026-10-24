@@ -281,6 +281,19 @@ func (s *Service) Session(ctx context.Context, id string) (*Session, error) {
 	return s.Store.GetSession(ctx, id)
 }
 
+// Logout expires a session so subsequent Authenticate calls reject it.
+func (s *Service) Logout(ctx context.Context, sessionID string, now time.Time) error {
+	if sessionID == "" {
+		return nil
+	}
+	sess, err := s.Store.GetSession(ctx, sessionID)
+	if err != nil || sess == nil {
+		return err
+	}
+	sess.ExpiresAt = now.Add(-time.Second)
+	return s.Store.SaveSession(ctx, *sess)
+}
+
 func (s *Service) open(ctx context.Context, sessionID string, now time.Time) (*Session, error) {
 	sess, err := s.Store.GetSession(ctx, sessionID)
 	if err != nil {

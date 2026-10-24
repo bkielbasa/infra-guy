@@ -12,12 +12,41 @@
 <body>
 <div class="wrap">
   <header class="topbar">
-    <a class="brand" href="/">infra-guy</a>
-    <nav class="topnav">
-      <a href="/">Projects</a>
-      <a href="/contexts">Contexts</a>
-      <a href="/policies">Policies</a>
-    </nav>
+    <div class="topbar-left">
+      <a class="brand" href="/">infra-guy</a>
+      <nav class="topnav">
+        <a href="/">Projects</a>
+        <a href="/contexts">Contexts</a>
+        <a href="/policies">Policies</a>
+      </nav>
+    </div>
+    {{if .UserLogin}}
+    <details class="profile-menu" id="profile-menu">
+      <summary class="profile-chip">
+        <img class="profile-avatar" src="{{.AvatarURL}}" alt="{{.UserLogin}}" width="30" height="30">
+        <span class="profile-chip-text">
+          <span class="profile-chip-login">{{.UserLogin}}</span>
+          {{if .UserRole}}<span class="profile-chip-role">{{.UserRole}}</span>{{else if .TenantID}}<span class="profile-chip-role">{{.TenantID}}</span>{{end}}
+        </span>
+        <span class="profile-chip-caret" aria-hidden="true">&#9662;</span>
+      </summary>
+      <div class="profile-dropdown">
+        <div class="profile-dropdown-header">
+          <img class="profile-avatar-lg" src="{{.AvatarURL}}" alt="{{.UserLogin}}" width="36" height="36">
+          <div>
+            <div class="profile-dropdown-login">{{.UserLogin}}</div>
+            <div class="profile-dropdown-sub">{{if .TenantID}}{{.TenantID}}{{if .UserRole}} &middot; {{.UserRole}}{{end}}{{else}}No organization selected{{end}}</div>
+          </div>
+        </div>
+        <div class="profile-dropdown-divider"></div>
+        <a class="profile-dropdown-item" href="/profile#organizations">Organization settings</a>
+        <a class="profile-dropdown-item" href="/profile">Personal settings</a>
+        <div class="profile-dropdown-divider"></div>
+        <a class="profile-dropdown-item" href="/profile#account">Account details</a>
+        <a class="profile-dropdown-item profile-dropdown-danger" href="/github/logout" data-action="/github/logout">Logout</a>
+      </div>
+    </details>
+    {{end}}
   </header>
   {{.Body}}
 </div>
