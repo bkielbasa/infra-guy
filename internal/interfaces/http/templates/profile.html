@@ -1,0 +1,116 @@
+{{define "profile"}}
+<div class="head">
+  <div class="crumbs"><a href="/">Projects</a> / Profile</div>
+  <div class="row">
+    <h1>Profile &amp; Settings</h1>
+  </div>
+</div>
+
+<div class="settings-grid">
+  <section class="settings-card" id="account">
+    <div class="settings-card-header">
+      <div>
+        <h2>Account Details</h2>
+        <p class="settings-card-desc">Your GitHub identity and current session details.</p>
+      </div>
+      {{if .Role}}<span class="pill">{{.Role}}</span>{{end}}
+    </div>
+    <div class="settings-card-body">
+      <div class="profile-hero">
+        {{if .AvatarURL}}<img class="profile-hero-avatar" src="{{.AvatarURL}}" alt="{{.Login}}" width="64" height="64">{{end}}
+        <div class="profile-hero-meta">
+          <div class="profile-hero-name">{{.Login}}</div>
+          <div class="profile-hero-sub">GitHub account &middot; <a href="https://github.com/{{.Login}}" target="_blank" rel="noopener">@{{.Login}}</a></div>
+        </div>
+      </div>
+
+      <div class="kv-grid">
+        <div class="kv-item">
+          <span class="kv-label">GitHub Login</span>
+          <span class="kv-val mono">{{.Login}}</span>
+        </div>
+        {{if .UserID}}
+        <div class="kv-item">
+          <span class="kv-label">User ID</span>
+          <span class="kv-val mono">{{.UserID}}</span>
+        </div>
+        {{end}}
+        <div class="kv-item">
+          <span class="kv-label">Active Organization</span>
+          <span class="kv-val">{{if .ActiveTenantName}}{{.ActiveTenantName}}{{else if .TenantID}}{{.TenantID}}{{else}}None selected{{end}}</span>
+        </div>
+        <div class="kv-item">
+          <span class="kv-label">Role</span>
+          <span class="kv-val">{{if .Role}}{{.Role}}{{else}}&mdash;{{end}}</span>
+        </div>
+        {{if .SessionExpiresAt}}
+        <div class="kv-item">
+          <span class="kv-label">Session Expires</span>
+          <span class="kv-val mono">{{.SessionExpiresAt}}</span>
+        </div>
+        {{end}}
+      </div>
+
+      <div class="settings-actions">
+        <form method="post" action="/github/logout">
+          <button type="submit" class="btn-danger">Sign out of infra-guy</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section class="settings-card" id="organizations">
+    <div class="settings-card-header">
+      <div>
+        <h2>Organizations &amp; Installations</h2>
+        <p class="settings-card-desc">Switch your active organization tenant or install the GitHub App on another account.</p>
+      </div>
+      {{if .InstallURL}}
+      <a class="btn" href="{{.InstallURL}}" target="_blank" rel="noopener">Install GitHub App</a>
+      {{end}}
+    </div>
+    <div class="settings-card-body">
+      {{if .Tenants}}
+      <table>
+        <thead>
+          <tr>
+            <th>Organization</th>
+            <th>Tenant ID</th>
+            <th>Role</th>
+            <th class="num">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+        {{range .Tenants}}
+          <tr>
+            <td><strong>{{.Name}}</strong></td>
+            <td class="mono">{{.ID}}</td>
+            <td>{{if .Role}}<span class="pill">{{.Role}}</span>{{else}}&mdash;{{end}}</td>
+            <td class="num">
+              {{if .Active}}
+              <span class="pill pill-finished">Active</span>
+              {{else}}
+              <form method="post" action="/github/tenant" style="display:inline">
+                <input type="hidden" name="tenant_id" value="{{.ID}}">
+                <button type="submit">Switch</button>
+              </form>
+              {{end}}
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <div class="empty">
+        No organizations available for your account yet.
+        {{if .InstallURL}}
+        <div style="margin-top:12px">
+          <a class="btn btn-primary" href="{{.InstallURL}}">Install GitHub App</a>
+        </div>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+  </section>
+</div>
+{{end}}
