@@ -1,29 +1,43 @@
 {{define "policy"}}
 <nav class="crumb"><a href="/policies">Policies</a> / {{.Name}}</nav>
-<div class="panel">
-  <div class="headline">
-    <h1>{{.Name}}</h1>
+<div class="panel form-panel">
+  <div class="headline headline-spread form-header">
+    <div>
+      <h1>{{.Name}}</h1>
+      <p class="sub">Edit policy rules and test against sample Terraform plan JSON.</p>
+    </div>
     <form method="post" action="/policies/{{.ID}}/delete" class="inline">
       <button type="submit" class="btn-danger">Delete</button>
     </form>
   </div>
 
   <form method="post" action="/policies/{{.ID}}">
-    <label>Name</label>
-    <input type="text" name="name" value="{{.Name}}" required>
-    <label>Description</label>
-    <input type="text" name="description" value="{{.Description}}">
-    <label>Rego</label>
-    <textarea id="policy-rego" name="rego" rows="14" data-code-editor="rego" required>{{.Rego}}</textarea>
-    <details>
-      <summary>Test input JSON</summary>
-      <textarea id="policy-input-json" name="input_json" rows="10" data-code-editor="json">{{.SampleInputJSON}}</textarea>
-    </details>
-    <div class="actions">
-      <button type="submit" class="btn-trigger">Save</button>
-      <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
-    </div>
-    <div id="policy-test-result" class="meta"></div>
+    <section class="form-section">
+      <h2>Policy Definition</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label for="policy-name">Name</label>
+          <input id="policy-name" type="text" name="name" value="{{.Name}}" required>
+        </div>
+        <div class="field">
+          <label for="policy-description">Description</label>
+          <input id="policy-description" type="text" name="description" value="{{.Description}}">
+        </div>
+      </div>
+      <div class="field">
+        <label for="policy-rego">Rego</label>
+        <textarea id="policy-rego" name="rego" rows="14" data-code-editor="rego" required>{{.Rego}}</textarea>
+      </div>
+      <details>
+        <summary>Test input JSON</summary>
+        <textarea id="policy-input-json" name="input_json" rows="10" data-code-editor="json">{{.SampleInputJSON}}</textarea>
+      </details>
+      <div class="actions">
+        <button type="submit" class="btn-trigger">Save</button>
+        <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
+      </div>
+      <div id="policy-test-result" class="meta"></div>
+    </section>
   </form>
 </div>
 

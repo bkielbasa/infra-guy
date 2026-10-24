@@ -190,8 +190,8 @@ func TestReposSuccess(t *testing.T) {
 	gh := &fakeGitHub{
 		repos: map[int64][]Repo{
 			1: {
-				{ID: 10, Owner: "acme", Name: "infra"},
-				{ID: 20, Owner: "acme", Name: "apps"},
+				{ID: 10, Owner: "acme", Name: "infra", DefaultBranch: "master"},
+				{ID: 20, Owner: "acme", Name: "apps", DefaultBranch: "main"},
 			},
 		},
 	}
@@ -205,7 +205,7 @@ func TestReposSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repos) != 2 || repos[0].Name != "infra" || repos[1].Name != "apps" {
+	if len(repos) != 2 || repos[0].Name != "infra" || repos[0].DefaultBranch != "master" || repos[1].Name != "apps" || repos[1].DefaultBranch != "main" {
 		t.Fatalf("unexpected repos: %+v", repos)
 	}
 }

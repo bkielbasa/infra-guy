@@ -743,4 +743,58 @@ button.tag-filter-btn:hover {
   background: #141720;
 }
 
+.field textarea {
+  max-width: none;
+}
+
+.repo-option-meta {
+  float: right;
+  font-size: 11.5px;
+  color: var(--faint);
+  background: var(--chip);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 7px;
+  margin-left: 8px;
+}
+
+.danger-zone {
+  border-color: #5b2828;
+  background: #181318;
+}
+.danger-zone h2 {
+  color: var(--danger);
+}
+.danger-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.danger-row p {
+  margin: 4px 0 0;
+}
+
+.inline-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.inline-form-row input[type="text"],
+.inline-form-row select {
+  flex: 1 1 220px;
+  max-width: 360px;
+}
+
+.dep-card {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101218;
+}
+
+
 

@@ -239,7 +239,37 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		"FilterName":   filterName,
 		"FilterBranch": filterBranch,
 		"FilterTag":    filterTag,
+		"KnownTags":    collectKnownTags(items),
 	})
+}
+
+func collectKnownTags(items []*project.Project) []string {
+	seen := make(map[string]struct{})
+	for _, p := range items {
+		for _, t := range project.TagList(p.Snapshot().Tags) {
+			seen[t] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for t := range seen {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (u *ui) knownTags(ctx context.Context, tenantID string) []string {
+	if u.cfg.Projects == nil || tenantID == "" {
+		return nil
+	}
+	items, err := u.cfg.Projects.List(ctx, tenantID)
+	if err != nil {
+		return nil
+	}
+	return collectKnownTags(items)
 }
 
 func matchesProjectFilter(name, branch string, tags []string, filterName, filterBranch, filterTag string) bool {
@@ -288,8 +318,14 @@ func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defaultBranch := "main"
+	if len(repos) > 0 && strings.TrimSpace(repos[0].DefaultBranch) != "" {
+		defaultBranch = strings.TrimSpace(repos[0].DefaultBranch)
+	}
 	u.page(w, "New project", "new_project", map[string]any{
 		"Repos":          repos,
+		"DefaultBranch":  defaultBranch,
+		"KnownTags":      u.knownTags(r.Context(), tenantID),
 		"Versions":       u.versions(r.Context()),
 		"DefaultVersion": project.DefaultTerraformVersion,
 		"Contexts":       u.contextChoices(r.Context(), tenantID, ""),
@@ -346,7 +382,11 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourceRepo := project.SourceRepo{Owner: match.Owner, Name: match.Name}
-	p, err := u.cfg.Projects.Create(r.Context(), tenantID, r.FormValue("name"), sourceRepo, match.ID, r.FormValue("branch"), r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
+	branch := strings.TrimSpace(r.FormValue("branch"))
+	if branch == "" && strings.TrimSpace(match.DefaultBranch) != "" {
+		branch = strings.TrimSpace(match.DefaultBranch)
+	}
+	p, err := u.cfg.Projects.Create(r.Context(), tenantID, r.FormValue("name"), sourceRepo, match.ID, branch, r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -480,12 +520,14 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 	}
 	ps := p.Snapshot()
 	u.page(w, ps.Name+" details", "details", map[string]any{
-		"ID": string(ps.ID), "Name": ps.Name, "AutoApprove": ps.AutoApprove,
+		"ID": string(ps.ID), "Name": ps.Name, "Repo": ps.Repo.String(),
+		"AutoApprove": ps.AutoApprove, "Locked": ps.Locked,
 		"Branch": ps.DefaultBranch, "Workdir": ps.WorkingDirectory,
 		"TerraformVersion": ps.TerraformVersion,
 		"ApprovalPolicyID": ps.ApprovalPolicyID,
 		"Tags":             project.FormatTags(ps.Tags),
 		"TagList":          project.TagList(ps.Tags),
+		"KnownTags":        u.knownTags(r.Context(), ps.TenantID),
 		"Versions":         u.versions(r.Context()),
 		"Contexts":         u.contextChoices(r.Context(), ps.TenantID, ps.ID),
 		"Policies":         u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),

@@ -26,9 +26,10 @@ const (
 )
 
 type Repo struct {
-	ID    int64
-	Owner string
-	Name  string
+	ID            int64
+	Owner         string
+	Name          string
+	DefaultBranch string
 }
 
 type CommitStatus struct {
@@ -253,9 +254,10 @@ func (c *Client) ListRepos(ctx context.Context, installationID int64) ([]Repo, e
 		}
 		var body struct {
 			Repositories []struct {
-				ID    int64  `json:"id"`
-				Name  string `json:"name"`
-				Owner struct {
+				ID            int64  `json:"id"`
+				Name          string `json:"name"`
+				DefaultBranch string `json:"default_branch"`
+				Owner         struct {
 					Login string `json:"login"`
 				} `json:"owner"`
 			} `json:"repositories"`
@@ -266,7 +268,7 @@ func (c *Client) ListRepos(ctx context.Context, installationID int64) ([]Repo, e
 			return nil, err
 		}
 		for _, r := range body.Repositories {
-			repos = append(repos, Repo{ID: r.ID, Owner: r.Owner.Login, Name: r.Name})
+			repos = append(repos, Repo{ID: r.ID, Owner: r.Owner.Login, Name: r.Name, DefaultBranch: r.DefaultBranch})
 		}
 		if len(body.Repositories) < 100 {
 			return repos, nil

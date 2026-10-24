@@ -1,29 +1,38 @@
 {{define "state_history"}}
 <div id="tab-panel"{{if .Poll}} hx-get="/projects/{{.ProjectID}}/tabs/state" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
-  {{if .State}}
-  <table>
-    <thead>
-      <tr><th>Serial</th><th>Size</th><th>Updated</th><th>Lock</th></tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>{{.State.Serial}}</td>
-        <td>{{.State.Size}}</td>
-        <td>{{.State.Time}}</td>
-        <td>{{if .State.Locked}}Locked{{else}}Unlocked{{end}}</td>
-      </tr>
-    </tbody>
-  </table>
-  {{else}}
-  <p class="empty">No stored state.</p>
-  {{end}}
+  <section class="form-section">
+    <h2>Current State</h2>
+    {{if .State}}
+    <table>
+      <thead>
+        <tr><th>Serial</th><th>Size</th><th>Updated</th><th>Lock</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>{{.State.Serial}}</td>
+          <td>{{.State.Size}}</td>
+          <td>{{.State.Time}}</td>
+          <td>{{if .State.Locked}}<span class="pill pill-failed">Locked</span>{{else}}<span class="pill pill-finished">Unlocked</span>{{end}}</td>
+        </tr>
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No stored state.</p>
+    {{end}}
+  </section>
 
-  <form method="post" action="/projects/{{.ProjectID}}/state/import" enctype="multipart/form-data" hx-post="/projects/{{.ProjectID}}/state/import" hx-encoding="multipart/form-data" hx-target="#tab-panel" hx-swap="outerHTML">
-    <label>Import state file (.tfstate / .json)</label>
-    <input type="file" name="state_file" accept=".tfstate,.json,application/json" required>
-    <div class="actions">
-      <button type="submit">Import state</button>
-    </div>
-  </form>
+  <section class="form-section">
+    <h2>Import State</h2>
+    <form method="post" action="/projects/{{.ProjectID}}/state/import" enctype="multipart/form-data" hx-post="/projects/{{.ProjectID}}/state/import" hx-encoding="multipart/form-data" hx-target="#tab-panel" hx-swap="outerHTML">
+      <div class="field">
+        <label for="state-file-input">Import state file (.tfstate / .json)</label>
+        <input id="state-file-input" type="file" name="state_file" accept=".tfstate,.json,application/json" required>
+        <span class="field-hint">Replaces the current project state with the uploaded Terraform state file.</span>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn-trigger">Import state</button>
+      </div>
+    </form>
+  </section>
 </div>
 {{end}}

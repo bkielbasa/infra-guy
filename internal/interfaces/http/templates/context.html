@@ -1,50 +1,68 @@
 {{define "context"}}
 <nav class="crumb"><a href="/contexts">Contexts</a> / {{.Name}}</nav>
-<div class="panel">
-  <div class="headline">
-    <h1>{{.Name}}</h1>
+<div class="panel form-panel">
+  <div class="headline headline-spread form-header">
+    <div>
+      <h1>{{.Name}}</h1>
+      <p class="sub">Manage environment variables and secret files injected into runs linked to this context.</p>
+    </div>
     <form method="post" action="/contexts/{{.ID}}/delete" class="inline">
       <button type="submit" class="btn-danger">Delete</button>
     </form>
   </div>
-  {{if .Entries}}
-  <table>
-    <thead>
-      <tr><th>Kind</th><th>Key / Path</th><th>Value</th><th></th></tr>
-    </thead>
-    <tbody>
-      {{range .Entries}}
-      <tr>
-        <td><span class="pill">{{.Kind}}</span></td>
-        <td><code>{{.Key}}</code></td>
-        <td>{{if .Secret}}••••••••{{else}}{{.Value}}{{end}}</td>
-        <td>
-          <form method="post" action="/contexts/{{$.ID}}/entries/{{.ID}}/delete" class="inline">
-            <button type="submit" class="btn-danger">Delete</button>
-          </form>
-        </td>
-      </tr>
-      {{end}}
-    </tbody>
-  </table>
-  {{end}}
-  <details{{if not .Entries}} open{{end}}>
-    <summary>Add or update entry</summary>
+
+  <section class="form-section">
+    <h2>Entries</h2>
+    {{if .Entries}}
+    <table>
+      <thead>
+        <tr><th>Kind</th><th>Key / Path</th><th>Value</th><th></th></tr>
+      </thead>
+      <tbody>
+        {{range .Entries}}
+        <tr>
+          <td><span class="pill">{{.Kind}}</span></td>
+          <td><code>{{.Key}}</code></td>
+          <td>{{if .Secret}}••••••••{{else}}{{.Value}}{{end}}</td>
+          <td>
+            <form method="post" action="/contexts/{{$.ID}}/entries/{{.ID}}/delete" class="inline">
+              <button type="submit" class="btn-danger">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No entries configured in this context yet.</p>
+    {{end}}
+  </section>
+
+  <section class="form-section">
+    <h2>Add or update entry</h2>
     <form method="post" action="/contexts/{{.ID}}/entries">
-      <label>Kind</label>
-      <select name="kind" required>
-        <option value="plain_env">Environment variable (plain)</option>
-        <option value="secret_env">Environment variable (secret)</option>
-        <option value="secret_file">Mounted file in $HOME (secret)</option>
-      </select>
-      <label>Key or relative path in $HOME</label>
-      <input type="text" name="key" placeholder="TF_VAR_region or .kube/config" required>
-      <label>Value</label>
-      <textarea name="value" rows="3" required></textarea>
+      <div class="form-grid">
+        <div class="field">
+          <label for="entry-kind">Kind</label>
+          <select id="entry-kind" name="kind" required>
+            <option value="plain_env">Environment variable (plain)</option>
+            <option value="secret_env">Environment variable (secret)</option>
+            <option value="secret_file">Mounted file in $HOME (secret)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="entry-key">Key or relative path in $HOME</label>
+          <input id="entry-key" type="text" name="key" placeholder="TF_VAR_region or .kube/config" required>
+        </div>
+      </div>
+      <div class="field">
+        <label for="entry-value">Value</label>
+        <textarea id="entry-value" name="value" rows="3" required></textarea>
+      </div>
       <div class="actions">
-        <button type="submit">Save entry</button>
+        <button type="submit" class="btn-trigger">Save entry</button>
       </div>
     </form>
-  </details>
+  </section>
 </div>
 {{end}}

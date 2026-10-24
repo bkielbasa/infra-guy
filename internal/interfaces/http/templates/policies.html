@@ -1,33 +1,49 @@
 {{define "policies"}}
-<div class="panel">
-  <div class="headline">
-    <h1>Policies</h1>
+<div class="panel form-panel">
+  <div class="headline headline-spread form-header">
+    <div>
+      <h1>Policies</h1>
+      <p class="sub">Rego approval and guard policies evaluated against Terraform plans.</p>
+    </div>
   </div>
+
   {{if .Policies}}
-  <table>
-    <thead>
-      <tr><th>Name</th><th>Description</th><th>Updated</th></tr>
-    </thead>
-    <tbody>
-      {{range .Policies}}
-      <tr>
-        <td><a href="/policies/{{.ID}}">{{.Name}}</a></td>
-        <td>{{.Description}}</td>
-        <td>{{.UpdatedAt}}</td>
-      </tr>
-      {{end}}
-    </tbody>
-  </table>
+  <section class="form-section">
+    <h2>Configured Policies</h2>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Description</th><th>Updated</th></tr>
+      </thead>
+      <tbody>
+        {{range .Policies}}
+        <tr>
+          <td><a href="/policies/{{.ID}}">{{.Name}}</a></td>
+          <td>{{.Description}}</td>
+          <td>{{.UpdatedAt}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </section>
   {{end}}
-  <details{{if not .Policies}} open{{end}}>
-    <summary>New policy</summary>
+
+  <section class="form-section">
+    <h2>New policy</h2>
     <form method="post" action="/policies">
-      <label>Name</label>
-      <input type="text" name="name" placeholder="e.g. prod-approval" required>
-      <label>Description</label>
-      <input type="text" name="description">
-      <label>Rego</label>
-      <textarea id="policy-rego" name="rego" rows="12" data-code-editor="rego" required>{{.DefaultRego}}</textarea>
+      <div class="form-grid">
+        <div class="field">
+          <label for="policy-name">Name</label>
+          <input id="policy-name" type="text" name="name" placeholder="e.g. prod-approval" required>
+        </div>
+        <div class="field">
+          <label for="policy-description">Description</label>
+          <input id="policy-description" type="text" name="description" placeholder="Optional summary">
+        </div>
+      </div>
+      <div class="field">
+        <label for="policy-rego">Rego</label>
+        <textarea id="policy-rego" name="rego" rows="12" data-code-editor="rego" required>{{.DefaultRego}}</textarea>
+      </div>
       <details>
         <summary>Test input JSON</summary>
         <textarea id="policy-input-json" name="input_json" rows="10" data-code-editor="json">{{.SampleInputJSON}}</textarea>
@@ -38,7 +54,7 @@
       </div>
       <div id="policy-test-result" class="meta"></div>
     </form>
-  </details>
+  </section>
 </div>
 
 <script>

@@ -1,28 +1,40 @@
 {{define "contexts"}}
-<div class="panel">
-  <div class="headline">
-    <h1>Contexts</h1>
-  </div>
-  <form method="post" action="/contexts">
-    <label>New context name</label>
-    <div class="actions">
-      <input type="text" name="name" placeholder="e.g. aws-prod" required>
-      <button type="submit">Create context</button>
+<div class="panel form-panel">
+  <div class="headline headline-spread form-header">
+    <div>
+      <h1>Contexts</h1>
+      <p class="sub">Reusable sets of environment variables and mounted files shared across projects.</p>
     </div>
-  </form>
-  <table>
-    <thead>
-      <tr><th>Name</th><th>Entries</th><th>Updated</th></tr>
-    </thead>
-    <tbody>
-      {{range .Contexts}}
-      <tr>
-        <td><a href="/contexts/{{.ID}}">{{.Name}}</a></td>
-        <td>{{.EntryCount}}</td>
-        <td>{{.UpdatedAt}}</td>
-      </tr>
-      {{end}}
-    </tbody>
-  </table>
+  </div>
+
+  <section class="form-section">
+    <h2>Create Context</h2>
+    <form method="post" action="/contexts" class="inline-form-row">
+      <input type="text" name="name" placeholder="e.g. aws-prod" aria-label="New context name" required>
+      <button type="submit" class="btn-trigger">Create context</button>
+    </form>
+  </section>
+
+  <section class="form-section">
+    <h2>Existing Contexts</h2>
+    {{if .Contexts}}
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Entries</th><th>Updated</th></tr>
+      </thead>
+      <tbody>
+        {{range .Contexts}}
+        <tr>
+          <td><a href="/contexts/{{.ID}}">{{.Name}}</a></td>
+          <td>{{.EntryCount}}</td>
+          <td>{{.UpdatedAt}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No contexts created yet.</p>
+    {{end}}
+  </section>
 </div>
 {{end}}

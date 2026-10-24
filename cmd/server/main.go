@@ -409,7 +409,7 @@ func (g githubAdapter) ListRepos(ctx context.Context, installationID int64) ([]i
 	}
 	out := make([]installation.Repo, len(repos))
 	for i, r := range repos {
-		out[i] = installation.Repo{ID: r.ID, Owner: r.Owner, Name: r.Name}
+		out[i] = installation.Repo{ID: r.ID, Owner: r.Owner, Name: r.Name, DefaultBranch: r.DefaultBranch}
 	}
 	return out, nil
 }

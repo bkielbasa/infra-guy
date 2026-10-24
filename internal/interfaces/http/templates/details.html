@@ -1,39 +1,230 @@
 {{define "details"}}
 <nav class="crumb"><a href="/">Projects</a> / <a href="/projects/{{.ID}}">{{.Name}}</a> / Settings</nav>
-<div class="panel">
-  <h1>Settings</h1>
-  <form method="post" action="/projects/{{.ID}}">
-    <label class="check"><input type="checkbox" name="auto_approve"{{if .AutoApprove}} checked{{end}}> Auto-approve</label>
-    <label>Default branch</label>
-    <input type="text" name="branch" value="{{.Branch}}">
-    <label>Working directory</label>
-    <input type="text" name="workdir" value="{{.Workdir}}">
-    <label>Tags (key:value)</label>
-    <input type="text" name="tags" value="{{.Tags}}" placeholder="env:prod, team:core">
-    <label>Terraform version</label>
-    <select name="terraform_version">
-      {{range .Versions}}<option value="{{.}}"{{if eq . $.TerraformVersion}} selected{{end}}>{{.}}</option>{{end}}
-    </select>
-    {{if .Contexts}}
-    <label>Contexts</label>
-    {{range .Contexts}}
-    <label class="check"><input type="checkbox" name="context_ids" value="{{.ID}}"{{if .Attached}} checked{{end}}> {{.Name}}</label>
-    {{end}}
-    {{end}}
-    <label>Approval policy</label>
-    <select name="approval_policy_id">
-      <option value="">None</option>
-      {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
-    </select>
+<div class="panel form-panel">
+  <div class="form-header">
+    <h1>Settings</h1>
+    <p class="sub">Configure branch tracking, working directory, tags, and execution settings for <strong>{{.Name}}</strong>{{if .Repo}} (<code>{{.Repo}}</code>){{end}}.</p>
+  </div>
+
+  <form method="post" action="/projects/{{.ID}}" class="project-form">
+    <section class="form-section">
+      <h2>Git &amp; Terraform</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label for="project-branch">Default branch</label>
+          <input type="text" id="project-branch" name="branch" value="{{.Branch}}">
+          <span class="field-hint">Pushes to this branch trigger tracked runs.</span>
+        </div>
+        <div class="field">
+          <label for="project-workdir">Working directory</label>
+          <input type="text" id="project-workdir" name="workdir" value="{{.Workdir}}" placeholder="e.g. terraform/prod (optional)">
+          <span class="field-hint">Relative subdirectory where Terraform files live.</span>
+        </div>
+        <div class="field">
+          <label for="project-tf-version">Terraform version</label>
+          <select id="project-tf-version" name="terraform_version">
+            {{range .Versions}}<option value="{{.}}"{{if eq . $.TerraformVersion}} selected{{end}}>{{.}}</option>{{end}}
+          </select>
+        </div>
+        <div class="field">
+          <label for="project-policy">Approval policy</label>
+          <select id="project-policy" name="approval_policy_id">
+            <option value="">None</option>
+            {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
+          </select>
+        </div>
+      </div>
+
+      <div class="field" style="margin-top: 14px;">
+        <label for="tags-input">Tags (key:value)</label>
+        <div class="repo-Combobox" id="tag-combobox">
+          <input type="text" id="tags-input" name="tags" value="{{.Tags}}" placeholder="env:prod, team:core" autocomplete="off">
+          <div id="tag-results" class="repo-results" role="listbox"></div>
+          <div id="known-tags-data" hidden>
+            {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
+          </div>
+        </div>
+        <div id="tags-preview" class="tag-pills"></div>
+        <span class="field-hint">Comma-separated <code>key:value</code> pairs used to organize and filter projects.</span>
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2>Automation &amp; Contexts</h2>
+      <label class="check-card">
+        <input type="checkbox" name="auto_approve"{{if .AutoApprove}} checked{{end}}>
+        <div>
+          <strong>Auto-approve tracked runs</strong>
+          <div class="field-hint">Automatically run <code>terraform apply</code> when a plan succeeds on the default branch.</div>
+        </div>
+      </label>
+      {{if .Contexts}}
+      <div class="field" style="margin-top: 14px;">
+        <label>Attached contexts</label>
+        <div class="context-grid">
+          {{range .Contexts}}
+          <label class="check"><input type="checkbox" name="context_ids" value="{{.ID}}"{{if .Attached}} checked{{end}}> {{.Name}}</label>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    </section>
+
     <div class="actions">
-      <button type="submit">Save</button>
+      <button type="submit" class="btn-trigger">Save changes</button>
+      <a href="/projects/{{.ID}}" class="btn">Back to project</a>
     </div>
   </form>
-  <form method="post" action="/projects/{{.ID}}/force-unlock" class="inline">
-    <button type="submit">Force-unlock state</button>
-  </form>
-  <form method="post" action="/projects/{{.ID}}/delete" class="inline">
-    <button type="submit" class="btn-danger">Delete project</button>
-  </form>
+
+  <section class="form-section danger-zone">
+    <h2>State &amp; Danger Zone</h2>
+    <div class="danger-row">
+      <div>
+        <strong>Force-unlock state</strong>
+        <span class="field-hint">Clear a stuck Terraform state lock if a previous run crashed or was interrupted.</span>
+      </div>
+      <form method="post" action="/projects/{{.ID}}/force-unlock" class="inline">
+        <button type="submit">Force-unlock state</button>
+      </form>
+    </div>
+    <div class="danger-row">
+      <div>
+        <strong>Delete project</strong>
+        <span class="field-hint">Permanently remove this project, its run history, and managed state metadata.</span>
+      </div>
+      <form method="post" action="/projects/{{.ID}}/delete" class="inline">
+        <button type="submit" class="btn-danger">Delete project</button>
+      </form>
+    </div>
+  </section>
 </div>
+<script>
+(function() {
+  function fuzzyMatch(query, text) {
+    if (!query) return { score: 1, indices: [] };
+    const q = query.toLowerCase();
+    const t = text.toLowerCase();
+    let qi = 0, score = 0, streak = 0;
+    const indices = [];
+    for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+      if (t[ti] === q[qi]) {
+        indices.push(ti);
+        streak++;
+        score += 10 + streak * 5 + (ti === 0 || t[ti - 1] === ':' || t[ti - 1] === '-' || t[ti - 1] === '_' ? 15 : 0);
+        qi++;
+      } else {
+        streak = 0;
+        score -= 1;
+      }
+    }
+    return qi === q.length ? { score, indices } : null;
+  }
+
+  function highlight(text, indices) {
+    if (!indices || !indices.length) return text;
+    const set = new Set(indices);
+    let out = '';
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      out += set.has(i) ? '<mark>' + ch + '</mark>' : ch;
+    }
+    return out;
+  }
+
+  const tagsInput = document.getElementById('tags-input');
+  const tagsPreview = document.getElementById('tags-preview');
+  const tagResults = document.getElementById('tag-results');
+  const knownTags = Array.from(document.querySelectorAll('#known-tags-data [data-tag]')).map(el => el.dataset.tag).filter(Boolean);
+  if (tagsInput && tagsPreview) {
+    let tagActiveIdx = 0;
+    let tagFiltered = [];
+
+    function updatePreview() {
+      const tokens = tagsInput.value.split(/[,\n\r]+/).map(s => s.trim()).filter(Boolean);
+      tagsPreview.innerHTML = tokens.map(t => {
+        const valid = /^[^:\s,]+\:[^:\s,]+$/.test(t);
+        const safe = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return '<span class="tag-pill' + (valid ? '' : ' tag-pill-invalid') + '">' + safe + '</span>';
+      }).join('');
+    }
+
+    function renderTagSuggestions() {
+      if (!tagResults || !knownTags.length) return;
+      const parts = tagsInput.value.split(',');
+      const current = parts[parts.length - 1].trim();
+      const used = new Set(parts.slice(0, -1).map(s => s.trim().toLowerCase()).filter(Boolean));
+      tagFiltered = [];
+      for (const t of knownTags) {
+        if (used.has(t.toLowerCase())) continue;
+        const m = fuzzyMatch(current, t);
+        if (m) tagFiltered.push({ tag: t, score: m.score, indices: m.indices });
+      }
+      if (current) tagFiltered.sort((a, b) => b.score - a.score);
+      if (tagActiveIdx >= tagFiltered.length) tagActiveIdx = Math.max(0, tagFiltered.length - 1);
+
+      if (!tagFiltered.length) {
+        tagResults.classList.remove('open');
+        tagResults.innerHTML = '';
+        return;
+      }
+      tagResults.innerHTML = tagFiltered.map((item, idx) =>
+        '<div class="repo-option' + (idx === tagActiveIdx ? ' active' : '') + '" data-tag="' + item.tag + '">' +
+          highlight(item.tag, item.indices) +
+        '</div>'
+      ).join('');
+      tagResults.classList.add('open');
+    }
+
+    function chooseTag(tag) {
+      if (!tag) return;
+      const parts = tagsInput.value.split(',').map(s => s.trim()).filter((_, idx, arr) => idx < arr.length - 1);
+      parts.push(tag);
+      tagsInput.value = parts.join(', ') + ', ';
+      updatePreview();
+      if (tagResults) tagResults.classList.remove('open');
+      tagsInput.focus();
+    }
+
+    tagsInput.addEventListener('focus', renderTagSuggestions);
+    tagsInput.addEventListener('input', () => {
+      tagActiveIdx = 0;
+      updatePreview();
+      renderTagSuggestions();
+    });
+    tagsInput.addEventListener('keydown', (e) => {
+      if (!tagResults || !tagResults.classList.contains('open')) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        tagActiveIdx = Math.min(tagFiltered.length - 1, tagActiveIdx + 1);
+        renderTagSuggestions();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        tagActiveIdx = Math.max(0, tagActiveIdx - 1);
+        renderTagSuggestions();
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        if (tagFiltered[tagActiveIdx]) {
+          e.preventDefault();
+          chooseTag(tagFiltered[tagActiveIdx].tag);
+        }
+      } else if (e.key === 'Escape') {
+        tagResults.classList.remove('open');
+      }
+    });
+    if (tagResults) {
+      tagResults.addEventListener('mousedown', (e) => {
+        const opt = e.target.closest('.repo-option');
+        if (!opt) return;
+        e.preventDefault();
+        chooseTag(opt.dataset.tag);
+      });
+    }
+    document.addEventListener('click', (e) => {
+      if (tagResults && !e.target.closest('#tag-combobox')) {
+        tagResults.classList.remove('open');
+      }
+    });
+    updatePreview();
+  }
+})();
+</script>
 {{end}}

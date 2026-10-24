@@ -1,34 +1,34 @@
 {{define "tab_dependencies"}}
 <div id="tab-panel">
-  <section class="group">
-    <h3>Upstream Dependencies</h3>
-    <p class="sub">Outputs from upstream projects are injected as <code>TF_VAR_*</code> environment variables during runs and can automatically trigger this project when upstream applies succeed.</p>
+  <section class="form-section">
+    <h2>Upstream Dependencies</h2>
+    <p class="field-hint" style="margin: -6px 0 14px;">Outputs from upstream projects are injected as <code>TF_VAR_*</code> environment variables during runs and can automatically trigger this project when upstream applies succeed.</p>
     {{if .CandidateProjects}}
-    <form method="post" action="/projects/{{.ProjectID}}/dependencies" class="actions" style="margin: 12px 0;">
+    <form method="post" action="/projects/{{.ProjectID}}/dependencies" class="inline-form-row" style="margin: 12px 0;">
       <select name="depends_on_project_id" required>
         <option value="">Select upstream project…</option>
         {{range .CandidateProjects}}
         <option value="{{.ID}}">{{.Name}}</option>
         {{end}}
       </select>
-      <label class="inline"><input type="checkbox" name="trigger_always"> Trigger on every apply</label>
-      <button type="submit">Add dependency</button>
+      <label class="check" style="margin: 0;"><input type="checkbox" name="trigger_always"> Trigger on every apply</label>
+      <button type="submit" class="btn-trigger">Add dependency</button>
     </form>
     {{end}}
 
     {{if .Upstream}}
       {{range .Upstream}}
-      <div class="card" style="margin-top: 12px; padding: 12px; border: 1px solid var(--border, #ddd); border-radius: 6px;">
-        <div class="actions" style="justify-content: space-between;">
+      <div class="dep-card">
+        <div class="headline headline-spread">
           <div>
             <strong><a href="/projects/{{.UpstreamProjectID}}">{{.UpstreamProjectName}}</a></strong>
             {{if .AvailableOutputs}}
-            <span class="sub"> · Available outputs: {{range $i, $o := .AvailableOutputs}}{{if $i}}, {{end}}<code>{{$o}}</code>{{end}}</span>
+            <span class="field-hint" style="display: inline;"> · Available outputs: {{range $i, $o := .AvailableOutputs}}{{if $i}}, {{end}}<code>{{$o}}</code>{{end}}</span>
             {{else}}
-            <span class="sub"> · No outputs in current state</span>
+            <span class="field-hint" style="display: inline;"> · No outputs in current state</span>
             {{end}}
           </div>
-          <div class="actions">
+          <div class="actions" style="margin: 0;">
             <form method="post" action="/projects/{{$.ProjectID}}/dependencies/{{.ID}}/trigger-mode" class="inline">
               <input type="hidden" name="trigger_always" value="{{if .TriggerAlways}}off{{else}}on{{end}}">
               <button type="submit">{{if .TriggerAlways}}Trigger: Every apply{{else}}Trigger: When mapped outputs change{{end}}</button>
@@ -60,10 +60,10 @@
           </tbody>
         </table>
         {{else}}
-        <p class="sub" style="margin-top: 8px;">No output mappings configured yet.</p>
+        <p class="field-hint" style="margin-top: 8px;">No output mappings configured yet.</p>
         {{end}}
 
-        <form method="post" action="/projects/{{$.ProjectID}}/dependencies/{{.ID}}/mappings" class="actions" style="margin-top: 8px;">
+        <form method="post" action="/projects/{{$.ProjectID}}/dependencies/{{.ID}}/mappings" class="inline-form-row" style="margin-top: 10px;">
           <input type="text" name="output_name" placeholder="Upstream output (e.g. vpc_id)" list="outputs-{{.ID}}" required>
           {{if .AvailableOutputs}}
           <datalist id="outputs-{{.ID}}">
@@ -80,8 +80,8 @@
     {{end}}
   </section>
 
-  <section class="group" style="margin-top: 24px;">
-    <h3>Downstream Dependents</h3>
+  <section class="form-section">
+    <h2>Downstream Dependents</h2>
     {{if .Downstream}}
     <table>
       <thead>

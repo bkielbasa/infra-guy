@@ -16,9 +16,10 @@ var (
 
 // Repo is a GitHub repository accessible to an installation.
 type Repo struct {
-	ID    int64
-	Owner string
-	Name  string
+	ID            int64
+	Owner         string
+	Name          string
+	DefaultBranch string
 }
 
 // InstallationEvent is the parsed GitHub App installation webhook event.

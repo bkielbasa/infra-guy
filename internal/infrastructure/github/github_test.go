@@ -82,7 +82,7 @@ func TestMembershipAndRepos(t *testing.T) {
 			if r.Header.Get("Authorization") != "Bearer ghs_x" {
 				t.Errorf("auth %s", r.Header.Get("Authorization"))
 			}
-			w.Write([]byte(`{"repositories":[{"id":5,"name":"infra","owner":{"login":"acme"}}]}`))
+			w.Write([]byte(`{"repositories":[{"id":5,"name":"infra","default_branch":"master","owner":{"login":"acme"}}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -92,7 +92,7 @@ func TestMembershipAndRepos(t *testing.T) {
 		t.Fatalf("%s %s %d %v", state, role, status, err)
 	}
 	repos, err := c.ListRepos(context.Background(), 9)
-	if err != nil || len(repos) != 1 || repos[0].ID != 5 || repos[0].Owner != "acme" || repos[0].Name != "infra" {
+	if err != nil || len(repos) != 1 || repos[0].ID != 5 || repos[0].Owner != "acme" || repos[0].Name != "infra" || repos[0].DefaultBranch != "master" {
 		t.Fatalf("%#v %v", repos, err)
 	}
 }

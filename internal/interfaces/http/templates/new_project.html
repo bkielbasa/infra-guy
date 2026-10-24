@@ -26,7 +26,7 @@
           <input type="text" id="repo-search" class="repo-search-input" placeholder="Fuzzy search owner/repository..." autocomplete="off">
           <div id="repo-results" class="repo-results" role="listbox"></div>
           <select name="repo_id" required>
-            {{range .Repos}}<option value="{{.ID}}">{{.Owner}}/{{.Name}}</option>{{end}}
+            {{range .Repos}}<option value="{{.ID}}"{{if .DefaultBranch}} data-default-branch="{{.DefaultBranch}}"{{end}}>{{.Owner}}/{{.Name}}</option>{{end}}
           </select>
         </div>
         <span class="field-hint">Type any characters from <code>owner/repo</code> to fuzzy filter repositories.</span>
@@ -34,7 +34,13 @@
 
       <div class="field">
         <label for="tags-input">Tags</label>
-        <input type="text" id="tags-input" name="tags" placeholder="env:prod, team:core, region:eu-central-1" autocomplete="off">
+        <div class="repo-Combobox" id="tag-combobox">
+          <input type="text" id="tags-input" name="tags" placeholder="env:prod, team:core, region:eu-central-1" autocomplete="off">
+          <div id="tag-results" class="repo-results" role="listbox"></div>
+          <div id="known-tags-data" hidden>
+            {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
+          </div>
+        </div>
         <div id="tags-preview" class="tag-pills"></div>
         <span class="field-hint">Comma-separated <code>key:value</code> pairs used to organize and filter projects.</span>
       </div>
@@ -45,8 +51,8 @@
       <div class="form-grid">
         <div class="field">
           <label for="project-branch">Default branch</label>
-          <input type="text" id="project-branch" name="branch" value="main">
-          <span class="field-hint">Pushes to this branch trigger tracked runs.</span>
+          <input type="text" id="project-branch" name="branch" value="{{if .DefaultBranch}}{{.DefaultBranch}}{{else}}main{{end}}">
+          <span class="field-hint">Auto-detected from the selected repository. Pushes to this branch trigger tracked runs.</span>
         </div>
         <div class="field">
           <label for="project-workdir">Working directory</label>
@@ -101,51 +107,61 @@
   </form>
   <script>
   (function() {
+    function fuzzyMatch(query, text) {
+      if (!query) return { score: 1, indices: [] };
+      const q = query.toLowerCase();
+      const t = text.toLowerCase();
+      let qi = 0, score = 0, streak = 0;
+      const indices = [];
+      for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+        if (t[ti] === q[qi]) {
+          indices.push(ti);
+          streak++;
+          score += 10 + streak * 5 + (ti === 0 || t[ti - 1] === '/' || t[ti - 1] === ':' || t[ti - 1] === '-' || t[ti - 1] === '_' ? 15 : 0);
+          qi++;
+        } else {
+          streak = 0;
+          score -= 1;
+        }
+      }
+      return qi === q.length ? { score, indices } : null;
+    }
+
+    function highlight(text, indices) {
+      if (!indices || !indices.length) return text;
+      const set = new Set(indices);
+      let out = '';
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        out += set.has(i) ? '<mark>' + ch + '</mark>' : ch;
+      }
+      return out;
+    }
+
     const search = document.getElementById('repo-search');
     const select = document.querySelector('select[name="repo_id"]');
     const results = document.getElementById('repo-results');
+    const branchInput = document.getElementById('project-branch');
+    let branchDirty = false;
+    if (branchInput) {
+      branchInput.addEventListener('input', () => { branchDirty = true; });
+    }
+
     if (search && select && results) {
-      const repos = Array.from(select.options).map(o => ({ id: o.value, text: o.text }));
+      const repos = Array.from(select.options).map(o => ({
+        id: o.value,
+        text: o.text,
+        branch: o.dataset.defaultBranch || 'main'
+      }));
       let activeIdx = 0;
       let filtered = repos.slice();
-
-      function fuzzyMatch(query, text) {
-        if (!query) return { score: 1, indices: [] };
-        const q = query.toLowerCase();
-        const t = text.toLowerCase();
-        let qi = 0, score = 0, streak = 0;
-        const indices = [];
-        for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-          if (t[ti] === q[qi]) {
-            indices.push(ti);
-            streak++;
-            score += 10 + streak * 5 + (ti === 0 || t[ti - 1] === '/' || t[ti - 1] === '-' || t[ti - 1] === '_' ? 15 : 0);
-            qi++;
-          } else {
-            streak = 0;
-            score -= 1;
-          }
-        }
-        return qi === q.length ? { score, indices } : null;
-      }
-
-      function highlight(text, indices) {
-        if (!indices || !indices.length) return text;
-        const set = new Set(indices);
-        let out = '';
-        for (let i = 0; i < text.length; i++) {
-          const ch = text[i].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          out += set.has(i) ? '<mark>' + ch + '</mark>' : ch;
-        }
-        return out;
-      }
 
       function render() {
         const q = search.value.trim();
         filtered = [];
         for (const r of repos) {
           const m = fuzzyMatch(q, r.text);
-          if (m) filtered.push({ id: r.id, text: r.text, score: m.score, indices: m.indices });
+          if (m) filtered.push({ id: r.id, text: r.text, branch: r.branch, score: m.score, indices: m.indices });
         }
         if (q) filtered.sort((a, b) => b.score - a.score);
         if (activeIdx >= filtered.length) activeIdx = Math.max(0, filtered.length - 1);
@@ -156,7 +172,8 @@
         }
         results.innerHTML = filtered.map((item, idx) =>
           '<div class="repo-option' + (item.id === select.value ? ' selected' : '') + (idx === activeIdx ? ' active' : '') + '" data-id="' + item.id + '">' +
-            highlight(item.text, item.indices) +
+            '<span>' + highlight(item.text, item.indices) + '</span>' +
+            '<span class="repo-option-meta">' + item.branch + '</span>' +
           '</div>'
         ).join('');
       }
@@ -165,12 +182,20 @@
         if (!item) return;
         select.value = item.id;
         search.value = item.text;
+        if (branchInput && item.branch) {
+          branchInput.value = item.branch;
+          branchDirty = false;
+        }
         results.classList.remove('open');
         render();
       }
 
       if (select.options.length > 0) {
-        search.value = select.options[select.selectedIndex].text;
+        const initial = repos[select.selectedIndex >= 0 ? select.selectedIndex : 0];
+        search.value = initial.text;
+        if (branchInput && initial.branch) {
+          branchInput.value = initial.branch;
+        }
       }
       select.classList.add('sr-only-select');
 
@@ -184,6 +209,9 @@
         render();
         if (filtered.length > 0) {
           select.value = filtered[0].id;
+          if (branchInput && !branchDirty && filtered[0].branch) {
+            branchInput.value = filtered[0].branch;
+          }
         }
       });
       search.addEventListener('keydown', (e) => {
@@ -219,7 +247,12 @@
 
     const tagsInput = document.getElementById('tags-input');
     const tagsPreview = document.getElementById('tags-preview');
+    const tagResults = document.getElementById('tag-results');
+    const knownTags = Array.from(document.querySelectorAll('#known-tags-data [data-tag]')).map(el => el.dataset.tag).filter(Boolean);
     if (tagsInput && tagsPreview) {
+      let tagActiveIdx = 0;
+      let tagFiltered = [];
+
       function updatePreview() {
         const tokens = tagsInput.value.split(/[,\n\r]+/).map(s => s.trim()).filter(Boolean);
         tagsPreview.innerHTML = tokens.map(t => {
@@ -228,7 +261,82 @@
           return '<span class="tag-pill' + (valid ? '' : ' tag-pill-invalid') + '">' + safe + '</span>';
         }).join('');
       }
-      tagsInput.addEventListener('input', updatePreview);
+
+      function renderTagSuggestions() {
+        if (!tagResults || !knownTags.length) return;
+        const parts = tagsInput.value.split(',');
+        const current = parts[parts.length - 1].trim();
+        const used = new Set(parts.slice(0, -1).map(s => s.trim().toLowerCase()).filter(Boolean));
+        tagFiltered = [];
+        for (const t of knownTags) {
+          if (used.has(t.toLowerCase())) continue;
+          const m = fuzzyMatch(current, t);
+          if (m) tagFiltered.push({ tag: t, score: m.score, indices: m.indices });
+        }
+        if (current) tagFiltered.sort((a, b) => b.score - a.score);
+        if (tagActiveIdx >= tagFiltered.length) tagActiveIdx = Math.max(0, tagFiltered.length - 1);
+
+        if (!tagFiltered.length) {
+          tagResults.classList.remove('open');
+          tagResults.innerHTML = '';
+          return;
+        }
+        tagResults.innerHTML = tagFiltered.map((item, idx) =>
+          '<div class="repo-option' + (idx === tagActiveIdx ? ' active' : '') + '" data-tag="' + item.tag + '">' +
+            highlight(item.tag, item.indices) +
+          '</div>'
+        ).join('');
+        tagResults.classList.add('open');
+      }
+
+      function chooseTag(tag) {
+        if (!tag) return;
+        const parts = tagsInput.value.split(',').map(s => s.trim()).filter((_, idx, arr) => idx < arr.length - 1);
+        parts.push(tag);
+        tagsInput.value = parts.join(', ') + ', ';
+        updatePreview();
+        if (tagResults) tagResults.classList.remove('open');
+        tagsInput.focus();
+      }
+
+      tagsInput.addEventListener('focus', renderTagSuggestions);
+      tagsInput.addEventListener('input', () => {
+        tagActiveIdx = 0;
+        updatePreview();
+        renderTagSuggestions();
+      });
+      tagsInput.addEventListener('keydown', (e) => {
+        if (!tagResults || !tagResults.classList.contains('open')) return;
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          tagActiveIdx = Math.min(tagFiltered.length - 1, tagActiveIdx + 1);
+          renderTagSuggestions();
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          tagActiveIdx = Math.max(0, tagActiveIdx - 1);
+          renderTagSuggestions();
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+          if (tagFiltered[tagActiveIdx]) {
+            e.preventDefault();
+            chooseTag(tagFiltered[tagActiveIdx].tag);
+          }
+        } else if (e.key === 'Escape') {
+          tagResults.classList.remove('open');
+        }
+      });
+      if (tagResults) {
+        tagResults.addEventListener('mousedown', (e) => {
+          const opt = e.target.closest('.repo-option');
+          if (!opt) return;
+          e.preventDefault();
+          chooseTag(opt.dataset.tag);
+        });
+      }
+      document.addEventListener('click', (e) => {
+        if (tagResults && !e.target.closest('#tag-combobox')) {
+          tagResults.classList.remove('open');
+        }
+      });
       updatePreview();
     }
   })();

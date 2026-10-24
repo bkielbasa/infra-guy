@@ -2394,6 +2394,107 @@ func TestProjectTagsAndFilters(t *testing.T) {
 	}
 }
 
+func TestDefaultBranchAutoDetectTagAutocompleteAndSettingsRedesign(t *testing.T) {
+	p1 := listProject(t)
+	_ = p1.SetTags(map[string]string{"env": "prod", "team": "platform"})
+
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p1}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	proj, runsSvc, st := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+		repos: map[int64][]installation.Repo{
+			100: {
+				{ID: 101, Owner: "operator", Name: "legacy-infra", DefaultBranch: "master"},
+				{ID: 102, Owner: "operator", Name: "modern-infra", DefaultBranch: "main"},
+			},
+		},
+	}
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// 1. GET /projects/new includes data-default-branch, pre-fills first repo's default branch ("master"), and includes known tags for autocomplete
+	rr := getUI(t, h, "/projects/new")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /projects/new = %d: %s", rr.Code, body)
+	}
+	for _, want := range []string{
+		`data-default-branch="master"`,
+		`data-default-branch="main"`,
+		`id="project-branch" name="branch" value="master"`,
+		`data-tag="env:prod"`,
+		`data-tag="team:platform"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected /projects/new to contain %q, got:\n%s", want, body)
+		}
+	}
+
+	// 2. POST /projects with empty branch auto-detects the repo's default branch ("master")
+	rr = postUI(t, h, "/projects", strings.NewReader("name=legacy-stack&repo_id=101&branch=&tags=env%3Aprod"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("POST /projects = %d: %s", rr.Code, rr.Body.String())
+	}
+	created := projects.items["new-p"]
+	if created == nil || created.Snapshot().DefaultBranch != "master" {
+		t.Fatalf("expected created project DefaultBranch=master, got %+v", created)
+	}
+
+	// 3. GET /projects/p1/settings renders redesigned settings sections, danger zone, and tag autocomplete options
+	rr = getUI(t, h, "/projects/p1/settings")
+	settingsBody := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /projects/p1/settings = %d: %s", rr.Code, settingsBody)
+	}
+	for _, want := range []string{
+		`class="panel form-panel"`,
+		`class="form-section"`,
+		`class="form-section danger-zone"`,
+		`id="tags-input"`,
+		`id="tags-preview"`,
+		`data-tag="env:prod"`,
+		`data-tag="team:platform"`,
+	} {
+		if !strings.Contains(settingsBody, want) {
+			t.Fatalf("expected /projects/p1/settings to contain %q, got:\n%s", want, settingsBody)
+		}
+	}
+
+	// 4. GET / includes known-tags datalist on #filter-tag
+	rr = getUI(t, h, "/")
+	listBody := rr.Body.String()
+	if !strings.Contains(listBody, `list="known-tags"`) || !strings.Contains(listBody, `<option value="env:prod">`) {
+		t.Fatalf("expected / to contain known-tags datalist, got:\n%s", listBody)
+	}
+
+	// 5. GET /projects/p1/tabs/state and /projects/p1/tabs/dependencies use redesigned .form-section layout
+	rr = getUI(t, h, "/projects/p1/tabs/state")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `class="form-section"`) {
+		t.Fatalf("expected /projects/p1/tabs/state to contain form-section, got:\n%s", rr.Body.String())
+	}
+	rr = getUI(t, h, "/projects/p1/tabs/dependencies")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `class="form-section"`) {
+		t.Fatalf("expected /projects/p1/tabs/dependencies to contain form-section, got:\n%s", rr.Body.String())
+	}
+}
+
+
 
 
 
