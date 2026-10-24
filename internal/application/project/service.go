@@ -44,6 +44,7 @@ type UpdateInput struct {
 	TerraformVersion string
 	ApprovalPolicyID string
 	AutoApprove      bool
+	Tags             map[string]string
 }
 
 func randomSecret() (string, error) {
@@ -114,11 +115,30 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*project.Project,
 	if in.ApprovalPolicyID != "" {
 		p.ChangeApprovalPolicy(in.ApprovalPolicyID)
 	}
+	if in.Tags != nil {
+		if err := p.SetTags(in.Tags); err != nil {
+			return nil, err
+		}
+	}
 	p.SetAutoApprove(in.AutoApprove)
 	if err := s.Projects.Save(ctx, p); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+func (s *Service) SetTags(ctx context.Context, id project.ID, tags map[string]string) error {
+	p, err := s.Projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %s not found", id)
+	}
+	if err := p.SetTags(tags); err != nil {
+		return err
+	}
+	return s.Projects.Save(ctx, p)
 }
 
 func (s *Service) UpdateApprovalPolicy(ctx context.Context, id project.ID, policyID string) error {

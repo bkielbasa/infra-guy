@@ -270,19 +270,48 @@ func TestUI(t *testing.T) {
 	}
 }
 
-func TestRunPageStateUpdated(t *testing.T) {
-	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+func TestRunPageMeta(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": listProject(t)}}
+	prNum := 42
+	prSnap := needsApprovalSnap("r-pr")
+	prSnap.Trigger = run.TriggerPullRequest
+	prSnap.PRNumber = &prNum
+	prSnap.PRTitle = "Bump provider"
 	runs := &memRuns{items: map[run.ID]*run.Run{
 		"r-need": run.Restore(needsApprovalSnap("r-need")),
+		"r-pr":   run.Restore(prSnap),
 	}}
 	st := state.New("p1")
 	if err := st.Put([]byte(`{"serial":1}`), "", "r-need", time.Date(2026, 3, 4, 15, 6, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{"p1": st}}, "")
+
 	rr := getUI(t, h, "/runs/r-need")
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "2026-03-04 15:06") {
-		t.Fatalf("run state updated %d %s", rr.Code, rr.Body.Bytes())
+	body := rr.Body.String()
+	if rr.Code != 200 {
+		t.Fatalf("run %d %s", rr.Code, body)
+	}
+	if strings.Contains(body, "State managed by infra-guy") {
+		t.Fatalf("run page should not contain 'State managed by infra-guy': %s", body)
+	}
+	if strings.Contains(body, "2026-03-04 15:06") {
+		t.Fatalf("run page should not contain state updated date: %s", body)
+	}
+	if !strings.Contains(body, `href="https://github.com/bklebasa/infra/commit/abc1234def"`) {
+		t.Fatalf("run page missing clickable commit sha link: %s", body)
+	}
+	if strings.Contains(body, `https://github.com/bklebasa/infra/pull/`) {
+		t.Fatalf("non-PR run page should not contain PR link: %s", body)
+	}
+
+	rrPR := getUI(t, h, "/runs/r-pr")
+	prBody := rrPR.Body.String()
+	if rrPR.Code != 200 {
+		t.Fatalf("pr run %d %s", rrPR.Code, prBody)
+	}
+	if !strings.Contains(prBody, `href="https://github.com/bklebasa/infra/pull/42"`) || !strings.Contains(prBody, "#42") {
+		t.Fatalf("PR run page missing GitHub PR link: %s", prBody)
 	}
 }
 
@@ -2254,6 +2283,114 @@ func TestStateTabAndImport(t *testing.T) {
 	rr = postMultipartState(t, h, "/projects/p1/state/import", "terraform.tfstate", tfstate)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("import while state locked = %d, want 409", rr.Code)
+	}
+}
+
+func TestProjectTagsAndFilters(t *testing.T) {
+	p1 := listProject(t)
+	_ = p1.SetTags(map[string]string{"env": "prod", "team": "payments"})
+
+	repo2, err := project.ParseSourceRepo("bklebasa/network")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := project.New("p2", "core-network", repo2, time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = p2.SetDefaultBranch("staging")
+	_ = p2.SetPlacement("ten", 2)
+	_ = p2.SetTags(map[string]string{"env": "staging", "team": "infra"})
+
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p1, "p2": p2}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	proj, runsSvc, st := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+		repos: map[int64][]installation.Repo{
+			100: {
+				{ID: 101, Owner: "operator", Name: "my-infra"},
+			},
+		},
+	}
+	h := NewServer(ServerConfig{
+		Projects: proj, Runs: runsSvc, States: st,
+		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// 1. /projects/new includes fuzzy search input and tags input
+	rr := getUI(t, h, "/projects/new")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `id="repo-search"`) || !strings.Contains(rr.Body.String(), `name="tags"`) {
+		t.Fatalf("/projects/new missing repo-search or tags input: %d %s", rr.Code, rr.Body.String())
+	}
+
+	// 2. Creating a project with tags stores them
+	rr = postUI(t, h, "/projects", strings.NewReader("name=billing&repo_id=101&branch=main&tags=env%3Aprod%2C+tier%3Abackend"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("create project with tags = %d: %s", rr.Code, rr.Body.String())
+	}
+	created := projects.items["new-p"]
+	if created == nil || project.FormatTags(created.Snapshot().Tags) != "env:prod, tier:backend" {
+		t.Fatalf("created project tags = %+v", created)
+	}
+
+	// 3. Invalid tag format on create returns 400
+	rr = postUI(t, h, "/projects", strings.NewReader("name=bad&repo_id=101&branch=main&tags=not-key-value"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("create with invalid tag = %d, want 400", rr.Code)
+	}
+
+	// 4. Updating tags via POST /projects/{id} updates them
+	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=&terraform_version=1.9.8&tags=env%3Aprod%2C+owner%3Aplatform"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("update project tags = %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := project.FormatTags(projects.items["p1"].Snapshot().Tags); got != "env:prod, owner:platform" {
+		t.Fatalf("updated p1 tags = %q", got)
+	}
+
+	// 5. GET /projects shows filter controls and tags, and filters by name, branch, and tag
+	rr = getUI(t, h, "/")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || !strings.Contains(body, `id="filter-name"`) || !strings.Contains(body, `id="filter-branch"`) || !strings.Contains(body, `id="filter-tag"`) {
+		t.Fatalf("projects list missing filter inputs: %s", body)
+	}
+	if !strings.Contains(body, "env:prod") || !strings.Contains(body, "env:staging") {
+		t.Fatalf("projects list missing tags: %s", body)
+	}
+
+	// Filter by tag=env:staging
+	rr = getUI(t, h, "/?tag=env:staging")
+	body = rr.Body.String()
+	if !strings.Contains(body, "core-network") || strings.Contains(body, "payments") {
+		t.Fatalf("filter by tag=env:staging failed: %s", body)
+	}
+
+	// Filter by branch=staging
+	rr = getUI(t, h, "/?branch=staging")
+	body = rr.Body.String()
+	if !strings.Contains(body, "core-network") || strings.Contains(body, "payments") {
+		t.Fatalf("filter by branch=staging failed: %s", body)
+	}
+
+	// Filter by name=pay
+	rr = getUI(t, h, "/?name=pay")
+	body = rr.Body.String()
+	if !strings.Contains(body, "payments") || strings.Contains(body, "core-network") {
+		t.Fatalf("filter by name=pay failed: %s", body)
 	}
 }
 

@@ -1,23 +1,78 @@
 {{define "projects"}}
 <div class="panel">
-  <div class="headline">
+  <div class="headline headline-spread">
     <h1>Projects</h1>
-    <a href="/projects/new">New project</a>
+    <a href="/projects/new" class="btn btn-trigger">New project</a>
   </div>
-  <table>
+  <form method="get" action="/" class="filter-bar" id="projects-filter-form">
+    <div class="filter-field">
+      <label for="filter-name">Name</label>
+      <input type="text" id="filter-name" name="name" value="{{.FilterName}}" placeholder="Filter by name..." autocomplete="off">
+    </div>
+    <div class="filter-field">
+      <label for="filter-branch">Branch</label>
+      <input type="text" id="filter-branch" name="branch" value="{{.FilterBranch}}" placeholder="Filter by branch..." autocomplete="off">
+    </div>
+    <div class="filter-field">
+      <label for="filter-tag">Tags</label>
+      <input type="text" id="filter-tag" name="tag" value="{{.FilterTag}}" placeholder="Filter by key:value..." autocomplete="off">
+    </div>
+  </form>
+  <table id="projects-table">
     <thead>
-      <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Latest run</th></tr>
+      <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Tags</th><th>Latest run</th></tr>
     </thead>
     <tbody>
       {{range .Projects}}
-      <tr>
+      <tr class="project-row" data-name="{{.Name}}" data-branch="{{.Branch}}" data-tags="{{.TagsCSV}}">
         <td><a href="/projects/{{.ID}}">{{.Name}}</a></td>
         <td>{{.Repo}}</td>
         <td>{{.Branch}}</td>
+        <td>
+          <div class="tag-pills">
+            {{range .Tags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
+          </div>
+        </td>
         <td>{{if .Status}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{end}}</td>
       </tr>
       {{end}}
     </tbody>
   </table>
 </div>
+<script>
+(function() {
+  const nameInput = document.getElementById('filter-name');
+  const branchInput = document.getElementById('filter-branch');
+  const tagInput = document.getElementById('filter-tag');
+  const rows = Array.from(document.querySelectorAll('#projects-table tbody .project-row'));
+  if (!nameInput || !branchInput || !tagInput) return;
+
+  function applyFilter() {
+    const n = nameInput.value.trim().toLowerCase();
+    const b = branchInput.value.trim().toLowerCase();
+    const t = tagInput.value.trim().toLowerCase();
+    for (const row of rows) {
+      const rName = (row.dataset.name || '').toLowerCase();
+      const rBranch = (row.dataset.branch || '').toLowerCase();
+      const rTags = (row.dataset.tags || '').toLowerCase().split(',').filter(Boolean);
+      const matchName = !n || rName.includes(n);
+      const matchBranch = !b || rBranch.includes(b);
+      const matchTag = !t || rTags.some(tag => tag.includes(t));
+      row.style.display = (matchName && matchBranch && matchTag) ? '' : 'none';
+    }
+  }
+
+  nameInput.addEventListener('input', applyFilter);
+  branchInput.addEventListener('input', applyFilter);
+  tagInput.addEventListener('input', applyFilter);
+
+  document.querySelectorAll('.tag-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tag = btn.dataset.tag || '';
+      tagInput.value = (tagInput.value.trim() === tag) ? '' : tag;
+      applyFilter();
+    });
+  });
+})();
+</script>
 {{end}}

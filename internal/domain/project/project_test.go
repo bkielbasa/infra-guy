@@ -161,3 +161,29 @@ func TestRenameRepo(t *testing.T) {
 	}
 }
 
+func TestTags(t *testing.T) {
+	p := sample(t)
+	if len(p.Snapshot().Tags) != 0 {
+		t.Fatalf("expected empty tags, got %v", p.Snapshot().Tags)
+	}
+	tags, err := ParseTags(" env:prod , team:core\nregion:eu-central-1 ")
+	if err != nil {
+		t.Fatalf("ParseTags: %v", err)
+	}
+	if err := p.SetTags(tags); err != nil {
+		t.Fatalf("SetTags: %v", err)
+	}
+	if got := FormatTags(p.Snapshot().Tags); got != "env:prod, region:eu-central-1, team:core" {
+		t.Fatalf("FormatTags = %q", got)
+	}
+	list := TagList(p.Snapshot().Tags)
+	if len(list) != 3 || list[0] != "env:prod" || list[1] != "region:eu-central-1" || list[2] != "team:core" {
+		t.Fatalf("TagList = %v", list)
+	}
+	for _, bad := range []string{"invalid", ":val", "key:", "k ey:val", "key:v al"} {
+		if _, err := ParseTags(bad); err == nil {
+			t.Fatalf("expected error for invalid tag %q", bad)
+		}
+	}
+}
+

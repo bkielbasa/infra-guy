@@ -538,4 +538,209 @@ details[data-status="running"] pre.log:empty::before {
   color: var(--muted);
 }
 
+.headline-spread {
+  justify-content: space-between;
+}
+
+.filter-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  margin: 18px 0 18px;
+  padding: 14px 16px;
+  background: #141720;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.filter-field label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+.filter-field input {
+  max-width: none;
+  padding: 8px 11px;
+  font-size: 13.5px;
+}
+
+.tag-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+#tags-preview:not(:empty) {
+  margin-top: 8px;
+}
+.tag-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #1f2536;
+  border: 1px solid #333d58;
+  color: #c5d4ff;
+}
+button.tag-filter-btn {
+  cursor: pointer;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #1f2536;
+  border: 1px solid #333d58;
+  color: #c5d4ff;
+}
+button.tag-filter-btn:hover {
+  background: #2b3450;
+  border-color: var(--accent);
+}
+.tag-pill-invalid {
+  background: #3d1c1c;
+  border-color: #6b3030;
+  color: var(--danger);
+}
+
+.form-panel {
+  max-width: 820px;
+}
+.form-header {
+  margin-bottom: 22px;
+}
+.form-header .sub {
+  color: var(--muted);
+  margin: 6px 0 0;
+  font-size: 14px;
+}
+.form-section {
+  padding: 18px 20px;
+  margin-bottom: 18px;
+  background: #141720;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.form-section h2 {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+.field {
+  margin-bottom: 14px;
+}
+.field:last-child {
+  margin-bottom: 0;
+}
+.field label {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+}
+.field input[type="text"],
+.field select {
+  max-width: none;
+}
+.field-hint {
+  display: block;
+  margin-top: 5px;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+.field-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+}
+.check-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #101218;
+  cursor: pointer;
+  font-weight: 400;
+}
+.check-card input[type="checkbox"] {
+  margin-top: 4px;
+}
+.context-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-top: 6px;
+}
+
+.repo-Combobox {
+  position: relative;
+}
+.sr-only-select {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.repo-results {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #101218;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  z-index: 30;
+}
+.repo-results.open {
+  display: block;
+}
+.repo-option {
+  padding: 9px 12px;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13.5px;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.repo-option:last-child {
+  border-bottom: none;
+}
+.repo-option:hover,
+.repo-option.active {
+  background: #1e2333;
+}
+.repo-option.selected {
+  color: var(--link);
+}
+.repo-option mark {
+  background: rgba(139, 124, 247, 0.28);
+  color: #fff;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.repo-empty {
+  padding: 10px 12px;
+  color: var(--faint);
+  font-size: 13px;
+}
+.empty-card {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #141720;
+}
+
 

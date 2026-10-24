@@ -31,8 +31,10 @@
   <span>{{.Repo}}</span>
   {{if .Workdir}}<span>{{.Workdir}}</span>{{end}}
   {{if .Branch}}<span>{{.Branch}}</span>{{end}}
-  {{if .SHA}}<span class="sha">{{.SHA}}</span>{{end}}
+  {{if .SHA}}{{if .SHAURL}}<span class="sha"><a href="{{.SHAURL}}" target="_blank" rel="noopener">{{.SHA}}</a></span>{{else}}<span class="sha">{{.SHA}}</span>{{end}}{{end}}
+  {{if .PRURL}}<span><a href="{{.PRURL}}" target="_blank" rel="noopener">{{.PRNumber}}</a></span>{{end}}
+  {{range .Tags}}<span class="tag-pill">{{.}}</span>{{end}}
   {{if .StateUpdated}}<span>{{.StateUpdated}}</span>{{end}}
-  <span>State managed by infra-guy</span>
+  {{if .ShowManagedBy}}<span>State managed by infra-guy</span>{{end}}
 </div>
 {{end}}

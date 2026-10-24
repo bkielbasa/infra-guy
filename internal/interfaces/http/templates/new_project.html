@@ -1,25 +1,238 @@
 {{define "new_project"}}
 <nav class="crumb"><a href="/">Projects</a> / New</nav>
-<div class="panel">
-  <h1>New project</h1>
+<div class="panel form-panel">
+  <div class="form-header">
+    <h1>New project</h1>
+    <p class="sub">Connect a GitHub repository and configure how Terraform runs are planned and applied.</p>
+  </div>
   {{if .InstallURL}}
-  <p><a href="{{.InstallURL}}">Install GitHub App</a></p>
+  <div class="empty-card">
+    <p>Install the GitHub App on your organization or account to select a repository.</p>
+    <a href="{{.InstallURL}}" class="btn btn-trigger">Install GitHub App</a>
+  </div>
   {{else}}
-  <form method="post" action="/projects">
-    <label>Name</label>
-    <input type="text" name="name" required>
-    <label>Repository</label>
-    <select name="repo_id" required>
-      {{range .Repos}}<option value="{{.ID}}">{{.Owner}}/{{.Name}}</option>{{end}}
-    </select>
-    <label>Default branch</label>
-    <input type="text" name="branch" value="main">
-    <label>Working directory</label>
-    <input type="text" name="workdir">
+  <form method="post" action="/projects" class="project-form">
+    <section class="form-section">
+      <h2>Project &amp; Repository</h2>
+      <div class="field">
+        <label for="project-name">Name</label>
+        <input type="text" id="project-name" name="name" placeholder="e.g. prod-networking" required>
+        <span class="field-hint">A human-friendly identifier for this stack.</span>
+      </div>
+
+      <div class="field">
+        <label for="repo-search">Repository</label>
+        <div class="repo-Combobox" id="repo-combobox">
+          <input type="text" id="repo-search" class="repo-search-input" placeholder="Fuzzy search owner/repository..." autocomplete="off">
+          <div id="repo-results" class="repo-results" role="listbox"></div>
+          <select name="repo_id" required>
+            {{range .Repos}}<option value="{{.ID}}">{{.Owner}}/{{.Name}}</option>{{end}}
+          </select>
+        </div>
+        <span class="field-hint">Type any characters from <code>owner/repo</code> to fuzzy filter repositories.</span>
+      </div>
+
+      <div class="field">
+        <label for="tags-input">Tags</label>
+        <input type="text" id="tags-input" name="tags" placeholder="env:prod, team:core, region:eu-central-1" autocomplete="off">
+        <div id="tags-preview" class="tag-pills"></div>
+        <span class="field-hint">Comma-separated <code>key:value</code> pairs used to organize and filter projects.</span>
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2>Git &amp; Terraform</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label for="project-branch">Default branch</label>
+          <input type="text" id="project-branch" name="branch" value="main">
+          <span class="field-hint">Pushes to this branch trigger tracked runs.</span>
+        </div>
+        <div class="field">
+          <label for="project-workdir">Working directory</label>
+          <input type="text" id="project-workdir" name="workdir" placeholder="e.g. terraform/prod (optional)">
+          <span class="field-hint">Relative subdirectory where Terraform files live.</span>
+        </div>
+        {{if .Versions}}
+        <div class="field">
+          <label for="project-tf-version">Terraform version</label>
+          <select id="project-tf-version" name="terraform_version">
+            {{range .Versions}}<option value="{{.}}"{{if eq . $.DefaultVersion}} selected{{end}}>{{.}}</option>{{end}}
+          </select>
+        </div>
+        {{end}}
+        {{if .Policies}}
+        <div class="field">
+          <label for="project-policy">Approval policy</label>
+          <select id="project-policy" name="approval_policy_id">
+            <option value="">None</option>
+            {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
+          </select>
+        </div>
+        {{end}}
+      </div>
+    </section>
+
+    <section class="form-section">
+      <h2>Automation &amp; Contexts</h2>
+      <label class="check-card">
+        <input type="checkbox" name="auto_approve">
+        <div>
+          <strong>Auto-approve tracked runs</strong>
+          <div class="field-hint">Automatically run <code>terraform apply</code> when a plan succeeds on the default branch.</div>
+        </div>
+      </label>
+      {{if .Contexts}}
+      <div class="field">
+        <label>Attached contexts</label>
+        <div class="context-grid">
+          {{range .Contexts}}
+          <label class="check"><input type="checkbox" name="context_ids" value="{{.ID}}"{{if .Attached}} checked{{end}}> {{.Name}}</label>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    </section>
+
     <div class="actions">
-      <button type="submit">Create</button>
+      <button type="submit" class="btn-trigger">Create project</button>
+      <a href="/" class="btn">Cancel</a>
     </div>
   </form>
+  <script>
+  (function() {
+    const search = document.getElementById('repo-search');
+    const select = document.querySelector('select[name="repo_id"]');
+    const results = document.getElementById('repo-results');
+    if (search && select && results) {
+      const repos = Array.from(select.options).map(o => ({ id: o.value, text: o.text }));
+      let activeIdx = 0;
+      let filtered = repos.slice();
+
+      function fuzzyMatch(query, text) {
+        if (!query) return { score: 1, indices: [] };
+        const q = query.toLowerCase();
+        const t = text.toLowerCase();
+        let qi = 0, score = 0, streak = 0;
+        const indices = [];
+        for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+          if (t[ti] === q[qi]) {
+            indices.push(ti);
+            streak++;
+            score += 10 + streak * 5 + (ti === 0 || t[ti - 1] === '/' || t[ti - 1] === '-' || t[ti - 1] === '_' ? 15 : 0);
+            qi++;
+          } else {
+            streak = 0;
+            score -= 1;
+          }
+        }
+        return qi === q.length ? { score, indices } : null;
+      }
+
+      function highlight(text, indices) {
+        if (!indices || !indices.length) return text;
+        const set = new Set(indices);
+        let out = '';
+        for (let i = 0; i < text.length; i++) {
+          const ch = text[i].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          out += set.has(i) ? '<mark>' + ch + '</mark>' : ch;
+        }
+        return out;
+      }
+
+      function render() {
+        const q = search.value.trim();
+        filtered = [];
+        for (const r of repos) {
+          const m = fuzzyMatch(q, r.text);
+          if (m) filtered.push({ id: r.id, text: r.text, score: m.score, indices: m.indices });
+        }
+        if (q) filtered.sort((a, b) => b.score - a.score);
+        if (activeIdx >= filtered.length) activeIdx = Math.max(0, filtered.length - 1);
+
+        if (!filtered.length) {
+          results.innerHTML = '<div class="repo-empty">No matching repositories</div>';
+          return;
+        }
+        results.innerHTML = filtered.map((item, idx) =>
+          '<div class="repo-option' + (item.id === select.value ? ' selected' : '') + (idx === activeIdx ? ' active' : '') + '" data-id="' + item.id + '">' +
+            highlight(item.text, item.indices) +
+          '</div>'
+        ).join('');
+      }
+
+      function choose(item) {
+        if (!item) return;
+        select.value = item.id;
+        search.value = item.text;
+        results.classList.remove('open');
+        render();
+      }
+
+      if (select.options.length > 0) {
+        search.value = select.options[select.selectedIndex].text;
+      }
+      select.classList.add('sr-only-select');
+
+      search.addEventListener('focus', () => {
+        results.classList.add('open');
+        render();
+      });
+      search.addEventListener('input', () => {
+        activeIdx = 0;
+        results.classList.add('open');
+        render();
+        if (filtered.length > 0) {
+          select.value = filtered[0].id;
+        }
+      });
+      search.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          activeIdx = Math.min(filtered.length - 1, activeIdx + 1);
+          render();
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          activeIdx = Math.max(0, activeIdx - 1);
+          render();
+        } else if (e.key === 'Enter' && results.classList.contains('open')) {
+          if (filtered[activeIdx]) {
+            e.preventDefault();
+            choose(filtered[activeIdx]);
+          }
+        } else if (e.key === 'Escape') {
+          results.classList.remove('open');
+        }
+      });
+      results.addEventListener('mousedown', (e) => {
+        const opt = e.target.closest('.repo-option');
+        if (!opt) return;
+        const item = filtered.find(f => f.id === opt.dataset.id);
+        choose(item);
+      });
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('#repo-combobox')) {
+          results.classList.remove('open');
+        }
+      });
+    }
+
+    const tagsInput = document.getElementById('tags-input');
+    const tagsPreview = document.getElementById('tags-preview');
+    if (tagsInput && tagsPreview) {
+      function updatePreview() {
+        const tokens = tagsInput.value.split(/[,\n\r]+/).map(s => s.trim()).filter(Boolean);
+        tagsPreview.innerHTML = tokens.map(t => {
+          const valid = /^[^:\s,]+\:[^:\s,]+$/.test(t);
+          const safe = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          return '<span class="tag-pill' + (valid ? '' : ' tag-pill-invalid') + '">' + safe + '</span>';
+        }).join('');
+      }
+      tagsInput.addEventListener('input', updatePreview);
+      updatePreview();
+    }
+  })();
+  </script>
   {{end}}
 </div>
 {{end}}

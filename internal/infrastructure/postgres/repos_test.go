@@ -52,6 +52,9 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	if err := p.SetTerraformVersion("1.10.5"); err != nil {
 		t.Fatal(err)
 	}
+	if err := p.SetTags(map[string]string{"env": "prod", "team": "core"}); err != nil {
+		t.Fatal(err)
+	}
 	p.SetAutoApprove(true)
 	p.SetStateToken("st-token")
 	if err := p.ClaimActiveRun("run-" + suffix); err != nil {
@@ -100,6 +103,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		gotP.AutoApprove != wantP.AutoApprove || gotP.Locked != wantP.Locked ||
 		gotP.StateToken != wantP.StateToken || gotP.ActiveRunID != wantP.ActiveRunID ||
 		gotP.TenantID != wantP.TenantID || gotP.GitHubRepoID != wantP.GitHubRepoID ||
+		project.FormatTags(gotP.Tags) != "env:prod, team:core" ||
 		!gotP.CreatedAt.Equal(wantP.CreatedAt) || !gotP.UpdatedAt.Equal(wantP.UpdatedAt) {
 		t.Fatalf("project snapshot\nwant %#v\ngot  %#v", wantP, gotP)
 	}

@@ -133,6 +133,12 @@ func TestCreateUpdateAndForceUnlock(t *testing.T) {
 	if projects.items["p1"].Snapshot().ApprovalPolicyID != "" {
 		t.Fatalf("UpdateApprovalPolicy clear = %q, want empty", projects.items["p1"].Snapshot().ApprovalPolicyID)
 	}
+	if err := svc.SetTags(ctx, "p1", map[string]string{"env": "prod", "team": "core"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := project.FormatTags(projects.items["p1"].Snapshot().Tags); got != "env:prod, team:core" {
+		t.Fatalf("SetTags = %q, want env:prod, team:core", got)
+	}
 	if err := created.ClaimActiveRun("run-1"); err != nil {
 		t.Fatal(err)
 	}

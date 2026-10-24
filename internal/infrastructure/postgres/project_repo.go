@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -18,16 +19,24 @@ type ProjectRepo struct{ pool *pgxpool.Pool }
 func NewProjectRepo(pool *pgxpool.Pool) *ProjectRepo { return &ProjectRepo{pool: pool} }
 
 const projectColumns = `id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-	terraform_version, COALESCE(approval_policy_id, ''), auto_approve, locked, state_token, active_run_id, created_at, updated_at`
+	terraform_version, COALESCE(approval_policy_id, ''), auto_approve, tags, locked, state_token, active_run_id, created_at, updated_at`
 
 func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	s := p.Snapshot()
-	_, err := r.pool.Exec(ctx, `
+	tagsMap := s.Tags
+	if tagsMap == nil {
+		tagsMap = map[string]string{}
+	}
+	tagsJSON, err := json.Marshal(tagsMap)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `
 		INSERT INTO projects (
 			id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-			terraform_version, approval_policy_id, auto_approve, locked, state_token, active_run_id, created_at, updated_at
+			terraform_version, approval_policy_id, auto_approve, tags, locked, state_token, active_run_id, created_at, updated_at
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''),$11,$12,$13,$14,$15,$16)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''),$11,$12::jsonb,$13,$14,$15,$16,$17)
 		ON CONFLICT (id) DO UPDATE SET
 			tenant_id = EXCLUDED.tenant_id,
 			github_repo_id = EXCLUDED.github_repo_id,
@@ -39,11 +48,12 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			terraform_version = EXCLUDED.terraform_version,
 			approval_policy_id = EXCLUDED.approval_policy_id,
 			auto_approve = EXCLUDED.auto_approve,
+			tags = EXCLUDED.tags,
 			state_token = EXCLUDED.state_token,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
-		s.TerraformVersion, s.ApprovalPolicyID, s.AutoApprove, s.Locked, s.StateToken, s.ActiveRunID,
+		s.TerraformVersion, s.ApprovalPolicyID, s.AutoApprove, string(tagsJSON), s.Locked, s.StateToken, s.ActiveRunID,
 		s.CreatedAt, s.UpdatedAt,
 	)
 	return err
@@ -111,13 +121,17 @@ type projectScanner interface {
 
 func scanProject(row projectScanner) (*project.Project, error) {
 	var s project.Snapshot
+	var tagsRaw []byte
 	var created, updated time.Time
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.GitHubRepoID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
-		&s.TerraformVersion, &s.ApprovalPolicyID, &s.AutoApprove, &s.Locked, &s.StateToken, &s.ActiveRunID,
+		&s.TerraformVersion, &s.ApprovalPolicyID, &s.AutoApprove, &tagsRaw, &s.Locked, &s.StateToken, &s.ActiveRunID,
 		&created, &updated,
 	); err != nil {
 		return nil, err
+	}
+	if len(tagsRaw) > 0 {
+		_ = json.Unmarshal(tagsRaw, &s.Tags)
 	}
 	s.CreatedAt = utcTime(created)
 	s.UpdatedAt = utcTime(updated)

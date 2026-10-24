@@ -42,11 +42,15 @@ type layoutData struct {
 }
 
 type metaView struct {
-	TerraformVersion, Repo, Workdir, Branch, SHA, StateUpdated string
+	TerraformVersion, Repo, Workdir, Branch, SHA, SHAURL, PRNumber, PRURL, StateUpdated string
+	Tags                                                                                []string
+	ShowManagedBy                                                                       bool
 }
 
 type projectRow struct {
 	ID, Name, Repo, Branch, Status, StatusClass string
+	Tags                                        []string
+	TagsCSV                                     string
 }
 
 type runRow struct {
@@ -204,10 +208,20 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
+	filterBranch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	filterTag := strings.TrimSpace(r.URL.Query().Get("tag"))
 	rows := make([]projectRow, 0, len(items))
 	for _, p := range items {
 		ps := p.Snapshot()
-		row := projectRow{ID: string(ps.ID), Name: ps.Name, Repo: ps.Repo.String(), Branch: ps.DefaultBranch}
+		tags := project.TagList(ps.Tags)
+		if !matchesProjectFilter(ps.Name, ps.DefaultBranch, tags, filterName, filterBranch, filterTag) {
+			continue
+		}
+		row := projectRow{
+			ID: string(ps.ID), Name: ps.Name, Repo: ps.Repo.String(), Branch: ps.DefaultBranch,
+			Tags: tags, TagsCSV: strings.Join(tags, ","),
+		}
 		runs, err := u.cfg.Runs.ListByProject(r.Context(), ps.ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -220,9 +234,35 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, row)
 	}
 	u.page(w, "Projects", "projects", map[string]any{
-		"Projects": rows,
-		"Policies": u.policyChoices(r.Context(), tenantID, ""),
+		"Projects":     rows,
+		"Policies":     u.policyChoices(r.Context(), tenantID, ""),
+		"FilterName":   filterName,
+		"FilterBranch": filterBranch,
+		"FilterTag":    filterTag,
 	})
+}
+
+func matchesProjectFilter(name, branch string, tags []string, filterName, filterBranch, filterTag string) bool {
+	if filterName != "" && !strings.Contains(strings.ToLower(name), strings.ToLower(filterName)) {
+		return false
+	}
+	if filterBranch != "" && !strings.Contains(strings.ToLower(branch), strings.ToLower(filterBranch)) {
+		return false
+	}
+	if filterTag != "" {
+		needle := strings.ToLower(filterTag)
+		matched := false
+		for _, t := range tags {
+			if strings.Contains(strings.ToLower(t), needle) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
@@ -300,11 +340,22 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repository not found", http.StatusBadRequest)
 		return
 	}
+	tags, err := project.ParseTags(r.FormValue("tags"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	sourceRepo := project.SourceRepo{Owner: match.Owner, Name: match.Name}
 	p, err := u.cfg.Projects.Create(r.Context(), tenantID, r.FormValue("name"), sourceRepo, match.ID, r.FormValue("branch"), r.FormValue("workdir"), r.FormValue("auto_approve") == "on")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if len(tags) > 0 {
+		if err := u.cfg.Projects.SetTags(r.Context(), p.Snapshot().ID, tags); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if err := u.cfg.Projects.SetTerraformVersion(r.Context(), p.Snapshot().ID, r.FormValue("terraform_version")); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -433,6 +484,8 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 		"Branch": ps.DefaultBranch, "Workdir": ps.WorkingDirectory,
 		"TerraformVersion": ps.TerraformVersion,
 		"ApprovalPolicyID": ps.ApprovalPolicyID,
+		"Tags":             project.FormatTags(ps.Tags),
+		"TagList":          project.TagList(ps.Tags),
 		"Versions":         u.versions(r.Context()),
 		"Contexts":         u.contextChoices(r.Context(), ps.TenantID, ps.ID),
 		"Policies":         u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
@@ -450,6 +503,14 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 	}
 	ps := p.Snapshot()
 	id := ps.ID
+	var tags map[string]string
+	if r.Form.Has("tags") {
+		tags, err = project.ParseTags(r.FormValue("tags"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	policyID := strings.TrimSpace(r.FormValue("approval_policy_id"))
 	if policyID != "" && u.cfg.Policies != nil {
 		if _, err := u.cfg.Policies.Get(r.Context(), ps.TenantID, policy.ID(policyID)); err != nil {
@@ -462,6 +523,7 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 		TerraformVersion: r.FormValue("terraform_version"),
 		AutoApprove:      r.FormValue("auto_approve") == "on",
 		ApprovalPolicyID: policyID,
+		Tags:             tags,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -818,12 +880,11 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 	}
 }
 
-func (u *ui) runView(r *http.Request, ps project.Snapshot, rs run.Snapshot, evalView *runPolicyEvalView, panel template.HTML) map[string]any {
-	meta, _ := u.cfg.States.Metadata(r.Context(), string(ps.ID))
+func (u *ui) runView(_ *http.Request, ps project.Snapshot, rs run.Snapshot, evalView *runPolicyEvalView, panel template.HTML) map[string]any {
 	return map[string]any{
 		"ID": string(rs.ID), "ProjectID": string(ps.ID), "ProjectName": ps.Name,
 		"Title": runTitle(rs), "Status": rs.Status.Label(), "StatusClass": statusClass(rs.Status),
-		"Meta": runMeta(ps, rs, meta), "ChangesLabel": template.HTML(changesLabel(rs)), "Panel": panel,
+		"Meta": runMeta(ps, rs), "ChangesLabel": template.HTML(changesLabel(rs)), "Panel": panel,
 		"Poll":       !rs.Status.Terminal(),
 		"PolicyEval": evalView,
 	}
@@ -835,6 +896,8 @@ func projectMeta(ps project.Snapshot, latest *run.Snapshot, meta state.Metadata)
 		Repo:             ps.Repo.String(),
 		Workdir:          ps.WorkingDirectory,
 		Branch:           ps.DefaultBranch,
+		Tags:             project.TagList(ps.Tags),
+		ShowManagedBy:    true,
 	}
 	if latest != nil {
 		if latest.TerraformVersion != "" {
@@ -851,13 +914,20 @@ func projectMeta(ps project.Snapshot, latest *run.Snapshot, meta state.Metadata)
 	return m
 }
 
-func runMeta(ps project.Snapshot, rs run.Snapshot, meta state.Metadata) metaView {
+func runMeta(ps project.Snapshot, rs run.Snapshot) metaView {
 	m := metaView{
 		TerraformVersion: rs.TerraformVersion, Repo: ps.Repo.String(), Workdir: ps.WorkingDirectory,
 		Branch: firstNonEmpty(rs.Branch, ps.DefaultBranch), SHA: shortSHA(rs.SHA),
 	}
-	if meta.Exists && !meta.UpdatedAt.IsZero() {
-		m.StateUpdated = fmtTime(meta.UpdatedAt)
+	if repo := ps.Repo.String(); repo != "" {
+		if rs.SHA != "" {
+			m.SHAURL = "https://github.com/" + repo + "/commit/" + rs.SHA
+		}
+		if rs.PRNumber != nil && *rs.PRNumber > 0 {
+			num := strconv.Itoa(*rs.PRNumber)
+			m.PRNumber = "#" + num
+			m.PRURL = "https://github.com/" + repo + "/pull/" + num
+		}
 	}
 	return m
 }

@@ -8,6 +8,8 @@
     <input type="text" name="branch" value="{{.Branch}}">
     <label>Working directory</label>
     <input type="text" name="workdir" value="{{.Workdir}}">
+    <label>Tags (key:value)</label>
+    <input type="text" name="tags" value="{{.Tags}}" placeholder="env:prod, team:core">
     <label>Terraform version</label>
     <select name="terraform_version">
       {{range .Versions}}<option value="{{.}}"{{if eq . $.TerraformVersion}} selected{{end}}>{{.}}</option>{{end}}
