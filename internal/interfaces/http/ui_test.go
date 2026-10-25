@@ -2912,6 +2912,195 @@ func TestDashboardOverviewAndInsights(t *testing.T) {
 	}
 }
 
+func TestAnalyticsDORAEmptyState(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	projects := &memProjects{items: map[project.ID]*project.Project{}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc,
+		Runs:     runsSvc,
+		States:   stSvc,
+		Checkout: &stubTip{sha: "abc1234"},
+		Lookup:   &stubLookup{},
+		Tokens:   uiTokenSource{store: store},
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+	})
+
+	rr := getUI(t, h, "/analytics")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /analytics = %d: %s", rr.Code, body)
+	}
+	for _, want := range []string{
+		`Lead time for changes`,
+		`No data available`,
+		`Lead time is calculated from PR merge commits with tracked runs`,
+		`Deployment frequency`,
+		`No deployments yet`,
+		`How often tracked runs complete successfully`,
+		`Average time to recovery`,
+		`No recovery data available`,
+		`Recovery time is measured from stack failure to next successful tracked run`,
+		`Change failure rate`,
+		`No failure data available`,
+		`Percentage of tracked runs that fail`,
+		`Line`,
+		`Bar`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected empty DORA analytics to contain %q, got:\n%s", want, body)
+		}
+	}
+}
+
+func TestAnalyticsDORAAndMetricsWithData(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+
+	pPayments := project.Restore(project.Snapshot{
+		ID: "p-pay", TenantID: "ten", Name: "payments-prod",
+		Repo: project.SourceRepo{Owner: "acme", Name: "payments"}, DefaultBranch: "main",
+		TerraformVersion: "1.9.8", ApprovalPolicyID: "pol-1",
+		Tags:      map[string]string{"env": "prod", "team": "payments"},
+		CreatedAt: now.Add(-30 * 24 * time.Hour),
+	})
+	pUnguarded := project.Restore(project.Snapshot{
+		ID: "p-unguarded", TenantID: "ten", Name: "legacy- billing",
+		Repo: project.SourceRepo{Owner: "acme", Name: "billing"}, DefaultBranch: "main",
+		TerraformVersion: "1.7.0", AutoApprove: true, Locked: true,
+		CreatedAt: now.Add(-45 * 24 * time.Hour),
+		UpdatedAt: now.Add(-20 * 24 * time.Hour),
+	})
+
+	projects := &memProjects{items: map[project.ID]*project.Project{
+		"p-pay":       pPayments,
+		"p-unguarded": pUnguarded,
+	}}
+
+	tFailCreated := now.Add(-5 * time.Hour)
+	tFailStart := now.Add(-4*time.Hour - 58*time.Minute)
+	tFailEnd := now.Add(-4 * time.Hour)
+	rFailed := run.Restore(run.Snapshot{
+		ID: "r-fail", ProjectID: "p-pay", Trigger: run.TriggerPush,
+		Status: run.StatusFailed, Branch: "main", SHA: "1111111abcdef",
+		Message: "broken migration", Author: "alice", TriggeredBy: "alice",
+		SummaryPresent: true, Add: 1, Change: 2, Destroy: 4,
+		CreatedAt: tFailCreated, StartedAt: &tFailStart, FinishedAt: &tFailEnd,
+	})
+
+	tRecCreated := now.Add(-3 * time.Hour)
+	tRecStart := now.Add(-2*time.Hour - 55*time.Minute)
+	tPlanDone := now.Add(-2*time.Hour - 50*time.Minute)
+	tApproved := now.Add(-2*time.Hour - 20*time.Minute)
+	tApplyStart := now.Add(-2*time.Hour - 19*time.Minute)
+	tRecEnd := now.Add(-2 * time.Hour)
+	rRecovered := run.Restore(run.Snapshot{
+		ID: "r-ok", ProjectID: "p-pay", Trigger: run.TriggerPush,
+		Status: run.StatusSucceeded, Branch: "main", SHA: "2222222abcdef",
+		Message: "fix migration", Author: "alice", TriggeredBy: "alice",
+		ApprovedBy: "bob", ApprovedAt: &tApproved,
+		Approvals: []run.Approval{{UserID: "u-bob", Login: "bob", Role: "admin", ApprovedAt: tApproved}},
+		SummaryPresent: true, Add: 6, Change: 3, Destroy: 1,
+		CreatedAt: tRecCreated, StartedAt: &tRecStart, FinishedAt: &tRecEnd,
+		Steps: []run.Step{
+			{Name: run.StepInit, Position: 1, Status: run.StepSucceeded, StartedAt: &tRecStart, FinishedAt: &tRecStart},
+			{Name: run.StepPlan, Position: 2, Status: run.StepSucceeded, StartedAt: &tRecStart, FinishedAt: &tPlanDone},
+			{Name: run.StepApply, Position: 3, Status: run.StepSucceeded, StartedAt: &tApplyStart, FinishedAt: &tRecEnd},
+		},
+	})
+
+	prNum := 42
+	rPRPlan := run.Restore(run.Snapshot{
+		ID: "r-pr", ProjectID: "p-pay", Trigger: run.TriggerPullRequest,
+		PlanOnly: true, Status: run.StatusPlanned, Branch: "feat/rds", SHA: "3333333abcdef",
+		PRNumber: &prNum, PRTitle: "Preview RDS upgrade", Author: "carol", TriggeredBy: "carol",
+		SummaryPresent: true, Add: 2, Change: 1, Destroy: 0,
+		CreatedAt: now.Add(-1 * time.Hour),
+	})
+
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"r-fail": rFailed,
+		"r-ok":   rRecovered,
+		"r-pr":   rPRPlan,
+	}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc,
+		Runs:     runsSvc,
+		States:   stSvc,
+		Checkout: &stubTip{sha: "abc1234"},
+		Lookup:   &stubLookup{},
+		Tokens:   uiTokenSource{store: store},
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+	})
+
+	// 1. DORA tab with data
+	rr := getUI(t, h, "/analytics?window=30d")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /analytics?window=30d = %d: %s", rr.Code, body)
+	}
+	for _, want := range []string{
+		`Lead time for changes`,
+		`Deployment frequency`,
+		`Average time to recovery`,
+		`Change failure rate`,
+		`50.0%`, // 1 failed out of 2 terminal tracked runs
+		`1h 0m`, // lead time for r-ok (3h ago -> 2h ago)
+		`2h 0m`, // recovery time from r-fail (-4h) to r-ok (-2h)
+		`dora-chart-svg`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected populated DORA analytics to contain %q, got:\n%s", want, body)
+		}
+	}
+
+	// 2. Metrics & Insights tab for teams and managers
+	rr = getUI(t, h, "/analytics?tab=metrics&window=30d")
+	metricsBody := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /analytics?tab=metrics = %d: %s", rr.Code, metricsBody)
+	}
+	for _, want := range []string{
+		`Pipeline &amp; approval bottlenecks`,
+		`Human approval wait`,
+		`Team &amp; tag scorecards`,
+		`team:payments`,
+		`payments-prod`,
+		`Infrastructure churn &amp; blast radius`,
+		`legacy- billing`,
+		`Drift, staleness &amp; governance health`,
+		`Contributor &amp; review activity`,
+		`alice`,
+		`bob`,
+	} {
+		if !strings.Contains(metricsBody, want) {
+			t.Fatalf("expected Metrics tab to contain %q, got:\n%s", want, metricsBody)
+		}
+	}
+}
+
+
 
 
 

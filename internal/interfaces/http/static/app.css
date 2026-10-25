@@ -1364,6 +1364,225 @@ button.tag-filter-btn:hover {
   text-decoration: none;
 }
 
+/* Analytics & DORA page */
+.analytics-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.analytics-top-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.analytics-top-header h1 {
+  margin: 0 0 4px;
+}
+.analytics-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.analytics-tag-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.analytics-subtabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.analytics-subtab {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+}
+.analytics-subtab:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  text-decoration: none;
+}
+.analytics-subtab.active {
+  color: var(--text);
+  background: #1c2233;
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
+.dora-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+@media (max-width: 920px) {
+  .dora-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.dora-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.dora-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.dora-card-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.dora-card-title-group h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.dora-drag-handle {
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: -2px;
+  user-select: none;
+  opacity: 0.7;
+}
+.dora-info-icon {
+  color: var(--muted);
+  font-size: 13px;
+  cursor: help;
+}
+.dora-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dora-toggle-group {
+  display: inline-flex;
+  align-items: center;
+  background: #13161f;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+.dora-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+}
+.dora-toggle-btn:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+.dora-toggle-btn.active {
+  background: #23293a;
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+.dora-more-dots {
+  color: var(--muted);
+  font-size: 15px;
+  padding: 0 4px;
+  user-select: none;
+}
+.dora-card-inner {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #13161f;
+  padding: 18px 20px;
+  min-height: 210px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.dora-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 6px;
+  padding: 24px 12px;
+}
+.dora-empty-icon {
+  margin-bottom: 4px;
+}
+.dora-empty-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.dora-empty-subtitle {
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 380px;
+}
+.dora-metric-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.dora-metric-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+.dora-metric-sub {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.dora-chart-wrap {
+  width: 100%;
+}
+.dora-chart-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.dora-card[data-chart-mode="bar"] .dora-chart-line {
+  display: none;
+}
+.dora-card[data-chart-mode="line"] .dora-chart-bar {
+  display: none;
+}
+.analytics-metrics-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+
 
 
 

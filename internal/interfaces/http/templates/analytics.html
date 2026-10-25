@@ -1,0 +1,355 @@
+{{define "analytics"}}
+<div class="analytics-page">
+  <div class="analytics-top-header">
+    <div>
+      <h1>Analytics</h1>
+      <p class="settings-card-desc">DORA delivery performance, pipeline bottlenecks, team scorecards, and governance insights.</p>
+    </div>
+    <div class="analytics-controls">
+      {{if .AllTags}}
+      <div class="analytics-tag-filter">
+        <span class="muted">Scope:</span>
+        <a href="/analytics?tab={{.Tab}}&window={{.Window}}" class="tag-pill {{if eq .SelectedTag ""}}tag-pill-active{{end}}">All ({{.TotalWorkspaces}})</a>
+        {{range .AllTags}}
+        <a href="/analytics?tab={{$.Tab}}&window={{$.Window}}&tag={{.}}" class="tag-pill {{if eq $.SelectedTag .}}tag-pill-active{{end}}">{{.}}</a>
+        {{end}}
+      </div>
+      {{end}}
+      <div class="dora-toggle-group" role="group" aria-label="Time window">
+        <a href="/analytics?tab={{.Tab}}&window=7d{{if .SelectedTag}}&tag={{.SelectedTag}}{{end}}" class="dora-toggle-btn {{if eq .Window "7d"}}active{{end}}">7d</a>
+        <a href="/analytics?tab={{.Tab}}&window=30d{{if .SelectedTag}}&tag={{.SelectedTag}}{{end}}" class="dora-toggle-btn {{if eq .Window "30d"}}active{{end}}">30d</a>
+        <a href="/analytics?tab={{.Tab}}&window=90d{{if .SelectedTag}}&tag={{.SelectedTag}}{{end}}" class="dora-toggle-btn {{if eq .Window "90d"}}active{{end}}">90d</a>
+        <a href="/analytics?tab={{.Tab}}&window=all{{if .SelectedTag}}&tag={{.SelectedTag}}{{end}}" class="dora-toggle-btn {{if eq .Window "all"}}active{{end}}">All</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="analytics-subtabs">
+    <a href="/analytics?tab=dora&window={{.Window}}{{if .SelectedTag}}&tag={{.SelectedTag}}{{end}}" class="analytics-subtab {{if eq .Tab "dora"}}active{{end}}">DORA</a>
+    <a href="/analytics?tab=metrics&window={{.Window}}{{if .SelectedTag}}&tag={{.SelectedTag}}{{end}}" class="analytics-subtab {{if eq .Tab "metrics"}}active{{end}}">Metrics</a>
+  </div>
+
+  {{if eq .Tab "dora"}}
+  <div class="dora-grid">
+    {{range .DORACards}}
+    <section class="dora-card" data-chart-mode="bar">
+      <header class="dora-card-header">
+        <div class="dora-card-title-group">
+          <span class="dora-drag-handle" aria-hidden="true">&#8942;&#8942;</span>
+          <h2>{{.Title}}</h2>
+          <span class="dora-info-icon" title="{{.Tooltip}}" aria-label="{{.Tooltip}}">&#9432;</span>
+          {{if .TierLabel}}<span class="pill {{.TierClass}}">{{.TierLabel}}</span>{{end}}
+        </div>
+        <div class="dora-card-actions">
+          <div class="dora-toggle-group">
+            <button type="button" class="dora-toggle-btn" data-chart-switch="line" onclick="var c=this.closest('.dora-card');c.setAttribute('data-chart-mode','line');c.querySelectorAll('[data-chart-switch]').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-chart-switch')==='line')});">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 13V3M2 13H14M4.5 10L7.5 6.5L10.5 8.5L13.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Line
+            </button>
+            <button type="button" class="dora-toggle-btn active" data-chart-switch="bar" onclick="var c=this.closest('.dora-card');c.setAttribute('data-chart-mode','bar');c.querySelectorAll('[data-chart-switch]').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-chart-switch')==='bar')});">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 13V3M2 13H14M5 13V8M8.5 13V5M12 13V9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+              Bar
+            </button>
+          </div>
+          <span class="dora-more-dots" aria-hidden="true">&middot;&middot;&middot;</span>
+        </div>
+      </header>
+
+      <div class="dora-card-inner">
+        {{if .HasData}}
+        <div class="dora-metric-summary">
+          <div class="dora-metric-value">{{.Value}}</div>
+          <div class="dora-metric-sub">{{.Subtext}}</div>
+        </div>
+        <div class="dora-chart-wrap dora-chart-bar">{{.BarSVG}}</div>
+        <div class="dora-chart-wrap dora-chart-line">{{.LineSVG}}</div>
+        {{else}}
+        <div class="dora-empty-state">
+          <svg class="dora-empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="4" y="12" width="3.5" height="7" rx="1.2" fill="#7c3aed"/>
+            <rect x="10.25" y="6" width="3.5" height="13" rx="1.2" fill="#7c3aed"/>
+            <rect x="16.5" y="15" width="3.5" height="4" rx="1.2" fill="#7c3aed"/>
+          </svg>
+          <div class="dora-empty-title">{{.EmptyTitle}}</div>
+          <div class="dora-empty-subtitle">{{.EmptySubtitle}}</div>
+        </div>
+        {{end}}
+      </div>
+    </section>
+    {{end}}
+  </div>
+  {{else}}
+  <div class="analytics-metrics-stack">
+    <section class="panel dashboard-section">
+      <div class="dashboard-section-head">
+        <div>
+          <h2>Pipeline &amp; approval bottlenecks</h2>
+          <p class="settings-card-desc">Where delivery time is spent across runner queueing, Terraform plan, human approval reviews, and apply execution.</p>
+        </div>
+      </div>
+      {{if .HasPhaseData}}
+      <div class="dashboard-health-bar" style="margin-bottom: 14px;" role="img" aria-label="Pipeline cycle time breakdown">
+        {{if gt .PctQueue 0}}<div class="health-seg health-seg-idle" style="width: {{.PctQueue}}%" title="Queue wait: {{.AvgQueue}}"></div>{{end}}
+        {{if gt .PctPlan 0}}<div class="health-seg health-seg-running" style="width: {{.PctPlan}}%" title="Init &amp; plan: {{.AvgPlan}}"></div>{{end}}
+        {{if gt .PctApproval 0}}<div class="health-seg health-seg-approval" style="width: {{.PctApproval}}%" title="Human approval wait: {{.AvgApproval}}"></div>{{end}}
+        {{if gt .PctApply 0}}<div class="health-seg health-seg-finished" style="width: {{.PctApply}}%" title="Apply execution: {{.AvgApply}}"></div>{{end}}
+      </div>
+      {{end}}
+      <div class="dashboard-kpi-grid">
+        <div class="dashboard-kpi-card">
+          <div class="dashboard-kpi-head">
+            <span class="dashboard-kpi-label"><span class="legend-dot legend-dot-idle"></span> Queue wait</span>
+            <span class="dashboard-kpi-meta">{{.QueueSamples}} runs</span>
+          </div>
+          <div class="dashboard-kpi-value">{{.AvgQueue}}</div>
+          <div class="dashboard-kpi-sub"><span>Created &rarr; runner start ({{.PctQueue}}%)</span></div>
+        </div>
+        <div class="dashboard-kpi-card">
+          <div class="dashboard-kpi-head">
+            <span class="dashboard-kpi-label"><span class="legend-dot legend-dot-running"></span> Init &amp; plan</span>
+            <span class="dashboard-kpi-meta">{{.PlanSamples}} runs</span>
+          </div>
+          <div class="dashboard-kpi-value">{{.AvgPlan}}</div>
+          <div class="dashboard-kpi-sub"><span>Provider init &amp; plan diff ({{.PctPlan}}%)</span></div>
+        </div>
+        <div class="dashboard-kpi-card">
+          <div class="dashboard-kpi-head">
+            <span class="dashboard-kpi-label"><span class="legend-dot legend-dot-approval"></span> Human approval wait</span>
+            <span class="dashboard-kpi-meta">{{.ApprovalSamples}} approvals</span>
+          </div>
+          <div class="dashboard-kpi-value">{{.AvgApproval}}</div>
+          <div class="dashboard-kpi-sub"><span>Plan ready &rarr; approved ({{.PctApproval}}%)</span></div>
+        </div>
+        <div class="dashboard-kpi-card">
+          <div class="dashboard-kpi-head">
+            <span class="dashboard-kpi-label"><span class="legend-dot legend-dot-finished"></span> Apply execution</span>
+            <span class="dashboard-kpi-meta">{{.ApplySamples}} applies</span>
+          </div>
+          <div class="dashboard-kpi-value">{{.AvgApply}}</div>
+          <div class="dashboard-kpi-sub"><span>Cloud resource provisioning ({{.PctApply}}%)</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel dashboard-section">
+      <div class="dashboard-section-head">
+        <div>
+          <h2>Team &amp; tag scorecards</h2>
+          <p class="settings-card-desc">Compare delivery throughput, failure rates, review speed, and resource churn across teams and environments.</p>
+        </div>
+      </div>
+      {{if .TagScorecards}}
+      <table>
+        <thead>
+          <tr><th>Tag / Team</th><th>Workspaces</th><th>Deployments</th><th>Change failure rate</th><th>Mean lead time</th><th>Mean approval wait</th><th>Resource churn</th></tr>
+        </thead>
+        <tbody>
+          {{range .TagScorecards}}
+          <tr>
+            <td><a href="{{.Link}}" class="tag-pill">{{.Name}}</a></td>
+            <td>{{.Workspaces}}</td>
+            <td><strong>{{.Deployments}}</strong></td>
+            <td><span class="pill {{.CFRClass}}">{{.CFR}}</span></td>
+            <td class="mono">{{.MeanLeadTime}}</td>
+            <td class="mono">{{.MeanApprovalWait}}</td>
+            <td class="delta"><span class="add">+{{.Add}}</span> <span class="chg">~{{.Change}}</span> <span class="del">&minus;{{.Destroy}}</span></td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <p class="empty">No tags assigned to workspaces yet.</p>
+      {{end}}
+
+      {{if .WorkspaceScorecards}}
+      <div style="margin-top: 20px;">
+        <h3 style="font-size: 14px; margin: 0 0 10px;">Workspace breakdown</h3>
+        <table>
+          <thead>
+            <tr><th>Workspace</th><th>Deployments</th><th>Failed</th><th>Change failure rate</th><th>Mean lead time</th><th>Mean approval wait</th><th>Resource churn</th></tr>
+          </thead>
+          <tbody>
+            {{range .WorkspaceScorecards}}
+            <tr>
+              <td><a href="{{.Link}}"><strong>{{.Name}}</strong></a></td>
+              <td>{{.Deployments}}</td>
+              <td>{{.FailedTracked}}</td>
+              <td><span class="pill {{.CFRClass}}">{{.CFR}}</span></td>
+              <td class="mono">{{.MeanLeadTime}}</td>
+              <td class="mono">{{.MeanApprovalWait}}</td>
+              <td class="delta"><span class="add">+{{.Add}}</span> <span class="chg">~{{.Change}}</span> <span class="del">&minus;{{.Destroy}}</span></td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+      </div>
+      {{end}}
+    </section>
+
+    <div class="dashboard-main-grid">
+      <div class="dashboard-main-col">
+        <section class="panel dashboard-section">
+          <div class="dashboard-section-head">
+            <div>
+              <h2>Infrastructure churn &amp; blast radius</h2>
+              <p class="settings-card-desc">Resource velocity, destructive change frequency, and unguarded workspace risks.</p>
+            </div>
+            <div class="delta" style="font-size: 14px;">
+              <span class="add">+{{.TotalAdd}}</span>
+              <span class="chg">~{{.TotalChange}}</span>
+              <span class="del">&minus;{{.TotalDestroy}}</span>
+            </div>
+          </div>
+
+          {{if .Risks}}
+          <div style="margin-bottom: 16px;">
+            <h3 style="font-size: 13px; margin: 0 0 8px;">Governance &amp; blast-radius risks</h3>
+            <div class="dashboard-attention-list">
+              {{range .Risks}}
+              <div class="dashboard-attention-item">
+                <div class="dashboard-attention-main">
+                  <div class="dashboard-attention-top">
+                    <span class="pill {{.BadgeClass}}">{{.Severity}}</span>
+                    <a href="/projects/{{.ProjectID}}"><strong>{{.ProjectName}}</strong></a>
+                  </div>
+                  <div class="dashboard-attention-sub">{{.Reason}}</div>
+                </div>
+                <div class="dashboard-attention-action">
+                  <a href="{{.ActionURL}}" class="btn">Configure</a>
+                </div>
+              </div>
+              {{end}}
+            </div>
+          </div>
+          {{end}}
+
+          {{if .HighChurnRuns}}
+          <h3 style="font-size: 13px; margin: 0 0 8px;">Highest blast-radius runs ({{.DestructiveRunCount}} with resource deletions)</h3>
+          <table>
+            <thead>
+              <tr><th>Run</th><th>Workspace</th><th>Status</th><th>Delta</th><th>When</th></tr>
+            </thead>
+            <tbody>
+              {{range .HighChurnRuns}}
+              <tr>
+                <td><a href="/runs/{{.RunID}}"><strong>{{.Title}}</strong></a></td>
+                <td><a href="/projects/{{.ProjectID}}">{{.ProjectName}}</a></td>
+                <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
+                <td class="delta">{{.Delta}}</td>
+                <td class="muted">{{.Date}}</td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+          {{else}}
+          <p class="empty">No resource changes recorded in this window.</p>
+          {{end}}
+        </section>
+
+        <section class="panel dashboard-section">
+          <div class="dashboard-section-head">
+            <div>
+              <h2>Drift, staleness &amp; governance health</h2>
+              <p class="settings-card-desc">Workspaces with no recent activity (&gt;14 days) that may have unmonitored cloud drift, plus policy compliance.</p>
+            </div>
+            <div class="dashboard-kpi-sub">
+              <span class="pill pill-finished">{{.PolicyCoveragePct}}% policy-guarded</span>
+              <span class="pill pill-running">{{.TagCoveragePct}}% tagged</span>
+            </div>
+          </div>
+          {{if .StaleWorkspaces}}
+          <table>
+            <thead>
+              <tr><th>Workspace</th><th>Last run activity</th><th>Terraform</th><th>Policy</th><th>Lock status</th></tr>
+            </thead>
+            <tbody>
+              {{range .StaleWorkspaces}}
+              <tr>
+                <td><a href="/projects/{{.ProjectID}}"><strong>{{.ProjectName}}</strong></a></td>
+                <td><span class="pill pill-unconfirmed">{{.DaysSinceLastRun}}</span></td>
+                <td class="mono">{{.TerraformVersion}}</td>
+                <td>{{if .HasPolicy}}<span class="pill pill-finished">Protected</span>{{else}}<span class="muted">None</span>{{end}}</td>
+                <td>{{if .Locked}}<span class="pill pill-cancelled">locked</span>{{else}}<span class="muted">Unlocked</span>{{end}}</td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+          {{else}}
+          <p class="empty">All workspaces have executed a run within the last 14 days.</p>
+          {{end}}
+        </section>
+      </div>
+
+      <aside class="dashboard-side-col">
+        <section class="panel dashboard-section">
+          <h2>Contributor &amp; review activity</h2>
+          <p class="settings-card-desc">Run triggers, PR previews vs. production applies, and top contributors.</p>
+          <div class="dashboard-kv-list" style="margin-bottom: 14px;">
+            <div class="dashboard-kv-row">
+              <span>Tracked runs (apply)</span>
+              <span class="status-tab-count">{{.TrackedRunsInWindow}}</span>
+            </div>
+            <div class="dashboard-kv-row">
+              <span>PR plan previews</span>
+              <span class="status-tab-count">{{.PRPlanRuns}}</span>
+            </div>
+          </div>
+
+          {{if .TriggerBreakdown}}
+          <h3 style="font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 14px 0 8px;">By trigger source</h3>
+          <div class="dashboard-kv-list">
+            {{range .TriggerBreakdown}}
+            <div class="dashboard-kv-row">
+              <span class="mono">{{.Label}}</span>
+              <span class="status-tab-count">{{.Count}}</span>
+            </div>
+            {{end}}
+          </div>
+          {{end}}
+
+          {{if .TopAuthors}}
+          <h3 style="font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 14px 0 8px;">Top run authors</h3>
+          <div class="dashboard-kv-list">
+            {{range .TopAuthors}}
+            <div class="dashboard-kv-row">
+              <span>{{.Label}}</span>
+              <span class="status-tab-count">{{.Count}} runs</span>
+            </div>
+            {{end}}
+          </div>
+          {{end}}
+
+          {{if .TopApprovers}}
+          <h3 style="font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 14px 0 8px;">Top approvers</h3>
+          <div class="dashboard-kv-list">
+            {{range .TopApprovers}}
+            <div class="dashboard-kv-row">
+              <span>{{.Label}}</span>
+              <span class="status-tab-count">{{.Count}} approvals</span>
+            </div>
+            {{end}}
+          </div>
+          {{end}}
+        </section>
+
+        <section class="panel dashboard-section">
+          <h2>Terraform versions</h2>
+          {{if .TerraformVersions}}
+          <div class="dashboard-kv-list">
+            {{range .TerraformVersions}}
+            <div class="dashboard-kv-row">
+              <span class="mono">{{.Label}}</span>
+              <span class="status-tab-count">{{.Count}} {{if eq .Count 1}}workspace{{else}}workspaces{{end}}</span>
+            </div>
+            {{end}}
+          </div>
+          {{else}}
+          <p class="empty">No workspaces in scope.</p>
+          {{end}}
+        </section>
+      </aside>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}
