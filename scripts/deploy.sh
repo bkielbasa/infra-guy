@@ -102,7 +102,7 @@ ssh "$DEPLOY_HOST" "bash -ec '
     git push
   fi
   kubectl annotate application infra-guy -n argocd argocd.argoproj.io/refresh=hard --overwrite
-  for _ in {1..30}; do
+  for _ in {1..60}; do
     IMG=\$(kubectl get deployment infra-guy -n infra-guy -o jsonpath=\"{.spec.template.spec.containers[0].image}\" 2>/dev/null || true)
     if [[ \"\$IMG\" == \"ghcr.io/${REPO}:${VERSION}\" ]]; then
       break

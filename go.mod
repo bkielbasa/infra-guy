@@ -3,7 +3,8 @@ module infra-guy
 go 1.27.3
 
 require (
-	github.com/jackc/pgx/v5 v5.7.4
+	github.com/golang-migrate/migrate/v4 v4.20.1
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/open-policy-agent/opa v1.21.3
 )
 
@@ -24,6 +25,7 @@ require (
 	github.com/lestrrat-go/httprc/v3 v3.0.6 // indirect
 	github.com/lestrrat-go/jwx/v3 v3.3.0 // indirect
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
+	github.com/lib/pq v1.10.9 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect

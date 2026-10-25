@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS state_history;
+DROP TABLE IF EXISTS states;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS steps;
+DROP INDEX IF EXISTS runs_one_active_per_key;
+DROP TABLE IF EXISTS runs;
+DROP TABLE IF EXISTS projects;

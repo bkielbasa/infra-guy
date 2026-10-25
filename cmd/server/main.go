@@ -110,7 +110,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer pool.Close()
-	if jobID == 0 {
+	if jobID == 0 && strings.EqualFold(strings.TrimSpace(os.Getenv("AUTO_MIGRATE")), "true") {
 		if err := postgres.Migrate(ctx, pool); err != nil {
 			log.Fatal(err)
 		}

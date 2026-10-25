@@ -17,15 +17,21 @@ RUN go mod download \
   && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
      go build -trimpath \
        net/http crypto/tls database/sql html/template archive/zip os/signal flag \
+       github.com/golang-migrate/migrate/v4 \
+       github.com/golang-migrate/migrate/v4/database/postgres \
+       github.com/golang-migrate/migrate/v4/source/iofs \
        github.com/jackc/pgx/v5 \
        github.com/jackc/pgx/v5/pgconn \
        github.com/jackc/pgx/v5/pgxpool \
+       github.com/jackc/pgx/v5/stdlib \
        github.com/open-policy-agent/opa/v1/ast \
        github.com/open-policy-agent/opa/v1/rego
 COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+    go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server \
+ && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -33,5 +39,6 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=terraform /out/terraform /usr/local/bin/terraform
 COPY --from=build /out/server /usr/local/bin/server
+COPY --from=build /out/migrate /usr/local/bin/migrate
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/server"]

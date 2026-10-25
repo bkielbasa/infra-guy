@@ -1,0 +1,2 @@
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS webhook_secret text NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_token text NOT NULL DEFAULT '';
