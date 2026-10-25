@@ -9,6 +9,14 @@ import (
 )
 
 const DefaultTerraformVersion = "1.9.8"
+const DefaultDriftIntervalMinutes = 360
+
+const (
+	DriftStatusUnknown = "unknown"
+	DriftStatusSynced  = "synced"
+	DriftStatusDrifted = "drifted"
+	DriftStatusError   = "error"
+)
 
 var (
 	ErrBusy                    = errors.New("another run is active")
@@ -21,37 +29,48 @@ var (
 type ID string
 
 type Snapshot struct {
-	ID               ID
-	TenantID         string
-	GitHubRepoID     int64
-	Name             string
-	Repo             SourceRepo
-	DefaultBranch    string
-	WorkingDirectory string
-	TerraformVersion string
-	ApprovalPolicyID string
-	AutoApprove      bool
-	Tags             map[string]string
-	Locked           bool
-	StateToken       string
-	ActiveRunID      string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                   ID
+	TenantID             string
+	GitHubRepoID         int64
+	Name                 string
+	Repo                 SourceRepo
+	DefaultBranch        string
+	WorkingDirectory     string
+	TerraformVersion     string
+	ApprovalPolicyID     string
+	AutoApprove          bool
+	Tags                 map[string]string
+	Locked               bool
+	StateToken           string
+	ActiveRunID          string
+	DriftEnabled         bool
+	DriftIntervalMinutes int
+	DriftStatus          string
+	LastDriftCheckAt     *time.Time
+	TTLHours             int
+	ExpiresAt            *time.Time
+	AutoDestroy          bool
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 type NewInput struct {
-	ID               ID
-	TenantID         string
-	GitHubRepoID     int64
-	Name             string
-	Repo             SourceRepo
-	DefaultBranch    string
-	WorkingDirectory string
-	TerraformVersion string
-	ApprovalPolicyID string
-	AutoApprove      bool
-	Tags             map[string]string
-	Now              time.Time
+	ID                   ID
+	TenantID             string
+	GitHubRepoID         int64
+	Name                 string
+	Repo                 SourceRepo
+	DefaultBranch        string
+	WorkingDirectory     string
+	TerraformVersion     string
+	ApprovalPolicyID     string
+	AutoApprove          bool
+	Tags                 map[string]string
+	DriftEnabled         bool
+	DriftIntervalMinutes int
+	TTLHours             int
+	AutoDestroy          bool
+	Now                  time.Time
 }
 
 type Project struct{ s Snapshot }
@@ -63,13 +82,21 @@ func New(id ID, name string, repo SourceRepo, now time.Time) (*Project, error) {
 	return &Project{s: Snapshot{
 		ID: id, Name: strings.TrimSpace(name), Repo: repo,
 		DefaultBranch: "main", TerraformVersion: DefaultTerraformVersion,
-		CreatedAt: now, UpdatedAt: now,
+		DriftIntervalMinutes: DefaultDriftIntervalMinutes,
+		DriftStatus:          DriftStatusUnknown,
+		CreatedAt:            now, UpdatedAt: now,
 	}}, nil
 }
 
 func Restore(s Snapshot) *Project {
 	s.ApprovalPolicyID = strings.TrimSpace(s.ApprovalPolicyID)
 	s.Tags = cloneTags(s.Tags)
+	if s.DriftIntervalMinutes <= 0 {
+		s.DriftIntervalMinutes = DefaultDriftIntervalMinutes
+	}
+	if s.DriftStatus == "" {
+		s.DriftStatus = DriftStatusUnknown
+	}
 	return &Project{s: s}
 }
 
@@ -260,5 +287,106 @@ func (p *Project) RenameRepo(owner, name string, now time.Time) error {
 	p.s.Repo.Name = name
 	p.s.UpdatedAt = now
 	return nil
+}
+
+func (p *Project) SetDriftConfig(enabled bool, intervalMinutes int, now time.Time) {
+	if intervalMinutes <= 0 {
+		intervalMinutes = DefaultDriftIntervalMinutes
+	}
+	p.s.DriftEnabled = enabled
+	p.s.DriftIntervalMinutes = intervalMinutes
+	if p.s.DriftStatus == "" {
+		p.s.DriftStatus = DriftStatusUnknown
+	}
+	if !now.IsZero() {
+		p.s.UpdatedAt = now
+	}
+}
+
+func (p *Project) RecordDriftStatus(status string, checkedAt time.Time) {
+	switch status {
+	case DriftStatusSynced, DriftStatusDrifted, DriftStatusError, DriftStatusUnknown:
+		p.s.DriftStatus = status
+	default:
+		p.s.DriftStatus = DriftStatusUnknown
+	}
+	if !checkedAt.IsZero() {
+		ts := checkedAt.UTC()
+		p.s.LastDriftCheckAt = &ts
+		p.s.UpdatedAt = ts
+	}
+}
+
+func (p *Project) DueForDriftCheck(now time.Time) bool {
+	if !p.s.DriftEnabled || p.s.Locked || p.s.ActiveRunID != "" {
+		return false
+	}
+	interval := p.s.DriftIntervalMinutes
+	if interval <= 0 {
+		interval = DefaultDriftIntervalMinutes
+	}
+	if p.s.LastDriftCheckAt == nil || p.s.LastDriftCheckAt.IsZero() {
+		return true
+	}
+	return !now.Before(p.s.LastDriftCheckAt.Add(time.Duration(interval) * time.Minute))
+}
+
+func (p *Project) SetTTL(ttlHours int, autoDestroy bool, now time.Time) {
+	if ttlHours < 0 {
+		ttlHours = 0
+	}
+	prevTTL := p.s.TTLHours
+	p.s.TTLHours = ttlHours
+	p.s.AutoDestroy = autoDestroy
+	if ttlHours == 0 {
+		p.s.ExpiresAt = nil
+		p.s.AutoDestroy = false
+	} else if p.s.ExpiresAt == nil || prevTTL != ttlHours {
+		base := now
+		if base.IsZero() {
+			base = time.Now().UTC()
+		}
+		exp := base.UTC().Add(time.Duration(ttlHours) * time.Hour)
+		p.s.ExpiresAt = &exp
+	}
+	if !now.IsZero() {
+		p.s.UpdatedAt = now
+	}
+}
+
+func (p *Project) ExtendTTL(extraHours int, now time.Time) {
+	if extraHours <= 0 {
+		extraHours = 24
+	}
+	base := now.UTC()
+	if p.s.ExpiresAt != nil && p.s.ExpiresAt.After(base) {
+		base = p.s.ExpiresAt.UTC()
+	}
+	exp := base.Add(time.Duration(extraHours) * time.Hour)
+	p.s.ExpiresAt = &exp
+	if p.s.TTLHours <= 0 {
+		p.s.TTLHours = extraHours
+	}
+	if !now.IsZero() {
+		p.s.UpdatedAt = now
+	}
+}
+
+func (p *Project) IsExpired(now time.Time) bool {
+	if !p.s.AutoDestroy || p.s.ExpiresAt == nil || p.s.ExpiresAt.IsZero() {
+		return false
+	}
+	if p.s.Locked || p.s.ActiveRunID != "" {
+		return false
+	}
+	return !now.Before(*p.s.ExpiresAt)
+}
+
+func (p *Project) ClearExpiration(now time.Time) {
+	p.s.ExpiresAt = nil
+	p.s.AutoDestroy = false
+	if !now.IsZero() {
+		p.s.UpdatedAt = now
+	}
 }
 

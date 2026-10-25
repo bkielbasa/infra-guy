@@ -44,6 +44,8 @@ type OpenRequest struct {
 	PRNumber    *int
 	CommittedAt *time.Time
 	PlanOnly    bool
+	IsDestroy   bool
+	AutoApprove *bool
 }
 
 type Service struct {
@@ -128,9 +130,13 @@ func (s *Service) Open(ctx context.Context, in OpenRequest) (*run.Run, error) {
 	if p == nil {
 		return nil, fmt.Errorf("project %s not found", in.ProjectID)
 	}
+	autoApprove := p.Snapshot().AutoApprove
+	if in.AutoApprove != nil {
+		autoApprove = *in.AutoApprove
+	}
 	opened, err := run.Open(run.OpenInput{
 		ID: run.ID(s.NewID()), ProjectID: run.ProjectID(in.ProjectID),
-		AutoApprove: p.Snapshot().AutoApprove, PlanOnly: in.PlanOnly, Trigger: in.Trigger,
+		AutoApprove: autoApprove, PlanOnly: in.PlanOnly, IsDestroy: in.IsDestroy, Trigger: in.Trigger,
 		SHA: in.SHA, Branch: in.Branch, Message: in.Message, Author: in.Author,
 		TriggeredBy: in.TriggeredBy, PRNumber: in.PRNumber, PRTitle: in.PRTitle,
 		CommittedAt: in.CommittedAt, Now: s.Now(),
@@ -351,9 +357,39 @@ func (s *Service) releaseIfTerminal(ctx context.Context, r *run.Run) error {
 	if !rs.Status.Terminal() {
 		return nil
 	}
-	if s.OnTerminal != nil {
+	if s.Projects != nil {
 		if p, err := s.Projects.Get(ctx, project.ID(rs.ProjectID)); err == nil && p != nil {
-			s.OnTerminal(ctx, p, r)
+			now := time.Now().UTC()
+			if s.Now != nil {
+				now = s.Now()
+			}
+			changed := false
+			switch {
+			case rs.Trigger == run.TriggerDrift:
+				if rs.Status == run.StatusPlanned || rs.Status == run.StatusSucceeded {
+					if rs.HasChanges() {
+						p.RecordDriftStatus(project.DriftStatusDrifted, now)
+					} else {
+						p.RecordDriftStatus(project.DriftStatusSynced, now)
+					}
+					changed = true
+				} else if rs.Status == run.StatusFailed {
+					p.RecordDriftStatus(project.DriftStatusError, now)
+					changed = true
+				}
+			case rs.Trigger != run.TriggerPullRequest && rs.Status == run.StatusSucceeded:
+				p.RecordDriftStatus(project.DriftStatusSynced, now)
+				if rs.IsDestroy && !rs.PlanOnly {
+					p.ClearExpiration(now)
+				}
+				changed = true
+			}
+			if changed {
+				_ = s.Projects.Save(ctx, p)
+			}
+			if s.OnTerminal != nil {
+				s.OnTerminal(ctx, p, r)
+			}
 		}
 	}
 	return s.Projects.ReleaseActiveRun(ctx, project.ID(rs.ProjectID), string(rs.ID))

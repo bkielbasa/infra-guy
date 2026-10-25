@@ -73,7 +73,7 @@
     <div class="projects-main panel">
       <table id="projects-table">
         <thead>
-          <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Tags</th><th>Latest run</th></tr>
+          <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Tags</th><th>Drift / TTL</th><th>Cost</th><th>Latest run</th></tr>
         </thead>
         <tbody>
           {{range .Projects}}
@@ -86,11 +86,19 @@
                 {{range .Tags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
               </div>
             </td>
+            <td>
+              {{if eq .DriftStatus "drifted"}}<span class="pill pill-failed">Drifted</span>
+              {{else if eq .DriftStatus "synced"}}<span class="pill pill-finished">In Sync</span>
+              {{else if .DriftEnabled}}<span class="pill">Drift On</span>{{end}}
+              {{if .ExpiresAt}}<span class="pill pill-unconfirmed" title="Expires at {{.ExpiresAt}} UTC">TTL {{.TTLHours}}h</span>{{end}}
+              {{if and (not .DriftEnabled) (eq .DriftStatus "") (not .ExpiresAt)}}<span class="muted">&mdash;</span>{{end}}
+            </td>
+            <td>{{if .EstMonthlyCost}}<span class="pill">{{.EstMonthlyCost}}</span>{{else}}<span class="muted">&mdash;</span>{{end}}</td>
             <td>{{if .Status}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{else}}<span class="muted">&mdash;</span>{{end}}</td>
           </tr>
           {{else}}
           <tr>
-            <td colspan="5" class="empty">No projects found.</td>
+            <td colspan="7" class="empty">No projects found.</td>
           </tr>
           {{end}}
         </tbody>

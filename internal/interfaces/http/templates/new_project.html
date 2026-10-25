@@ -80,7 +80,7 @@
     </section>
 
     <section class="form-section">
-      <h2>Automation &amp; Contexts</h2>
+      <h2>Automation, Contexts &amp; Cloud Integrations</h2>
       <label class="check-card">
         <input type="checkbox" name="auto_approve">
         <div>
@@ -98,6 +98,51 @@
         </div>
       </div>
       {{end}}
+      {{if .CloudIntegrations}}
+      <div class="field" style="margin-top: 12px;">
+        <label>Attached cloud integrations (OIDC / STS)</label>
+        <div class="context-grid">
+          {{range .CloudIntegrations}}
+          <label class="check"><input type="checkbox" name="cloud_integration_ids" value="{{.ID}}"> {{.Name}} <span class="muted">({{.ProviderLabel}})</span></label>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    </section>
+
+    <section class="form-section">
+      <h2>Drift Detection &amp; Ephemeral Environment (TTL)</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label class="check-card">
+            <input type="checkbox" name="drift_enabled">
+            <div>
+              <strong>Enable scheduled drift detection</strong>
+              <div class="field-hint">Periodically check for out-of-band cloud infrastructure drift.</div>
+            </div>
+          </label>
+        </div>
+        <div class="field">
+          <label for="drift-interval">Drift check interval (minutes)</label>
+          <input type="number" id="drift-interval" name="drift_interval_minutes" value="360" min="5">
+        </div>
+      </div>
+      <div class="form-grid" style="margin-top: 12px;">
+        <div class="field">
+          <label for="ttl-hours">Ephemeral TTL (hours, 0 = permanent)</label>
+          <input type="number" id="ttl-hours" name="ttl_hours" value="0" min="0" placeholder="e.g. 24 for sandbox preview">
+          <span class="field-hint">Self-service blueprint TTL: set e.g. <code>24</code> or <code>72</code> hours for ephemeral sandbox workspaces.</span>
+        </div>
+        <div class="field">
+          <label class="check-card">
+            <input type="checkbox" name="auto_destroy">
+            <div>
+              <strong>Auto-destroy when TTL expires</strong>
+              <div class="field-hint">Automatically run <code>terraform destroy</code> upon TTL expiration.</div>
+            </div>
+          </label>
+        </div>
+      </div>
     </section>
 
     <div class="actions">

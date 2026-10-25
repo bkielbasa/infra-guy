@@ -15,10 +15,11 @@ func (e WorkerExecutor) Run(ctx context.Context, req worker.Request) (worker.Res
 		WorkDir: req.WorkDir, InternalBaseURL: req.InternalBaseURL, ProjectID: req.ProjectID, RunID: req.RunID,
 		StateToken: req.StateToken, WorkingDirectory: req.WorkingDirectory, GitHubToken: req.GitHubToken,
 		TerraformVersion: req.TerraformVersion,
-		Step:             req.Step, PlanFile: req.PlanFile,
-		Env:   req.Env,
-		Files: req.Files,
-		OnLog: req.OnLog,
+		Step:             req.Step, Destroy: req.Destroy, PlanFile: req.PlanFile,
+		Env:           req.Env,
+		Files:         req.Files,
+		RedactSecrets: req.RedactSecrets,
+		OnLog:         req.OnLog,
 	})
 	return worker.Result{
 		ExitCode: res.ExitCode, Logs: res.Logs, PlanText: res.PlanText,

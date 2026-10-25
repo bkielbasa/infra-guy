@@ -31,9 +31,11 @@ type Request struct {
 	WorkDir, InternalBaseURL, ProjectID, RunID, StateToken, WorkingDirectory, GitHubToken string
 	TerraformVersion                                                                      string
 	Step                                                                                  run.StepName
+	Destroy                                                                               bool
 	PlanFile                                                                              []byte
 	Env                                                                                   map[string]string
 	Files                                                                                 map[string][]byte
+	RedactSecrets                                                                         []string
 	OnLog                                                                                 func(logs string)
 }
 
@@ -46,13 +48,19 @@ type Result struct {
 
 var initArgs = []string{"init", "-input=false", "-no-color"}
 
-func commands(step run.StepName) [][]string {
+func commands(step run.StepName, destroy ...bool) [][]string {
+	isDestroy := len(destroy) > 0 && destroy[0]
 	switch step {
 	case run.StepInit:
 		return [][]string{initArgs}
 	case run.StepPlan:
+		planArgs := []string{"plan", "-input=false", "-no-color"}
+		if isDestroy {
+			planArgs = append(planArgs, "-destroy")
+		}
+		planArgs = append(planArgs, "-out=tfplan")
 		return [][]string{
-			{"plan", "-input=false", "-no-color", "-out=tfplan"},
+			planArgs,
 			{"show", "-no-color", "tfplan"},
 			{"show", "-json", "tfplan"},
 		}
@@ -81,7 +89,7 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	defer os.Remove(overridePath)
 
-	cmds := commands(req.Step)
+	cmds := commands(req.Step, req.Destroy)
 	if cmds == nil {
 		return Result{ExitCode: 1, Logs: "unknown terraform step"}, nil
 	}
@@ -93,7 +101,14 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 
-	streamer := newLogStreamer(req.OnLog)
+	onLog := req.OnLog
+	if onLog != nil && len(req.RedactSecrets) > 0 {
+		origOnLog := onLog
+		onLog = func(logs string) {
+			origOnLog(redactText(logs, req.RedactSecrets))
+		}
+	}
+	streamer := newLogStreamer(onLog)
 	defer streamer.Close()
 
 	bin := "terraform"
@@ -152,7 +167,7 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 			streamer.Close()
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
-				return Result{ExitCode: ee.ExitCode(), Logs: streamer.String()}, nil
+				return Result{ExitCode: ee.ExitCode(), Logs: redactText(streamer.String(), req.RedactSecrets)}, nil
 			}
 			return Result{}, err
 		}
@@ -167,7 +182,12 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	streamer.Close()
 
-	res := Result{ExitCode: 0, Logs: streamer.String(), PlanText: planText, PlanJSON: planJSON}
+	res := Result{
+		ExitCode: 0,
+		Logs:     redactText(streamer.String(), req.RedactSecrets),
+		PlanText: redactText(planText, req.RedactSecrets),
+		PlanJSON: planJSON,
+	}
 	if req.Step == run.StepPlan {
 		plan, err := os.ReadFile(filepath.Join(dir, "tfplan"))
 		if err != nil {
@@ -179,6 +199,18 @@ func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
 		res.Version = terraformVersionBin(ctx, bin, dir, env)
 	}
 	return res, nil
+}
+
+func redactText(s string, secrets []string) string {
+	if s == "" || len(secrets) == 0 {
+		return s
+	}
+	for _, sec := range secrets {
+		if len(sec) >= 4 {
+			s = strings.ReplaceAll(s, sec, "***REDACTED***")
+		}
+	}
+	return s
 }
 
 func materializeFiles(homeDir string, files map[string][]byte) error {

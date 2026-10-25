@@ -16,6 +16,7 @@ import (
 	"time"
 
 	authapp "infra-guy/internal/application/auth"
+	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
@@ -23,6 +24,7 @@ import (
 	runapp "infra-guy/internal/application/run"
 	stateapp "infra-guy/internal/application/state"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
+	"infra-guy/internal/domain/cloudintegration"
 	"infra-guy/internal/domain/dependency"
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
@@ -3471,6 +3473,318 @@ func TestAuditLogUIAndComplianceExport(t *testing.T) {
 		t.Fatalf("unexpected JSON export payload: %+v", exported)
 	}
 }
+
+type uiMemCloudIntegrations struct {
+	items       map[cloudintegration.ID]*cloudintegration.Integration
+	projectLink map[project.ID][]cloudintegration.ID
+}
+
+func newUIMemCloudIntegrations() *uiMemCloudIntegrations {
+	return &uiMemCloudIntegrations{
+		items:       map[cloudintegration.ID]*cloudintegration.Integration{},
+		projectLink: map[project.ID][]cloudintegration.ID{},
+	}
+}
+
+func (m *uiMemCloudIntegrations) Save(_ context.Context, c *cloudintegration.Integration) error {
+	m.items[c.Snapshot().ID] = cloudintegration.Restore(c.Snapshot())
+	return nil
+}
+
+func (m *uiMemCloudIntegrations) Get(_ context.Context, id cloudintegration.ID) (*cloudintegration.Integration, error) {
+	c, ok := m.items[id]
+	if !ok {
+		return nil, nil
+	}
+	return cloudintegration.Restore(c.Snapshot()), nil
+}
+
+func (m *uiMemCloudIntegrations) ListByTenant(_ context.Context, tenantID string) ([]*cloudintegration.Integration, error) {
+	var out []*cloudintegration.Integration
+	for _, c := range m.items {
+		if c.Snapshot().TenantID == tenantID {
+			out = append(out, cloudintegration.Restore(c.Snapshot()))
+		}
+	}
+	return out, nil
+}
+
+func (m *uiMemCloudIntegrations) Delete(_ context.Context, id cloudintegration.ID) error {
+	delete(m.items, id)
+	return nil
+}
+
+func (m *uiMemCloudIntegrations) SetProjectIntegrations(_ context.Context, projectID project.ID, ids []cloudintegration.ID) error {
+	m.projectLink[projectID] = append([]cloudintegration.ID(nil), ids...)
+	return nil
+}
+
+func (m *uiMemCloudIntegrations) ListByProject(_ context.Context, projectID project.ID) ([]*cloudintegration.Integration, error) {
+	var out []*cloudintegration.Integration
+	for _, id := range m.projectLink[projectID] {
+		if c, ok := m.items[id]; ok {
+			out = append(out, cloudintegration.Restore(c.Snapshot()))
+		}
+	}
+	return out, nil
+}
+
+func TestMilestone3OIDCDiscoveryAndCloudIntegrations(t *testing.T) {
+	now := time.Date(2026, 10, 25, 16, 0, 0, 0, time.UTC)
+	projects := &memProjects{items: map[project.ID]*project.Project{}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	ciRepo := newUIMemCloudIntegrations()
+	ciSvc := &cloudintegrationapp.Service{
+		Integrations:  ciRepo,
+		PublicBaseURL: "https://infra-guy.example.com",
+		Now:           func() time.Time { return now },
+		NewID:         func() string { return "ci-1" },
+	}
+
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects:          projSvc,
+		Runs:              runsSvc,
+		States:            stSvc,
+		CloudIntegrations: ciSvc,
+		Checkout:          &stubTip{sha: "abc1234"},
+		Lookup:            &stubLookup{},
+		Tokens:            uiTokenSource{store: store},
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "id-1" },
+			PublicBaseURL: "https://infra-guy.example.com", ClientID: "cid",
+		},
+	})
+
+	// 1. Public OIDC Discovery endpoints (no session cookie needed)
+	reqDisc := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
+	rrDisc := httptest.NewRecorder()
+	h.ServeHTTP(rrDisc, reqDisc)
+	if rrDisc.Code != http.StatusOK {
+		t.Fatalf("GET /.well-known/openid-configuration = %d: %s", rrDisc.Code, rrDisc.Body.String())
+	}
+	if !strings.Contains(rrDisc.Body.String(), `"issuer":"https://infra-guy.example.com"`) ||
+		!strings.Contains(rrDisc.Body.String(), `"jwks_uri":"https://infra-guy.example.com/.well-known/jwks.json"`) {
+		t.Fatalf("unexpected OIDC discovery body: %s", rrDisc.Body.String())
+	}
+
+	reqJWKS := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
+	rrJWKS := httptest.NewRecorder()
+	h.ServeHTTP(rrJWKS, reqJWKS)
+	if rrJWKS.Code != http.StatusOK || !strings.Contains(rrJWKS.Body.String(), `"kty":"RSA"`) {
+		t.Fatalf("GET /.well-known/jwks.json = %d: %s", rrJWKS.Code, rrJWKS.Body.String())
+	}
+
+	// 2. Create AWS OIDC Cloud Integration
+	form := url.Values{
+		"name":                     {"aws-prod-oidc"},
+		"provider":                 {"aws"},
+		"auth_method":              {"oidc"},
+		"role_arn":                 {"arn:aws:iam::123456789012:role/infra-guy-prod"},
+		"region":                   {"eu-west-1"},
+		"session_duration_seconds": {"3600"},
+		"tags":                     {"env:prod, cloud:aws"},
+	}
+	rrCreate := postUI(t, h, "/cloud-integrations", strings.NewReader(form.Encode()))
+	if rrCreate.Code != http.StatusSeeOther || rrCreate.Header().Get("Location") != "/cloud-integrations/ci-1" {
+		t.Fatalf("POST /cloud-integrations = %d (loc=%q): %s", rrCreate.Code, rrCreate.Header().Get("Location"), rrCreate.Body.String())
+	}
+
+	// 3. List Cloud Integrations
+	rrList := getUI(t, h, "/cloud-integrations")
+	if rrList.Code != http.StatusOK {
+		t.Fatalf("GET /cloud-integrations = %d: %s", rrList.Code, rrList.Body.String())
+	}
+	for _, want := range []string{
+		"aws-prod-oidc",
+		"arn:aws:iam::123456789012:role/infra-guy-prod",
+		"https://infra-guy.example.com",
+		"env:prod",
+	} {
+		if !strings.Contains(rrList.Body.String(), want) {
+			t.Fatalf("expected /cloud-integrations to contain %q, got:\n%s", want, rrList.Body.String())
+		}
+	}
+
+	// 4. Update Cloud Integration
+	updateForm := url.Values{
+		"name":                     {"aws-prod-oidc-v2"},
+		"provider":                 {"aws"},
+		"auth_method":              {"oidc"},
+		"role_arn":                 {"arn:aws:iam::123456789012:role/infra-guy-prod-v2"},
+		"region":                   {"us-east-1"},
+		"session_duration_seconds": {"7200"},
+		"tags":                     {"env:prod"},
+	}
+	rrUpdate := postUI(t, h, "/cloud-integrations/ci-1", strings.NewReader(updateForm.Encode()))
+	if rrUpdate.Code != http.StatusSeeOther {
+		t.Fatalf("POST /cloud-integrations/ci-1 = %d: %s", rrUpdate.Code, rrUpdate.Body.String())
+	}
+
+	rrDet := getUI(t, h, "/cloud-integrations/ci-1")
+	if rrDet.Code != http.StatusOK || !strings.Contains(rrDet.Body.String(), "aws-prod-oidc-v2") {
+		t.Fatalf("GET /cloud-integrations/ci-1 = %d: %s", rrDet.Code, rrDet.Body.String())
+	}
+
+	// 5. Delete Cloud Integration
+	rrDel := postUI(t, h, "/cloud-integrations/ci-1/delete", nil)
+	if rrDel.Code != http.StatusSeeOther {
+		t.Fatalf("POST /cloud-integrations/ci-1/delete = %d", rrDel.Code)
+	}
+}
+
+func TestMilestone3DriftDetectionTTLAndFinOps(t *testing.T) {
+	now := time.Date(2026, 10, 25, 17, 0, 0, 0, time.UTC)
+	expires := now.Add(12 * time.Hour)
+	p1 := project.Restore(project.Snapshot{
+		ID: "p1", TenantID: "ten", Name: "ephemeral-pr-42",
+		Repo: project.SourceRepo{Owner: "acme", Name: "infra"}, DefaultBranch: "main",
+		TerraformVersion:     "1.9.8",
+		DriftEnabled:         true,
+		DriftIntervalMinutes: 60,
+		DriftStatus:          project.DriftStatusDrifted,
+		TTLHours:             24,
+		ExpiresAt:            &expires,
+		AutoDestroy:          true,
+		Tags:                 map[string]string{"env": "preview"},
+	})
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p1}}
+
+	planJSON := []byte(`{
+		"resource_changes": [
+			{
+				"address": "aws_instance.web",
+				"type": "aws_instance",
+				"provider_name": "registry.terraform.io/hashicorp/aws",
+				"change": {
+					"actions": ["create"],
+					"before": null,
+					"after": {"instance_type": "m5.large"}
+				}
+			},
+			{
+				"address": "aws_nat_gateway.main",
+				"type": "aws_nat_gateway",
+				"provider_name": "registry.terraform.io/hashicorp/aws",
+				"change": {
+					"actions": ["create"],
+					"before": null,
+					"after": {"allocation_id": "eipalloc-123"}
+				}
+			}
+		]
+	}`)
+	r1 := run.Restore(run.Snapshot{
+		ID: "r1", ProjectID: "p1", Trigger: run.TriggerPush,
+		Status: run.StatusNeedsApproval, Branch: "main", SHA: "1234567abcdef",
+		Message: "provision preview stack", TriggeredBy: "alice",
+		SummaryPresent: true, Add: 2, Change: 0, Destroy: 0,
+		MonthlyCost: 102.93, DiffMonthlyCost: 102.93,
+		PlanJSON:  planJSON,
+		CreatedAt: now.Add(-10 * time.Minute),
+	})
+	runs := &memRuns{items: map[run.ID]*run.Run{"r1": r1}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+	projSvc.Now = func() time.Time { return now }
+	runsSvc.Now = func() time.Time { return now }
+	seq := 1
+	runsSvc.NewID = func() string {
+		seq++
+		return fmt.Sprintf("r-%d", seq)
+	}
+
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc,
+		Runs:     runsSvc,
+		States:   stSvc,
+		Checkout: &stubTip{sha: "def5678"},
+		Lookup:   &stubLookup{},
+		Tokens:   uiTokenSource{store: store},
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+	})
+
+	// 1. FinOps cost breakdown on /runs/r1/changes
+	rrChanges := getUI(t, h, "/runs/r1/changes")
+	if rrChanges.Code != http.StatusOK {
+		t.Fatalf("GET /runs/r1/changes = %d: %s", rrChanges.Code, rrChanges.Body.String())
+	}
+	for _, want := range []string{
+		"$ FinOps Cost Estimate",
+		"aws_instance.web",
+		"m5.large",
+		"aws_nat_gateway.main",
+		"$102.93/mo",
+	} {
+		if !strings.Contains(rrChanges.Body.String(), want) {
+			t.Fatalf("expected /runs/r1/changes to contain %q, got:\n%s", want, rrChanges.Body.String())
+		}
+	}
+
+	// 2. Project page shows Drifted badge, EstMonthlyCost badge, and TTL expiration badge
+	rrProj := getUI(t, h, "/projects/p1")
+	if rrProj.Code != http.StatusOK {
+		t.Fatalf("GET /projects/p1 = %d: %s", rrProj.Code, rrProj.Body.String())
+	}
+	for _, want := range []string{
+		"Drifted",
+		"$102.93/mo",
+		"TTL Expires:",
+		"Check drift",
+		"+24h TTL",
+	} {
+		if !strings.Contains(rrProj.Body.String(), want) {
+			t.Fatalf("expected /projects/p1 to contain %q, got:\n%s", want, rrProj.Body.String())
+		}
+	}
+
+	// 3. Extend TTL by +12h
+	rrExtend := postUI(t, h, "/projects/p1/extend-ttl", strings.NewReader("extra_hours=12"))
+	if rrExtend.Code != http.StatusSeeOther {
+		t.Fatalf("POST /projects/p1/extend-ttl = %d: %s", rrExtend.Code, rrExtend.Body.String())
+	}
+	updatedP1, _ := projects.Get(context.Background(), "p1")
+	if updatedP1.Snapshot().ExpiresAt == nil || !updatedP1.Snapshot().ExpiresAt.Equal(expires.Add(12*time.Hour)) {
+		t.Fatalf("expected ExpiresAt to be extended by 12h, got %v", updatedP1.Snapshot().ExpiresAt)
+	}
+
+	// 4. Trigger manual drift check
+	rrDrift := postUI(t, h, "/projects/p1/drift-check", nil)
+	if rrDrift.Code != http.StatusSeeOther || rrDrift.Header().Get("Location") != "/runs/r-2" {
+		t.Fatalf("POST /projects/p1/drift-check = %d (loc=%q): %s", rrDrift.Code, rrDrift.Header().Get("Location"), rrDrift.Body.String())
+	}
+	driftRun := runs.items["r-2"].Snapshot()
+	if driftRun.Trigger != run.TriggerDrift || !driftRun.PlanOnly {
+		t.Fatalf("unexpected drift run: trigger=%s planOnly=%v", driftRun.Trigger, driftRun.PlanOnly)
+	}
+
+	// 5. Trigger manual destroy run
+	rrDestroy := postUI(t, h, "/projects/p1/destroy", nil)
+	if rrDestroy.Code != http.StatusSeeOther || rrDestroy.Header().Get("Location") != "/runs/r-3" {
+		t.Fatalf("POST /projects/p1/destroy = %d (loc=%q): %s", rrDestroy.Code, rrDestroy.Header().Get("Location"), rrDestroy.Body.String())
+	}
+	destroyRun := runs.items["r-3"].Snapshot()
+	if !destroyRun.IsDestroy {
+		t.Fatalf("expected destroy run to have IsDestroy=true, got %+v", destroyRun)
+	}
+}
+
 
 
 

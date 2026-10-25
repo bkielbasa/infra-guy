@@ -26,7 +26,15 @@ func (m *memProjects) Save(_ context.Context, p *project.Project) error {
 func (m *memProjects) Get(_ context.Context, id project.ID) (*project.Project, error) {
 	return m.items[id], nil
 }
-func (m *memProjects) List(context.Context, string) ([]*project.Project, error) { return nil, nil }
+func (m *memProjects) List(_ context.Context, tenantID string) ([]*project.Project, error) {
+	var out []*project.Project
+	for _, p := range m.items {
+		if tenantID == "" || p.Snapshot().TenantID == tenantID {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
 func (m *memProjects) FindByRepo(context.Context, string, int64) ([]*project.Project, error) {
 	return nil, nil
 }
@@ -60,8 +68,14 @@ func (m *memRuns) Save(_ context.Context, r *run.Run) error {
 	return nil
 }
 func (m *memRuns) Get(_ context.Context, id run.ID) (*run.Run, error) { return m.items[id], nil }
-func (m *memRuns) ListByProject(context.Context, run.ProjectID) ([]*run.Run, error) {
-	return nil, nil
+func (m *memRuns) ListByProject(_ context.Context, projectID run.ProjectID) ([]*run.Run, error) {
+	var out []*run.Run
+	for _, r := range m.items {
+		if r.Snapshot().ProjectID == projectID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 type memSched struct{ steps []run.StepName }
@@ -1016,5 +1030,78 @@ func TestWorkerDependencyResolutionErrorFailsWithoutExecutor(t *testing.T) {
 	}
 	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 21 {
 		t.Fatalf("completed jobs %#v, want [21]", fx.queue.completed)
+	}
+}
+
+func TestWorkerTickLifecycle_DriftAndTTL(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+
+	driftProj := testProject(t)
+	driftProj.SetDriftConfig(true, 60, now)
+
+	expiredAt := now.Add(-10 * time.Minute)
+	ttlSnap := testProject(t).Snapshot()
+	ttlSnap.ID = "p-ttl"
+	ttlSnap.Name = "ephemeral-pr-42"
+	ttlSnap.TTLHours = 24
+	ttlSnap.ExpiresAt = &expiredAt
+	ttlSnap.AutoDestroy = true
+	ttlProj := project.Restore(ttlSnap)
+
+	projs := &memProjects{items: map[project.ID]*project.Project{
+		driftProj.Snapshot().ID: driftProj,
+		ttlProj.Snapshot().ID:   ttlProj,
+	}}
+
+	prevDriftRun := run.Restore(run.Snapshot{
+		ID: "prev-1", ProjectID: "p1", Status: run.StatusSucceeded,
+		SHA: "1111111", Branch: "main", CreatedAt: now.Add(-2 * time.Hour),
+	})
+	prevTTLRun := run.Restore(run.Snapshot{
+		ID: "prev-2", ProjectID: "p-ttl", Status: run.StatusSucceeded,
+		SHA: "2222222", Branch: "main", CreatedAt: now.Add(-25 * time.Hour),
+	})
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"prev-1": prevDriftRun,
+		"prev-2": prevTTLRun,
+	}}
+	sched := &memSched{}
+	seq := 0
+	svc := &runapp.Service{
+		Projects: projs, Runs: runs, Schedule: sched,
+		Now: func() time.Time { return now },
+		NewID: func() string {
+			seq++
+			if seq == 1 {
+				return "new-run-1"
+			}
+			return "new-run-2"
+		},
+	}
+
+	w := &Worker{
+		WorkerID: "w1", Projects: projs, Service: svc,
+		Now: func() time.Time { return now },
+	}
+	if err := w.TickLifecycle(ctx); err != nil {
+		t.Fatalf("TickLifecycle failed: %v", err)
+	}
+
+	var foundDrift, foundTTL bool
+	for _, r := range runs.items {
+		rs := r.Snapshot()
+		if rs.Trigger == run.TriggerDrift && rs.ProjectID == "p1" && rs.PlanOnly {
+			foundDrift = true
+		}
+		if rs.Trigger == run.TriggerTTL && rs.ProjectID == "p-ttl" && rs.IsDestroy && rs.AutoApprove {
+			foundTTL = true
+		}
+	}
+	if !foundDrift {
+		t.Fatalf("expected scheduled drift check run to be opened")
+	}
+	if !foundTTL {
+		t.Fatalf("expected TTL auto-destroy run to be opened")
 	}
 }

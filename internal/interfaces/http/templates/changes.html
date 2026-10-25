@@ -30,7 +30,41 @@
     {{else}}
       <span class="plan-badge plan-badge-noop">No infrastructure changes</span>
     {{end}}
+    {{if .Cost}}
+      {{if or (gt .Cost.MonthlyCost 0.0) (ne .Cost.DiffMonthlyCost 0.0)}}
+      <span class="plan-badge" style="margin-left: auto;">Est. Cost: <strong>{{printf "$%.2f/mo" .Cost.MonthlyCost}}</strong> ({{if gt .Cost.DiffMonthlyCost 0.0}}+{{end}}{{printf "$%.2f/mo" .Cost.DiffMonthlyCost}})</span>
+      {{end}}
+    {{end}}
   </div>
+  {{if .Cost}}
+  {{if .Cost.Resources}}
+  <details class="plan-resource" data-preserve-key="finops:cost-breakdown" style="margin-bottom: 10px;">
+    <summary class="plan-resource-summary">
+      <span class="plan-action plan-action-update">$ FinOps Cost Estimate</span>
+      <code class="plan-address">{{printf "$%.2f/mo" .Cost.MonthlyCost}} ({{if gt .Cost.DiffMonthlyCost 0.0}}+{{end}}{{printf "$%.2f/mo" .Cost.DiffMonthlyCost}} delta across {{len .Cost.Resources}} billable resources)</code>
+    </summary>
+    <div class="plan-resource-body">
+      <table class="plan-attrs">
+        <thead>
+          <tr><th>Resource</th><th>Type</th><th>Sizing / Detail</th><th>Before</th><th>After</th><th>Delta</th></tr>
+        </thead>
+        <tbody>
+          {{range .Cost.Resources}}
+          <tr class="plan-attr">
+            <td><code>{{.Address}}</code></td>
+            <td class="muted">{{.ResourceType}}</td>
+            <td class="muted">{{if .SKU}}{{.SKU}}{{else}}&mdash;{{end}}</td>
+            <td>{{printf "$%.2f/mo" .PrevMonthlyCost}}</td>
+            <td><strong>{{printf "$%.2f/mo" .MonthlyCost}}</strong></td>
+            <td>{{if gt .DiffMonthlyCost 0.0}}+{{printf "$%.2f/mo" .DiffMonthlyCost}}{{else}}{{printf "$%.2f/mo" .DiffMonthlyCost}}{{end}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {{end}}
+  {{end}}
   {{range .Resources}}
   <details class="plan-resource plan-resource-{{.Action}}" data-preserve-key="res:{{.Address}}">
     <summary class="plan-resource-summary">

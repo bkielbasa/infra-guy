@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
 	authapp "infra-guy/internal/application/auth"
 	auditapp "infra-guy/internal/application/audit"
+	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
@@ -32,27 +34,26 @@ type VersionLister interface {
 }
 
 type ServerConfig struct {
-	Projects      *projectapp.Service
-	Runs          *runapp.Service
-	States        *stateapp.Service
-	Contexts      *tfcontextapp.Service
-	Policies      *policyapp.Service
-	Dependencies  *dependencyapp.Service
-	Audits        *auditapp.Service
-	Versions      VersionLister
-	Checkout      brancher
-	Lookup        commitLookup
-	Tokens        worker.TokenSource
-	PublicBaseURL string
-	Auth          *authapp.Service
-	Installations *installation.Service
-	WebhookSecret string
+	Projects          *projectapp.Service
+	Runs              *runapp.Service
+	States            *stateapp.Service
+	Contexts          *tfcontextapp.Service
+	Policies          *policyapp.Service
+	Dependencies      *dependencyapp.Service
+	CloudIntegrations *cloudintegrationapp.Service
+	Audits            *auditapp.Service
+	Versions          VersionLister
+	Checkout          brancher
+	Lookup            commitLookup
+	Tokens            worker.TokenSource
+	PublicBaseURL     string
+	Auth              *authapp.Service
+	Installations     *installation.Service
+	WebhookSecret     string
 }
 
 func NewServer(cfg ServerConfig) http.Handler {
 	if cfg.Audits == nil {
-		var nowFn func() = nil
-		_ = nowFn
 		cfg.Audits = &auditapp.Service{
 			Repo: audit.NewMemoryRepository(),
 		}
@@ -60,11 +61,26 @@ func NewServer(cfg ServerConfig) http.Handler {
 			cfg.Audits.Now = cfg.Auth.Now
 		}
 	}
+	if cfg.CloudIntegrations == nil {
+		cfg.CloudIntegrations = &cloudintegrationapp.Service{
+			PublicBaseURL: cfg.PublicBaseURL,
+		}
+	}
 	api := New(cfg.States, cfg.Runs, cfg.Projects, WithWebhook(cfg.Installations, cfg.WebhookSecret))
 	uiMux := http.NewServeMux()
 	(&ui{cfg: cfg}).routes(uiMux)
 	protected := http.NewCrossOriginProtection().Handler(withSession(uiMux, cfg))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/openid-configuration" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg.CloudIntegrations.DiscoveryDocument())
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/jwks.json" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg.CloudIntegrations.JWKS())
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/webhooks/") {
 			api.ServeHTTP(w, r)
 			return

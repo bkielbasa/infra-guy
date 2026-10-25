@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
@@ -57,9 +58,11 @@ type Request struct {
 	WorkDir, InternalBaseURL, ProjectID, RunID, StateToken, WorkingDirectory, GitHubToken string
 	TerraformVersion                                                                      string
 	Step                                                                                  run.StepName
+	Destroy                                                                               bool
 	PlanFile                                                                              []byte
 	Env                                                                                   map[string]string
 	Files                                                                                 map[string][]byte
+	RedactSecrets                                                                         []string
 	OnLog                                                                                 func(logs string)
 }
 
@@ -102,6 +105,10 @@ type DependencyResolver interface {
 	ResolveForProject(ctx context.Context, projectID project.ID) (map[string]string, []string, error)
 }
 
+type CloudCredentialResolver interface {
+	ResolveCredentialsForRun(ctx context.Context, p project.Snapshot, runID, branch, sha, trigger, homeDir string) (cloudintegrationapp.RunCredentials, error)
+}
+
 type WorkspaceCache interface {
 	Save(ctx context.Context, key, srcDir string) error
 	Restore(ctx context.Context, key, destDir string) (bool, error)
@@ -112,26 +119,37 @@ type ProjectGetter interface {
 	Get(ctx context.Context, id project.ID) (*project.Project, error)
 }
 
+type ProjectLister interface {
+	List(ctx context.Context, tenantID string) ([]*project.Project, error)
+}
+
+type BranchTipper interface {
+	BranchTip(ctx context.Context, cloneURL, token, branch string) (string, error)
+}
+
 func WorkspaceCacheKey(tenantID, projectID, runID string) string {
 	return path.Join(tenantID, projectID, runID)
 }
 
 type Worker struct {
-	WorkerID        string
-	Queue           Queue
-	Projects        ProjectGetter
-	Service         *runapp.Service
-	Checkout        Checkout
-	Executor        Executor
-	Dispatcher      Dispatcher
-	Tokens          TokenSource
-	Contexts        ContextResolver
-	Dependencies    DependencyResolver
-	Cache           WorkspaceCache
-	WorkDir         string
-	InternalBaseURL string
-	Now             func() time.Time
-	Timeout         func(run.StepName) time.Duration
+	WorkerID          string
+	Queue             Queue
+	Projects          ProjectGetter
+	Service           *runapp.Service
+	Checkout          Checkout
+	Executor          Executor
+	Dispatcher        Dispatcher
+	Tokens            TokenSource
+	Contexts          ContextResolver
+	Dependencies      DependencyResolver
+	CloudIntegrations CloudCredentialResolver
+	Cache             WorkspaceCache
+	WorkDir           string
+	InternalBaseURL   string
+	Now               func() time.Time
+	Timeout           func(run.StepName) time.Duration
+
+	lastLifecycleCheck time.Time
 }
 
 func (w *Worker) Loop(ctx context.Context) {
@@ -140,6 +158,16 @@ func (w *Worker) Loop(ctx context.Context) {
 	for {
 		if err := w.Tick(ctx); err != nil {
 			log.Printf("worker tick: %v", err)
+		}
+		now := time.Now().UTC()
+		if w.Now != nil {
+			now = w.Now().UTC()
+		}
+		if w.lastLifecycleCheck.IsZero() || now.Sub(w.lastLifecycleCheck) >= 30*time.Second {
+			w.lastLifecycleCheck = now
+			if err := w.TickLifecycle(ctx); err != nil {
+				log.Printf("worker lifecycle tick: %v", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -298,6 +326,38 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 		}
 	}
 
+	var redactSecrets []string
+	if w.CloudIntegrations != nil {
+		homeDir := filepath.Join(dest, ".home")
+		creds, cerr := w.CloudIntegrations.ResolveCredentialsForRun(ctx, ps, string(job.RunID), rs.Branch, rs.SHA, string(rs.Trigger), homeDir)
+		if cerr != nil {
+			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, cerr.Error()); ferr != nil {
+				return ferr
+			}
+			return w.completeAndCleanup(ctx, job)
+		}
+		for _, msg := range creds.Summary {
+			logger.LogBeforef("%s", msg)
+		}
+		if len(creds.Env) > 0 {
+			if ctxEnv == nil {
+				ctxEnv = make(map[string]string, len(creds.Env))
+			}
+			for k, v := range creds.Env {
+				ctxEnv[k] = v
+			}
+		}
+		if len(creds.Files) > 0 {
+			if ctxFiles == nil {
+				ctxFiles = make(map[string][]byte, len(creds.Files))
+			}
+			for k, v := range creds.Files {
+				ctxFiles[k] = v
+			}
+		}
+		redactSecrets = append(redactSecrets, creds.RedactSecrets...)
+	}
+
 	timeout := StepTimeout(job.Step)
 	if w.Timeout != nil {
 		timeout = w.Timeout(job.Step)
@@ -307,8 +367,8 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	res, err := w.Executor.Run(stepCtx, Request{
 		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID), RunID: string(job.RunID),
 		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: token,
-		TerraformVersion: ps.TerraformVersion, Step: job.Step, PlanFile: rs.PlanFile,
-		Env: ctxEnv, Files: ctxFiles,
+		TerraformVersion: ps.TerraformVersion, Step: job.Step, Destroy: rs.IsDestroy, PlanFile: rs.PlanFile,
+		Env: ctxEnv, Files: ctxFiles, RedactSecrets: redactSecrets,
 		OnLog: func(logs string) {
 			logger.SetExec(logs)
 		},
@@ -485,4 +545,133 @@ func (w *Worker) removeIfTerminal(ctx context.Context, id run.ID) error {
 		return os.RemoveAll(filepath.Join(w.WorkDir, string(id)))
 	}
 	return nil
+}
+
+// TickLifecycle evaluates all workspaces for scheduled drift checks and TTL expiration auto-destroy runs.
+func (w *Worker) TickLifecycle(ctx context.Context) error {
+	if w == nil || w.Projects == nil || w.Service == nil {
+		return nil
+	}
+	lister, ok := w.Projects.(ProjectLister)
+	if !ok {
+		return nil
+	}
+	projects, err := lister.List(ctx, "")
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if w.Now != nil {
+		now = w.Now().UTC()
+	}
+
+	for _, p := range projects {
+		if p == nil {
+			continue
+		}
+		ps := p.Snapshot()
+		if ps.Locked {
+			continue
+		}
+		if !p.IsExpired(now) && !p.DueForDriftCheck(now) {
+			continue
+		}
+
+		runs, err := w.Service.ListByProject(ctx, ps.ID)
+		if err != nil {
+			continue
+		}
+		hasActiveRun := false
+		for _, r := range runs {
+			if !r.Snapshot().Status.Terminal() {
+				hasActiveRun = true
+				break
+			}
+		}
+		if hasActiveRun {
+			continue
+		}
+
+		if p.IsExpired(now) {
+			alreadyTriggeredTTL := false
+			for _, r := range runs {
+				rs := r.Snapshot()
+				if rs.Trigger == run.TriggerTTL && ps.ExpiresAt != nil && !rs.CreatedAt.Before(*ps.ExpiresAt) {
+					alreadyTriggeredTTL = true
+					break
+				}
+			}
+			if !alreadyTriggeredTTL {
+				sha := w.resolveProjectCommit(ctx, ps, runs)
+				if sha != "" {
+					autoApprove := true
+					_, _ = w.Service.Open(ctx, runapp.OpenRequest{
+						ProjectID:   ps.ID,
+						Trigger:     run.TriggerTTL,
+						SHA:         sha,
+						Branch:      ps.DefaultBranch,
+						Message:     "TTL expired: automatic ephemeral workspace teardown",
+						Author:      "infra-guy",
+						TriggeredBy: "ttl_scheduler",
+						IsDestroy:   true,
+						AutoApprove: &autoApprove,
+					})
+				}
+			}
+			continue
+		}
+
+		if p.DueForDriftCheck(now) {
+			interval := time.Duration(ps.DriftIntervalMinutes) * time.Minute
+			if interval <= 0 {
+				interval = 24 * time.Hour
+			}
+			recentDrift := false
+			for _, r := range runs {
+				rs := r.Snapshot()
+				if rs.Trigger == run.TriggerDrift && now.Sub(rs.CreatedAt) < interval {
+					recentDrift = true
+					break
+				}
+			}
+			if !recentDrift {
+				sha := w.resolveProjectCommit(ctx, ps, runs)
+				if sha != "" {
+					_, _ = w.Service.Open(ctx, runapp.OpenRequest{
+						ProjectID:   ps.ID,
+						Trigger:     run.TriggerDrift,
+						SHA:         sha,
+						Branch:      ps.DefaultBranch,
+						Message:     "Scheduled drift detection check",
+						Author:      "infra-guy",
+						TriggeredBy: "drift_scheduler",
+						PlanOnly:    true,
+					})
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (w *Worker) resolveProjectCommit(ctx context.Context, ps project.Snapshot, runs []*run.Run) string {
+	if tipper, ok := w.Checkout.(BranchTipper); ok && w.Tokens != nil {
+		if token, err := w.Tokens.InstallationToken(ctx, ps.TenantID); err == nil && token != "" {
+			if sha, err := tipper.BranchTip(ctx, ps.Repo.CloneURL(), token, ps.DefaultBranch); err == nil && sha != "" {
+				return sha
+			}
+		}
+	}
+	for _, r := range runs {
+		rs := r.Snapshot()
+		if rs.SHA != "" && (rs.Branch == ps.DefaultBranch || rs.Branch == "") {
+			return rs.SHA
+		}
+	}
+	for _, r := range runs {
+		if rs := r.Snapshot(); rs.SHA != "" {
+			return rs.SHA
+		}
+	}
+	return ""
 }

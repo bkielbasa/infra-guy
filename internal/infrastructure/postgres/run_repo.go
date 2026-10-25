@@ -22,18 +22,18 @@ type RunRepo struct{ pool *pgxpool.Pool }
 func NewRunRepo(pool *pgxpool.Pool) *RunRepo { return &RunRepo{pool: pool} }
 
 const runColumns = `id, project_id, trigger, status, commit_sha, branch, commit_message, author,
-	triggered_by, pr_number, pr_title, plan_only, auto_approve, plan_text, plan_file, plan_json, add_count,
-	change_count, destroy_count, summary_present, terraform_version, error, approved_by, approved_at,
+	triggered_by, pr_number, pr_title, plan_only, auto_approve, destroy, plan_text, plan_file, plan_json, add_count,
+	change_count, destroy_count, summary_present, monthly_cost, diff_monthly_cost, terraform_version, error, approved_by, approved_at,
 	committed_at, created_at, started_at, finished_at`
 
 const runSummaryColumns = `r.id, r.project_id, r.trigger, r.status, r.commit_sha, r.branch, r.commit_message, r.author,
-	r.triggered_by, r.pr_number, r.pr_title, r.plan_only, r.auto_approve, r.add_count,
-	r.change_count, r.destroy_count, r.summary_present, r.terraform_version, r.error, r.approved_by, r.approved_at,
+	r.triggered_by, r.pr_number, r.pr_title, r.plan_only, r.auto_approve, r.destroy, r.add_count,
+	r.change_count, r.destroy_count, r.summary_present, r.monthly_cost, r.diff_monthly_cost, r.terraform_version, r.error, r.approved_by, r.approved_at,
 	r.committed_at, r.created_at, r.started_at, r.finished_at`
 
 const insertIfAbsentSQL = `
-INSERT INTO runs (id, project_id, trigger, status, commit_sha, branch, commit_message, author, triggered_by, pr_number, pr_title, plan_only, auto_approve, plan_text, plan_file, plan_json, committed_at, created_at)
-SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+INSERT INTO runs (id, project_id, trigger, status, commit_sha, branch, commit_message, author, triggered_by, pr_number, pr_title, plan_only, auto_approve, destroy, plan_text, plan_file, plan_json, monthly_cost, diff_monthly_cost, committed_at, created_at)
+SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
 WHERE NOT EXISTS (
   SELECT 1 FROM runs
   WHERE project_id = $2 AND commit_sha = $5 AND trigger = $3
@@ -51,7 +51,8 @@ func (r *RunRepo) InsertIfAbsent(ctx context.Context, in *run.Run) (bool, error)
 
 	tag, err := tx.Exec(ctx, insertIfAbsentSQL,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
-		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.PlanText, s.PlanFile, s.PlanJSON, s.CommittedAt, s.CreatedAt,
+		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.IsDestroy,
+		s.PlanText, s.PlanFile, s.PlanJSON, s.MonthlyCost, s.DiffMonthlyCost, s.CommittedAt, s.CreatedAt,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -87,15 +88,16 @@ func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 		UPDATE runs SET
 			project_id = $2, trigger = $3, status = $4, commit_sha = $5, branch = $6,
 			commit_message = $7, author = $8, triggered_by = $9, pr_number = $10, pr_title = $11,
-			plan_only = $12, auto_approve = $13, plan_text = $14, plan_file = $15, plan_json = $16,
-			add_count = $17, change_count = $18, destroy_count = $19, summary_present = $20,
-			terraform_version = $21, error = $22, approved_by = $23, approved_at = $24,
-			committed_at = $25, created_at = $26, started_at = $27, finished_at = $28
+			plan_only = $12, auto_approve = $13, destroy = $14, plan_text = $15, plan_file = $16, plan_json = $17,
+			add_count = $18, change_count = $19, destroy_count = $20, summary_present = $21,
+			monthly_cost = $22, diff_monthly_cost = $23,
+			terraform_version = $24, error = $25, approved_by = $26, approved_at = $27,
+			committed_at = $28, created_at = $29, started_at = $30, finished_at = $31
 		WHERE id = $1`,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
-		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.PlanText, s.PlanFile, s.PlanJSON,
-		s.Add, s.Change, s.Destroy, s.SummaryPresent, s.TerraformVersion, s.Error, s.ApprovedBy,
-		s.ApprovedAt, s.CommittedAt, s.CreatedAt, s.StartedAt, s.FinishedAt,
+		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.IsDestroy, s.PlanText, s.PlanFile, s.PlanJSON,
+		s.Add, s.Change, s.Destroy, s.SummaryPresent, s.MonthlyCost, s.DiffMonthlyCost,
+		s.TerraformVersion, s.Error, s.ApprovedBy, s.ApprovedAt, s.CommittedAt, s.CreatedAt, s.StartedAt, s.FinishedAt,
 	); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -360,8 +362,8 @@ func scanRun(row runScanner) (run.Snapshot, error) {
 	var started, finished, approved, committed *time.Time
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Trigger, &s.Status, &s.SHA, &s.Branch, &s.Message, &s.Author,
-		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.PlanText, &s.PlanFile, &s.PlanJSON,
-		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
+		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.IsDestroy, &s.PlanText, &s.PlanFile, &s.PlanJSON,
+		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.MonthlyCost, &s.DiffMonthlyCost, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
 		&approved, &committed, &created, &started, &finished,
 	)
 	if err != nil {
@@ -381,8 +383,8 @@ func scanRunSummary(row runScanner) (run.Snapshot, error) {
 	var started, finished, approved, committed *time.Time
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Trigger, &s.Status, &s.SHA, &s.Branch, &s.Message, &s.Author,
-		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove,
-		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
+		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.IsDestroy,
+		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.MonthlyCost, &s.DiffMonthlyCost, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
 		&approved, &committed, &created, &started, &finished,
 	)
 	if err != nil {

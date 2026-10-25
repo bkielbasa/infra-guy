@@ -37,14 +37,20 @@ type CreateInput struct {
 }
 
 type UpdateInput struct {
-	ID               project.ID
-	Name             string
-	Branch           string
-	Workdir          string
-	TerraformVersion string
-	ApprovalPolicyID string
-	AutoApprove      bool
-	Tags             map[string]string
+	ID                   project.ID
+	Name                 string
+	Branch               string
+	Workdir              string
+	TerraformVersion     string
+	ApprovalPolicyID     string
+	AutoApprove          bool
+	Tags                 map[string]string
+	UpdateDrift          bool
+	DriftEnabled         bool
+	DriftIntervalMinutes int
+	UpdateTTL            bool
+	TTLHours             int
+	AutoDestroy          bool
 }
 
 func randomSecret() (string, error) {
@@ -121,6 +127,67 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*project.Project,
 		}
 	}
 	p.SetAutoApprove(in.AutoApprove)
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	if in.UpdateDrift {
+		p.SetDriftConfig(in.DriftEnabled, in.DriftIntervalMinutes, now)
+	}
+	if in.UpdateTTL {
+		p.SetTTL(in.TTLHours, in.AutoDestroy, now)
+	}
+	if err := s.Projects.Save(ctx, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (s *Service) SetDriftConfig(ctx context.Context, id project.ID, enabled bool, intervalMinutes int) error {
+	p, err := s.Projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %s not found", id)
+	}
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	p.SetDriftConfig(enabled, intervalMinutes, now)
+	return s.Projects.Save(ctx, p)
+}
+
+func (s *Service) SetTTL(ctx context.Context, id project.ID, ttlHours int, autoDestroy bool) error {
+	p, err := s.Projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %s not found", id)
+	}
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	p.SetTTL(ttlHours, autoDestroy, now)
+	return s.Projects.Save(ctx, p)
+}
+
+func (s *Service) ExtendTTL(ctx context.Context, id project.ID, extraHours int) (*project.Project, error) {
+	p, err := s.Projects.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, fmt.Errorf("project %s not found", id)
+	}
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	p.ExtendTTL(extraHours, now)
 	if err := s.Projects.Save(ctx, p); err != nil {
 		return nil, err
 	}

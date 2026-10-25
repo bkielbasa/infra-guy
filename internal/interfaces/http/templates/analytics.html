@@ -255,6 +255,9 @@
             <div class="dashboard-kpi-sub">
               <span class="pill pill-finished">{{.PolicyCoveragePct}}% policy-guarded</span>
               <span class="pill pill-running">{{.TagCoveragePct}}% tagged</span>
+              {{if .TotalMonthlyCost}}<span class="pill">Est. {{.TotalMonthlyCost}}</span>{{end}}
+              {{if gt .DriftedWorkspaces 0}}<span class="pill pill-failed">{{.DriftedWorkspaces}} drifted</span>{{end}}
+              {{if gt .EphemeralWorkspaces 0}}<span class="pill pill-unconfirmed">{{.EphemeralWorkspaces}} ephemeral TTL</span>{{end}}
             </div>
           </div>
           {{if .StaleWorkspaces}}

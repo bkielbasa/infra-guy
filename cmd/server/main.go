@@ -23,6 +23,7 @@ import (
 
 	authapp "infra-guy/internal/application/auth"
 	auditapp "infra-guy/internal/application/audit"
+	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
@@ -138,6 +139,16 @@ func main() {
 	contextRepo := postgres.NewContextRepo(pool)
 	contextSvc := &tfcontextapp.Service{Contexts: contextRepo, Sealer: sealer, Now: now, NewID: newID}
 
+	cloudIntegrationRepo := postgres.NewCloudIntegrationRepo(pool)
+	cloudIntegrationSvc := &cloudintegrationapp.Service{
+		Integrations:  cloudIntegrationRepo,
+		Sealer:        sealer,
+		PublicBaseURL: public,
+		PrivateKey:    appKey,
+		Now:           now,
+		NewID:         newID,
+	}
+
 	policyRepo := postgres.NewPolicyRepo(pool)
 	opaEngine := &opa.Evaluator{}
 	policySvc := &policyapp.Service{
@@ -214,11 +225,12 @@ func main() {
 		WorkerID: workerID(), Queue: queue,
 		Projects: projectSvc, Service: runSvc,
 		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{Binary: tfInstaller}},
-		Tokens:          tokenSource,
-		Contexts:        contextSvc,
-		Dependencies:    dependencySvc,
-		Cache:           wsCache,
-		WorkDir:         workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
+		Tokens:            tokenSource,
+		Contexts:          contextSvc,
+		CloudIntegrations: cloudIntegrationSvc,
+		Dependencies:      dependencySvc,
+		Cache:             wsCache,
+		WorkDir:           workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
 	}
 	if jobID > 0 {
 		if err := w.ExecuteClaimed(ctx, jobID); err != nil {
@@ -259,13 +271,14 @@ func main() {
 	}()
 
 	h := httpapi.NewServer(httpapi.ServerConfig{
-		Projects:      projectSvc,
-		Runs:          runSvc,
-		States:        stateSvc,
-		Contexts:      contextSvc,
-		Policies:      policySvc,
-		Dependencies:  dependencySvc,
-		Audits:        auditSvc,
+		Projects:          projectSvc,
+		Runs:              runSvc,
+		States:            stateSvc,
+		Contexts:          contextSvc,
+		CloudIntegrations: cloudIntegrationSvc,
+		Policies:          policySvc,
+		Dependencies:      dependencySvc,
+		Audits:            auditSvc,
 		Versions:      tfCatalog,
 		Checkout:      git.Checkout{},
 		Lookup:        git.CommitLookup{},

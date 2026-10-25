@@ -35,19 +35,20 @@
       <div class="dashboard-kpi-sub">
         <span class="pill pill-unconfirmed">{{.CountNeedsApproval}} awaiting approval</span>
         <span class="pill pill-failed">{{.CountFailed}} failed</span>
+        {{if gt .CountDrifted 0}}<span class="pill pill-failed">{{.CountDrifted}} drifted</span>{{end}}
       </div>
     </div>
 
     <div class="dashboard-kpi-card">
       <div class="dashboard-kpi-head">
-        <span class="dashboard-kpi-label">Run reliability</span>
+        <span class="dashboard-kpi-label">Run reliability &amp; FinOps</span>
         <span class="dashboard-kpi-meta">{{.TotalRuns}} total runs</span>
       </div>
       <div class="dashboard-kpi-value">{{.SuccessRate}}%</div>
       <div class="dashboard-kpi-sub">
-        <span>{{.RunsLast24h}} in last 24h</span>
+        <span>Est. {{.TotalMonthlyCost}}</span>
         <span>&middot;</span>
-        <span>{{.ActiveRuns}} running/queued</span>
+        <span>{{.ActiveRuns}} active</span>
       </div>
     </div>
 

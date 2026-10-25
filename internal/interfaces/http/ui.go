@@ -17,12 +17,14 @@ import (
 	"time"
 
 	auditapp "infra-guy/internal/application/audit"
+	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/domain/audit"
+	"infra-guy/internal/domain/cloudintegration"
 	"infra-guy/internal/domain/dependency"
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
@@ -58,6 +60,18 @@ type projectRow struct {
 	ID, Name, Repo, Branch, Status, StatusClass, StatusCategory string
 	Tags                                                        []string
 	TagsCSV                                                     string
+	Drifted                                                     bool
+	DriftEnabled                                                bool
+	DriftStatus                                                 string
+	DriftStatusLabel                                            string
+	TTLHours                                                    int
+	AutoDestroy                                                 bool
+	Ephemeral                                                   bool
+	ExpiresAt                                                   string
+	TTLExpired                                                  bool
+	Destroyed                                                   bool
+	MonthlyCost                                                 string
+	EstMonthlyCost                                              string
 }
 
 type runRow struct {
@@ -160,6 +174,9 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /projects/{id}/policy", u.updateProjectPolicy)
 	mux.HandleFunc("POST /projects/{id}/lock", u.lock)
 	mux.HandleFunc("POST /projects/{id}/trigger", u.trigger)
+	mux.HandleFunc("POST /projects/{id}/drift-check", u.triggerDriftCheck)
+	mux.HandleFunc("POST /projects/{id}/extend-ttl", u.extendTTL)
+	mux.HandleFunc("POST /projects/{id}/destroy", u.triggerDestroy)
 	mux.HandleFunc("POST /projects/{id}/force-unlock", u.forceUnlock)
 	mux.HandleFunc("POST /projects/{id}/delete", u.delete)
 	mux.HandleFunc("GET /projects/{id}/runs/{runID}", u.runPage)
@@ -182,6 +199,11 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /contexts/{id}/entries", u.upsertContextEntry)
 	mux.HandleFunc("POST /contexts/{id}/entries/{entryID}/delete", u.deleteContextEntry)
 	mux.HandleFunc("POST /contexts/{id}/delete", u.deleteContext)
+	mux.HandleFunc("GET /cloud-integrations", u.cloudIntegrations)
+	mux.HandleFunc("POST /cloud-integrations", u.createCloudIntegration)
+	mux.HandleFunc("GET /cloud-integrations/{id}", u.cloudIntegrationDetails)
+	mux.HandleFunc("POST /cloud-integrations/{id}", u.updateCloudIntegration)
+	mux.HandleFunc("POST /cloud-integrations/{id}/delete", u.deleteCloudIntegration)
 	mux.HandleFunc("GET /policies", u.policies)
 	mux.HandleFunc("POST /policies", u.createPolicy)
 	mux.HandleFunc("POST /policies/test", u.testPolicy)
@@ -263,6 +285,11 @@ type dashboardProjectRow struct {
 	Status, StatusClass, StatusCategory      string
 	Locked                                   bool
 	Tags                                     []string
+	Drifted                                  bool
+	Ephemeral                                bool
+	ExpiresAt                                string
+	Destroyed                                bool
+	MonthlyCost                              string
 }
 
 type dashboardRunRow struct {
@@ -327,6 +354,8 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		countFinished      int
 		countIdle          int
 		countLocked        int
+		countDrifted       int
+		countEphemeral     int
 		policyProtected    int
 		autoApproveCount   int
 		totalRuns          int
@@ -334,6 +363,7 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		terminalRuns       int
 		successfulRuns     int
 		runsLast24h        int
+		totalMonthlyCost   float64
 	)
 
 	tagCounts := make(map[string]int)
@@ -371,6 +401,12 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		if ps.AutoApprove {
 			autoApproveCount++
 		}
+		if ps.DriftStatus == project.DriftStatusDrifted {
+			countDrifted++
+		}
+		if ps.TTLHours > 0 || ps.ExpiresAt != nil {
+			countEphemeral++
+		}
 
 		pRow := dashboardProjectRow{
 			ID:               string(ps.ID),
@@ -380,6 +416,9 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 			TerraformVersion: tfVer,
 			Locked:           ps.Locked,
 			Tags:             tags,
+			Drifted:          ps.DriftStatus == project.DriftStatusDrifted,
+			Ephemeral:        ps.TTLHours > 0 || ps.ExpiresAt != nil,
+			ExpiresAt:        fmtTimePtr(ps.ExpiresAt),
 		}
 
 		runs := runsByProject[run.ProjectID(ps.ID)]
@@ -438,6 +477,10 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if latest := latestSnapshot(runs); latest != nil {
+			if latest.MonthlyCost > 0 {
+				totalMonthlyCost += latest.MonthlyCost
+				pRow.MonthlyCost = run.FormatMonthlyCost(latest.MonthlyCost)
+			}
 			pRow.Status = latest.Status.Label()
 			pRow.StatusClass = statusClass(latest.Status)
 			pRow.StatusCategory = statusCategory(latest.Status)
@@ -470,6 +513,26 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			countIdle++
+		}
+
+		if ps.DriftStatus == project.DriftStatusDrifted {
+			driftAt := ps.UpdatedAt
+			if ps.LastDriftCheckAt != nil && !ps.LastDriftCheckAt.IsZero() {
+				driftAt = *ps.LastDriftCheckAt
+			}
+			attention = append(attention, dashboardAttentionItem{
+				Kind:        "drift",
+				BadgeLabel:  "drifted",
+				BadgeClass:  "pill-failed",
+				ProjectID:   string(ps.ID),
+				ProjectName: ps.Name,
+				Title:       "Out-of-band cloud state drift detected",
+				Branch:      ps.DefaultBranch,
+				Date:        fmtTime(driftAt),
+				ActionURL:   "/projects/" + string(ps.ID),
+				ActionLabel: "Inspect drift",
+				sortAt:      driftAt,
+			})
 		}
 
 		if ps.Locked {
@@ -519,7 +582,7 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		successRate = (successfulRuns * 100) / terminalRuns
 	}
 
-	var totalContexts, totalPolicies int
+	var totalContexts, totalPolicies, totalCloudIntegrations int
 	if u.cfg.Contexts != nil {
 		if ctxList, err := u.cfg.Contexts.List(r.Context(), tenantID); err == nil {
 			totalContexts = len(ctxList)
@@ -528,6 +591,11 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 	if u.cfg.Policies != nil {
 		if polList, err := u.cfg.Policies.List(r.Context(), tenantID); err == nil {
 			totalPolicies = len(polList)
+		}
+	}
+	if u.cfg.CloudIntegrations != nil {
+		if ciList, err := u.cfg.CloudIntegrations.List(r.Context(), tenantID); err == nil {
+			totalCloudIntegrations = len(ciList)
 		}
 	}
 
@@ -576,6 +644,10 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		"CountFinished":           countFinished,
 		"CountIdle":               countIdle,
 		"CountLocked":             countLocked,
+		"CountDrifted":            countDrifted,
+		"CountEphemeral":          countEphemeral,
+		"TotalMonthlyCost":        run.FormatMonthlyCost(totalMonthlyCost),
+		"TotalCloudIntegrations":  totalCloudIntegrations,
 		"PctFinished":             pct(countFinished),
 		"PctNeedsApproval":        pct(countNeedsApproval),
 		"PctInProgress":           pct(countInProgress),
@@ -966,6 +1038,10 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 		policyGuardedCount  int
 		taggedProjectCount  int
 		lockedProjectCount  int
+		driftedCount        int
+		ephemeralCount      int
+		totalMonthlyCost    float64
+		costDiffInWindow    float64
 	)
 
 	triggerCounts := make(map[string]int)
@@ -992,6 +1068,20 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 		}
 		if ps.ApprovalPolicyID != "" {
 			policyGuardedCount++
+		}
+		if ps.DriftStatus == project.DriftStatusDrifted {
+			driftedCount++
+			risks = append(risks, analyticsRiskItem{
+				Severity:    "Drift detected",
+				BadgeClass:  "pill-failed",
+				ProjectID:   string(ps.ID),
+				ProjectName: ps.Name,
+				Reason:      "Out-of-band cloud state drift detected on workspace",
+				ActionURL:   "/projects/" + string(ps.ID),
+			})
+		}
+		if ps.TTLHours > 0 || ps.ExpiresAt != nil {
+			ephemeralCount++
 		}
 		if ps.Locked {
 			lockedProjectCount++
@@ -1110,6 +1200,9 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 			totalAdd += rs.Add
 			totalChange += rs.Change
 			totalDestroy += rs.Destroy
+			if !rs.PlanOnly {
+				costDiffInWindow += rs.DiffMonthlyCost
+			}
 			wsAdd += rs.Add
 			wsChange += rs.Change
 			wsDestroy += rs.Destroy
@@ -1256,6 +1349,10 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 				TerraformVersion: tfVer,
 				HasPolicy:        ps.ApprovalPolicyID != "",
 			})
+		}
+
+		if latest := latestSnapshot(runs); latest != nil && latest.MonthlyCost > 0 {
+			totalMonthlyCost += latest.MonthlyCost
 		}
 
 		wsTerm := wsDeployments + wsFailed
@@ -1651,6 +1748,10 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 		"TopApprovers":        mapToSortedCounts(approverCounts),
 		"PRPlanRuns":          prPlanRuns,
 		"TrackedRunsInWindow": trackedRunsInWindow,
+		"DriftedWorkspaces":   driftedCount,
+		"EphemeralWorkspaces": ephemeralCount,
+		"TotalMonthlyCost":    run.FormatMonthlyCost(totalMonthlyCost),
+		"CostDiffInWindow":    run.FormatCostDiff(costDiffInWindow),
 	})
 }
 
@@ -1691,6 +1792,12 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		row := projectRow{
 			ID: string(ps.ID), Name: ps.Name, Repo: ps.Repo.String(), Branch: ps.DefaultBranch,
 			Tags: tags, TagsCSV: strings.Join(tags, ","),
+			DriftEnabled:     ps.DriftEnabled,
+			DriftStatus:      ps.DriftStatus,
+			DriftStatusLabel: driftStatusLabel(ps.DriftStatus),
+			TTLHours:         ps.TTLHours,
+			AutoDestroy:      ps.AutoDestroy,
+			ExpiresAt:        fmtTimePtr(ps.ExpiresAt),
 		}
 		runs, err := u.cfg.Runs.ListByProject(r.Context(), ps.ID)
 		if err != nil {
@@ -1701,6 +1808,13 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 			row.Status = latest.Status.Label()
 			row.StatusClass = statusClass(latest.Status)
 			row.StatusCategory = statusCategory(latest.Status)
+			if latest.MonthlyCost > 0 {
+				row.EstMonthlyCost = run.FormatMonthlyCost(latest.MonthlyCost)
+			} else if len(latest.PlanJSON) > 0 {
+				if parsed, err := run.ParsePlanJSON(latest.PlanJSON); err == nil && parsed != nil && parsed.Cost != nil && parsed.Cost.MonthlyCost > 0 {
+					row.EstMonthlyCost = run.FormatMonthlyCost(parsed.Cost.MonthlyCost)
+				}
+			}
 			switch row.StatusCategory {
 			case "needs_approval":
 				countNeedsApproval++
@@ -1798,6 +1912,15 @@ func (u *ui) knownTags(ctx context.Context, tenantID string) []string {
 			}
 		}
 	}
+	if u.cfg.CloudIntegrations != nil {
+		if items, err := u.cfg.CloudIntegrations.List(ctx, tenantID); err == nil {
+			for _, ci := range items {
+				for _, t := range project.TagList(ci.Snapshot().Tags) {
+					seen[t] = struct{}{}
+				}
+			}
+		}
+	}
 	if len(seen) == 0 {
 		return nil
 	}
@@ -1862,13 +1985,14 @@ func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
 		defaultBranch = strings.TrimSpace(repos[0].DefaultBranch)
 	}
 	u.page(w, "New project", "new_project", map[string]any{
-		"Repos":          repos,
-		"DefaultBranch":  defaultBranch,
-		"KnownTags":      u.knownTags(r.Context(), tenantID),
-		"Versions":       u.versions(r.Context()),
-		"DefaultVersion": project.DefaultTerraformVersion,
-		"Contexts":       u.contextChoices(r.Context(), tenantID, ""),
-		"Policies":       u.policyChoices(r.Context(), tenantID, ""),
+		"Repos":             repos,
+		"DefaultBranch":     defaultBranch,
+		"KnownTags":         u.knownTags(r.Context(), tenantID),
+		"Versions":          u.versions(r.Context()),
+		"DefaultVersion":    project.DefaultTerraformVersion,
+		"Contexts":          u.contextChoices(r.Context(), tenantID, ""),
+		"Policies":          u.policyChoices(r.Context(), tenantID, ""),
+		"CloudIntegrations": u.cloudIntegrationChoices(r.Context(), tenantID, ""),
 	})
 }
 
@@ -1946,8 +2070,27 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if r.FormValue("drift_enabled") == "on" {
+		interval, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("drift_interval_minutes")))
+		if err := u.cfg.Projects.SetDriftConfig(r.Context(), p.Snapshot().ID, true, interval); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if ttlHours, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("ttl_hours"))); ttlHours > 0 || r.FormValue("auto_destroy") == "on" {
+		if err := u.cfg.Projects.SetTTL(r.Context(), p.Snapshot().ID, ttlHours, r.FormValue("auto_destroy") == "on"); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	if u.cfg.Contexts != nil {
 		if err := u.cfg.Contexts.SetProjectContexts(r.Context(), tenantID, p.Snapshot().ID, parseContextIDs(r.Form["context_ids"])); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if u.cfg.CloudIntegrations != nil {
+		if err := u.cfg.CloudIntegrations.SetProjectIntegrations(r.Context(), tenantID, p.Snapshot().ID, parseCloudIntegrationIDs(r.Form["cloud_integration_ids"])); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -2064,19 +2207,33 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ps := p.Snapshot()
+	driftInterval := ps.DriftIntervalMinutes
+	if driftInterval <= 0 {
+		driftInterval = project.DefaultDriftIntervalMinutes
+	}
 	u.page(w, ps.Name+" details", "details", map[string]any{
 		"ID": string(ps.ID), "Name": ps.Name, "Repo": ps.Repo.String(),
 		"AutoApprove": ps.AutoApprove, "Locked": ps.Locked,
 		"Branch": ps.DefaultBranch, "Workdir": ps.WorkingDirectory,
-		"TerraformVersion": ps.TerraformVersion,
-		"ApprovalPolicyID": ps.ApprovalPolicyID,
-		"Tags":             project.FormatTags(ps.Tags),
-		"TagList":          project.TagList(ps.Tags),
-		"KnownTags":        u.knownTags(r.Context(), ps.TenantID),
-		"Versions":         u.versions(r.Context()),
-		"Contexts":         u.contextChoices(r.Context(), ps.TenantID, ps.ID),
-		"Policies":         u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
-		"TagBoundPolicies": u.tagBoundPolicies(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags),
+		"TerraformVersion":          ps.TerraformVersion,
+		"ApprovalPolicyID":          ps.ApprovalPolicyID,
+		"DriftEnabled":              ps.DriftEnabled,
+		"DriftIntervalMinutes":      driftInterval,
+		"DriftStatus":               ps.DriftStatus,
+		"DriftStatusLabel":          driftStatusLabel(ps.DriftStatus),
+		"LastDriftCheckAt":          fmtTimePtr(ps.LastDriftCheckAt),
+		"TTLHours":                  ps.TTLHours,
+		"AutoDestroy":               ps.AutoDestroy,
+		"ExpiresAt":                 fmtTimePtr(ps.ExpiresAt),
+		"Tags":                      project.FormatTags(ps.Tags),
+		"TagList":                   project.TagList(ps.Tags),
+		"KnownTags":                 u.knownTags(r.Context(), ps.TenantID),
+		"Versions":                  u.versions(r.Context()),
+		"Contexts":                  u.contextChoices(r.Context(), ps.TenantID, ps.ID),
+		"Policies":                  u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
+		"TagBoundPolicies":          u.tagBoundPolicies(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags),
+		"CloudIntegrations":         u.cloudIntegrationChoices(r.Context(), ps.TenantID, ps.ID),
+		"TagBoundCloudIntegrations": u.tagBoundCloudIntegrations(r.Context(), ps.TenantID, ps.ID, ps.Tags),
 	})
 }
 
@@ -2106,12 +2263,22 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	driftEnabled := r.FormValue("drift_enabled") == "on"
+	driftInterval, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("drift_interval_minutes")))
+	ttlHours, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("ttl_hours")))
+	autoDestroy := r.FormValue("auto_destroy") == "on"
 	if _, err := u.cfg.Projects.Update(r.Context(), projectapp.UpdateInput{
 		ID: id, Name: ps.Name, Branch: r.FormValue("branch"), Workdir: r.FormValue("workdir"),
-		TerraformVersion: r.FormValue("terraform_version"),
-		AutoApprove:      r.FormValue("auto_approve") == "on",
-		ApprovalPolicyID: policyID,
-		Tags:             tags,
+		TerraformVersion:     r.FormValue("terraform_version"),
+		AutoApprove:          r.FormValue("auto_approve") == "on",
+		ApprovalPolicyID:     policyID,
+		Tags:                 tags,
+		UpdateDrift:          r.Form.Has("drift_interval_minutes") || r.Form.Has("drift_enabled"),
+		DriftEnabled:         driftEnabled,
+		DriftIntervalMinutes: driftInterval,
+		UpdateTTL:            r.Form.Has("ttl_hours") || r.Form.Has("auto_destroy"),
+		TTLHours:             ttlHours,
+		AutoDestroy:          autoDestroy,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2126,9 +2293,21 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if u.cfg.CloudIntegrations != nil && r.Form.Has("cloud_integrations_present") {
+		if err := u.cfg.CloudIntegrations.SetProjectIntegrations(r.Context(), ps.TenantID, id, parseCloudIntegrationIDs(r.Form["cloud_integration_ids"])); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	u.recordAudit(r, ps.TenantID, "workspace.updated", "workspace", string(id), ps.Name,
 		fmt.Sprintf("Updated settings for workspace %s", ps.Name),
-		map[string]any{"branch": r.FormValue("branch"), "workdir": r.FormValue("workdir"), "auto_approve": r.FormValue("auto_approve") == "on", "approval_policy_id": policyID, "tags": project.FormatTags(tags)})
+		map[string]any{
+			"branch": r.FormValue("branch"), "workdir": r.FormValue("workdir"),
+			"auto_approve": r.FormValue("auto_approve") == "on", "approval_policy_id": policyID,
+			"drift_enabled": driftEnabled, "drift_interval_minutes": driftInterval,
+			"ttl_hours": ttlHours, "auto_destroy": autoDestroy,
+			"tags": project.FormatTags(tags),
+		})
 	http.Redirect(w, r, "/projects/"+string(id)+"/details", http.StatusSeeOther)
 }
 
@@ -2222,6 +2401,129 @@ func (u *ui) trigger(w http.ResponseWriter, r *http.Request) {
 	u.recordAudit(r, ps.TenantID, "run.triggered", "run", string(rs.ID), ps.Name,
 		fmt.Sprintf("Manually triggered run %s on workspace %s (%s@%s)", rs.ID, ps.Name, ps.DefaultBranch, shortSHA(sha)),
 		map[string]any{"project_id": string(ps.ID), "sha": sha, "branch": ps.DefaultBranch})
+	http.Redirect(w, r, "/runs/"+string(rs.ID), http.StatusSeeOther)
+}
+
+func (u *ui) triggerDriftCheck(w http.ResponseWriter, r *http.Request) {
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if u.cfg.Tokens == nil {
+		http.Error(w, "GitHub App is not installed", http.StatusBadGateway)
+		return
+	}
+	token, err := u.cfg.Tokens.InstallationToken(r.Context(), ps.TenantID)
+	if err != nil {
+		http.Error(w, "GitHub App is not installed", http.StatusBadGateway)
+		return
+	}
+	sha, err := u.cfg.Checkout.BranchTip(r.Context(), ps.Repo.CloneURL(), token, ps.DefaultBranch)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	opened, err := u.cfg.Runs.Open(r.Context(), runapp.OpenRequest{
+		ProjectID:   ps.ID,
+		Trigger:     run.TriggerDrift,
+		SHA:         sha,
+		Branch:      ps.DefaultBranch,
+		Message:     "Drift detection check",
+		Author:      u.actor(r),
+		TriggeredBy: u.actor(r),
+		PlanOnly:    true,
+	})
+	if err != nil {
+		if errors.Is(err, runapp.ErrDuplicate) {
+			http.Redirect(w, r, "/projects/"+string(ps.ID), http.StatusSeeOther)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rs := opened.Snapshot()
+	u.recordAudit(r, ps.TenantID, "drift.checked", "run", string(rs.ID), ps.Name,
+		fmt.Sprintf("Triggered drift detection run %s on workspace %s (%s@%s)", rs.ID, ps.Name, ps.DefaultBranch, shortSHA(sha)),
+		map[string]any{"project_id": string(ps.ID), "sha": sha, "branch": ps.DefaultBranch})
+	http.Redirect(w, r, "/runs/"+string(rs.ID), http.StatusSeeOther)
+}
+
+func (u *ui) extendTTL(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	extraHours, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("extra_hours")))
+	if extraHours <= 0 {
+		extraHours = ps.TTLHours
+		if extraHours <= 0 {
+			extraHours = 24
+		}
+	}
+	if _, err := u.cfg.Projects.ExtendTTL(r.Context(), ps.ID, extraHours); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	u.recordAudit(r, ps.TenantID, "workspace.ttl_extended", "workspace", string(ps.ID), ps.Name,
+		fmt.Sprintf("Extended TTL on workspace %s by +%dh", ps.Name, extraHours),
+		map[string]any{"extra_hours": extraHours})
+	ref := r.Header.Get("Referer")
+	if strings.HasSuffix(ref, "/details") {
+		http.Redirect(w, r, "/projects/"+string(ps.ID)+"/details", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID), http.StatusSeeOther)
+}
+
+func (u *ui) triggerDestroy(w http.ResponseWriter, r *http.Request) {
+	p, err := u.getProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if u.cfg.Tokens == nil {
+		http.Error(w, "GitHub App is not installed", http.StatusBadGateway)
+		return
+	}
+	token, err := u.cfg.Tokens.InstallationToken(r.Context(), ps.TenantID)
+	if err != nil {
+		http.Error(w, "GitHub App is not installed", http.StatusBadGateway)
+		return
+	}
+	sha, err := u.cfg.Checkout.BranchTip(r.Context(), ps.Repo.CloneURL(), token, ps.DefaultBranch)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	opened, err := u.cfg.Runs.Open(r.Context(), runapp.OpenRequest{
+		ProjectID:   ps.ID,
+		Trigger:     run.TriggerManual,
+		SHA:         sha,
+		Branch:      ps.DefaultBranch,
+		Message:     "Destroy workspace resources",
+		Author:      u.actor(r),
+		TriggeredBy: u.actor(r),
+		PlanOnly:    false,
+		IsDestroy:   true,
+	})
+	if err != nil {
+		if errors.Is(err, runapp.ErrDuplicate) {
+			http.Redirect(w, r, "/projects/"+string(ps.ID), http.StatusSeeOther)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rs := opened.Snapshot()
+	u.recordAudit(r, ps.TenantID, "workspace.destroy_triggered", "run", string(rs.ID), ps.Name,
+		fmt.Sprintf("Triggered destroy run %s on workspace %s", rs.ID, ps.Name),
+		map[string]any{"project_id": string(ps.ID), "sha": sha, "destroy": true})
 	http.Redirect(w, r, "/runs/"+string(rs.ID), http.StatusSeeOther)
 }
 
@@ -2514,12 +2816,30 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 	tracked := filterRuns(runs, isTracked)
 	latest := latestSnapshot(tracked)
 	meta, _ := u.cfg.States.Metadata(r.Context(), string(ps.ID))
+	var estCost string
+	if latest != nil {
+		if latest.MonthlyCost > 0 {
+			estCost = run.FormatMonthlyCost(latest.MonthlyCost)
+		} else if len(latest.PlanJSON) > 0 {
+			if parsed, err := run.ParsePlanJSON(latest.PlanJSON); err == nil && parsed != nil && parsed.Cost != nil && parsed.Cost.MonthlyCost > 0 {
+				estCost = run.FormatMonthlyCost(parsed.Cost.MonthlyCost)
+			}
+		}
+	}
 	return map[string]any{
 		"ID": string(ps.ID), "Name": ps.Name, "Locked": ps.Locked,
 		"LatestLabel": latestLabel(latest), "LatestClass": latestClass(latest),
 		"Meta": projectMeta(ps, latest, meta), "Empty": len(runs) == 0,
-		"Panel": panel,
-		"Poll":  anyNonTerminal(runs),
+		"Panel":            panel,
+		"Poll":             anyNonTerminal(runs),
+		"DriftEnabled":     ps.DriftEnabled,
+		"DriftStatus":      ps.DriftStatus,
+		"DriftStatusLabel": driftStatusLabel(ps.DriftStatus),
+		"LastDriftCheckAt": fmtTimePtr(ps.LastDriftCheckAt),
+		"TTLHours":         ps.TTLHours,
+		"AutoDestroy":      ps.AutoDestroy,
+		"ExpiresAt":        fmtTimePtr(ps.ExpiresAt),
+		"EstMonthlyCost":   estCost,
 	}
 }
 
@@ -2724,7 +3044,7 @@ func filterRuns(runs []*run.Run, ok func(run.Snapshot) bool) []*run.Run {
 }
 
 func isTracked(s run.Snapshot) bool {
-	return s.Trigger == run.TriggerPush || s.Trigger == run.TriggerManual || s.Trigger == run.TriggerPipeline
+	return s.Trigger == run.TriggerPush || s.Trigger == run.TriggerManual || s.Trigger == run.TriggerPipeline || s.Trigger == run.TriggerDrift || s.Trigger == run.TriggerTTL
 }
 
 func isPR(s run.Snapshot) bool { return s.Trigger == run.TriggerPullRequest }
@@ -2853,6 +3173,13 @@ func fmtTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format("2006-01-02 15:04")
+}
+
+func fmtTimePtr(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return ""
+	}
+	return fmtTime(*t)
 }
 
 type contextChoice struct {
@@ -3979,6 +4306,8 @@ func auditResourceURL(resourceType, resourceID string) string {
 		return "/policies/" + resourceID
 	case "context":
 		return "/contexts/" + resourceID
+	case "cloud_integration":
+		return "/cloud-integrations/" + resourceID
 	default:
 		return ""
 	}
@@ -3986,10 +4315,10 @@ func auditResourceURL(resourceType, resourceID string) string {
 
 func isSecurityOrGovernanceAudit(e audit.Snapshot) bool {
 	switch e.ResourceType {
-	case "policy", "context", "state":
+	case "policy", "context", "state", "cloud_integration":
 		return true
 	}
-	return strings.Contains(e.Action, "lock") || strings.Contains(e.Action, "policy") || strings.Contains(e.Action, "approve") || strings.Contains(e.Action, "confirm")
+	return strings.Contains(e.Action, "lock") || strings.Contains(e.Action, "policy") || strings.Contains(e.Action, "approve") || strings.Contains(e.Action, "confirm") || strings.Contains(e.Action, "cloud_integration")
 }
 
 func (u *ui) parseAuditFilter(r *http.Request) (audit.Filter, string) {
@@ -4182,6 +4511,396 @@ func (u *ui) exportAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 	cw.Flush()
 }
+
+func driftStatusLabel(status string) string {
+	switch status {
+	case project.DriftStatusSynced:
+		return "In Sync"
+	case project.DriftStatusDrifted:
+		return "Drifted"
+	case project.DriftStatusError:
+		return "Drift Check Failed"
+	default:
+		return "Unknown"
+	}
+}
+
+func ciProviderLabel(p string) string {
+	switch strings.ToLower(p) {
+	case cloudintegration.ProviderAWS:
+		return "AWS"
+	case cloudintegration.ProviderGCP:
+		return "GCP"
+	case cloudintegration.ProviderAzure:
+		return "Azure"
+	default:
+		return strings.ToUpper(p)
+	}
+}
+
+func ciAuthModeLabel(m string) string {
+	switch strings.ToLower(m) {
+	case cloudintegration.AuthModeAssumeRole, "sts_assume_role":
+		return "AWS STS AssumeRole"
+	default:
+		return "OIDC Federation"
+	}
+}
+
+func ciTargetSummary(cs cloudintegration.Snapshot) string {
+	switch cs.Provider {
+	case cloudintegration.ProviderGCP:
+		if cs.GCPServiceAccountEmail != "" {
+			return cs.GCPServiceAccountEmail
+		}
+		return cs.GCPWorkloadIdentityProvider
+	case cloudintegration.ProviderAzure:
+		return cs.AzureClientID
+	default:
+		return cs.RoleARN
+	}
+}
+
+func normalizeCIAuthMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "sts_assume_role", cloudintegration.AuthModeAssumeRole:
+		return cloudintegration.AuthModeAssumeRole
+	default:
+		return cloudintegration.AuthModeOIDC
+	}
+}
+
+type cloudIntegrationChoice struct {
+	ID            string
+	Name          string
+	Provider      string
+	ProviderLabel string
+	TargetSummary string
+	Attached      bool
+}
+
+type cloudIntegrationRow struct {
+	ID               string
+	Name             string
+	Provider         string
+	ProviderLabel    string
+	AuthMethod       string
+	AuthMethodLabel  string
+	TargetSummary    string
+	Region           string
+	SessionDurationS int
+	Tags             []string
+	TagsCSV          string
+	UpdatedAt        string
+}
+
+func (u *ui) cloudIntegrationChoices(ctx context.Context, tenantID string, projectID project.ID) []cloudIntegrationChoice {
+	if u.cfg.CloudIntegrations == nil || tenantID == "" {
+		return nil
+	}
+	all, err := u.cfg.CloudIntegrations.List(ctx, tenantID)
+	if err != nil {
+		return nil
+	}
+	attached := make(map[cloudintegration.ID]bool)
+	if projectID != "" {
+		if list, err := u.cfg.CloudIntegrations.ListByProject(ctx, projectID); err == nil {
+			for _, ci := range list {
+				attached[ci.Snapshot().ID] = true
+			}
+		}
+	}
+	out := make([]cloudIntegrationChoice, 0, len(all))
+	for _, ci := range all {
+		cs := ci.Snapshot()
+		out = append(out, cloudIntegrationChoice{
+			ID:            string(cs.ID),
+			Name:          cs.Name,
+			Provider:      cs.Provider,
+			ProviderLabel: ciProviderLabel(cs.Provider),
+			TargetSummary: ciTargetSummary(cs),
+			Attached:      attached[cs.ID],
+		})
+	}
+	return out
+}
+
+func (u *ui) tagBoundCloudIntegrations(ctx context.Context, tenantID string, projectID project.ID, projectTags map[string]string) []cloudIntegrationChoice {
+	if u.cfg.CloudIntegrations == nil || tenantID == "" || len(projectTags) == 0 {
+		return nil
+	}
+	all, err := u.cfg.CloudIntegrations.List(ctx, tenantID)
+	if err != nil {
+		return nil
+	}
+	attached := make(map[cloudintegration.ID]bool)
+	if projectID != "" {
+		if list, err := u.cfg.CloudIntegrations.ListByProject(ctx, projectID); err == nil {
+			for _, ci := range list {
+				attached[ci.Snapshot().ID] = true
+			}
+		}
+	}
+	var out []cloudIntegrationChoice
+	for _, ci := range all {
+		cs := ci.Snapshot()
+		if attached[cs.ID] || len(cs.Tags) == 0 {
+			continue
+		}
+		if matched, _ := ci.MatchesProjectTags(projectTags); matched {
+			out = append(out, cloudIntegrationChoice{
+				ID:            string(cs.ID),
+				Name:          cs.Name,
+				Provider:      cs.Provider,
+				ProviderLabel: ciProviderLabel(cs.Provider),
+				TargetSummary: ciTargetSummary(cs),
+			})
+		}
+	}
+	return out
+}
+
+func parseCloudIntegrationIDs(raw []string) []cloudintegration.ID {
+	out := make([]cloudintegration.ID, 0, len(raw))
+	for _, id := range raw {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			out = append(out, cloudintegration.ID(id))
+		}
+	}
+	return out
+}
+
+func (u *ui) cloudIntegrations(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
+	filterTag := strings.TrimSpace(strings.Join(r.URL.Query()["tag"], ", "))
+	var rows []cloudIntegrationRow
+	var issuer, audience string
+	if u.cfg.CloudIntegrations != nil {
+		issuer = u.cfg.CloudIntegrations.Issuer()
+		audience = cloudintegration.DefaultAWSAudience
+		items, err := u.cfg.CloudIntegrations.List(r.Context(), tenantID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		rows = make([]cloudIntegrationRow, 0, len(items))
+		for _, ci := range items {
+			cs := ci.Snapshot()
+			tags := project.TagList(cs.Tags)
+			if !matchesProjectFilter(cs.Name, "", tags, filterName, "", filterTag) {
+				continue
+			}
+			rows = append(rows, cloudIntegrationRow{
+				ID:               string(cs.ID),
+				Name:             cs.Name,
+				Provider:         cs.Provider,
+				ProviderLabel:    ciProviderLabel(cs.Provider),
+				AuthMethod:       cs.AuthMode,
+				AuthMethodLabel:  ciAuthModeLabel(cs.AuthMode),
+				TargetSummary:    ciTargetSummary(cs),
+				Region:           cs.Region,
+				SessionDurationS: cs.SessionDurationSeconds,
+				Tags:             tags,
+				TagsCSV:          strings.Join(tags, ","),
+				UpdatedAt:        fmtTime(cs.UpdatedAt),
+			})
+		}
+	}
+	u.page(w, "Cloud Integrations", "cloud_integrations", map[string]any{
+		"Integrations": rows,
+		"FilterName":   filterName,
+		"FilterTag":    filterTag,
+		"KnownTags":    u.knownTags(r.Context(), tenantID),
+		"CountAll":     len(rows),
+		"OIDCIssuer":   issuer,
+		"OIDCAudience": audience,
+	})
+}
+
+func (u *ui) createCloudIntegration(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.CloudIntegrations == nil {
+		http.Error(w, "cloud integrations service not configured", http.StatusInternalServerError)
+		return
+	}
+	tags, err := project.ParseTags(r.FormValue("tags"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	durationS, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("session_duration_seconds")))
+	authMode := normalizeCIAuthMode(firstNonEmpty(r.FormValue("auth_mode"), r.FormValue("auth_method")))
+	ci, err := u.cfg.CloudIntegrations.Create(r.Context(), cloudintegration.Snapshot{
+		TenantID:                    tenantID,
+		Name:                        r.FormValue("name"),
+		Provider:                    r.FormValue("provider"),
+		AuthMode:                    authMode,
+		RoleARN:                     r.FormValue("role_arn"),
+		Region:                      r.FormValue("region"),
+		SessionDurationSeconds:      durationS,
+		ExternalID:                  r.FormValue("external_id"),
+		AccessKeyID:                 r.FormValue("access_key_id"),
+		SecretAccessKey:             r.FormValue("secret_access_key"),
+		Audience:                    r.FormValue("audience"),
+		GCPWorkloadIdentityProvider: r.FormValue("gcp_workload_identity_provider"),
+		GCPServiceAccountEmail:      r.FormValue("gcp_service_account_email"),
+		AzureTenantID:               r.FormValue("azure_tenant_id"),
+		AzureClientID:               r.FormValue("azure_client_id"),
+		AzureSubscriptionID:         r.FormValue("azure_subscription_id"),
+		Tags:                        tags,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cs := ci.Snapshot()
+	u.recordAudit(r, tenantID, "cloud_integration.created", "cloud_integration", string(cs.ID), cs.Name,
+		fmt.Sprintf("Created %s cloud integration %s (%s)", ciProviderLabel(cs.Provider), cs.Name, ciTargetSummary(cs)),
+		map[string]any{"provider": cs.Provider, "auth_mode": cs.AuthMode, "target": ciTargetSummary(cs), "tags": project.FormatTags(tags)})
+	http.Redirect(w, r, "/cloud-integrations/"+string(cs.ID), http.StatusSeeOther)
+}
+
+func (u *ui) cloudIntegrationDetails(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.CloudIntegrations == nil {
+		http.NotFound(w, r)
+		return
+	}
+	ci, err := u.cfg.CloudIntegrations.Get(r.Context(), tenantID, cloudintegration.ID(r.PathValue("id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if ci == nil {
+		http.NotFound(w, r)
+		return
+	}
+	cs := ci.Snapshot()
+	u.page(w, cs.Name, "cloud_integration", map[string]any{
+		"ID":                          string(cs.ID),
+		"Name":                        cs.Name,
+		"Provider":                    cs.Provider,
+		"ProviderLabel":               ciProviderLabel(cs.Provider),
+		"AuthMethod":                  cs.AuthMode,
+		"AuthMethodLabel":             ciAuthModeLabel(cs.AuthMode),
+		"RoleARN":                     cs.RoleARN,
+		"Region":                      cs.Region,
+		"SessionDurationS":            cs.SessionDurationSeconds,
+		"ExternalID":                  cs.ExternalID,
+		"Audience":                    cs.Audience,
+		"GCPWorkloadIdentityProvider": cs.GCPWorkloadIdentityProvider,
+		"GCPServiceAccountEmail":      cs.GCPServiceAccountEmail,
+		"GCPProjectID":                "",
+		"AzureTenantID":               cs.AzureTenantID,
+		"AzureClientID":               cs.AzureClientID,
+		"AzureSubscriptionID":         cs.AzureSubscriptionID,
+		"Tags":                        project.FormatTags(cs.Tags),
+		"TagList":                     project.TagList(cs.Tags),
+		"KnownTags":                   u.knownTags(r.Context(), tenantID),
+		"UpdatedAt":                   fmtTime(cs.UpdatedAt),
+		"OIDCIssuer":                  u.cfg.CloudIntegrations.Issuer(),
+		"OIDCAudience":                firstNonEmpty(cs.Audience, cloudintegration.DefaultAWSAudience),
+	})
+}
+
+func (u *ui) updateCloudIntegration(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.CloudIntegrations == nil {
+		http.Error(w, "cloud integrations service not configured", http.StatusInternalServerError)
+		return
+	}
+	tags, err := project.ParseTags(r.FormValue("tags"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	id := cloudintegration.ID(r.PathValue("id"))
+	durationS, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("session_duration_seconds")))
+	authMode := normalizeCIAuthMode(firstNonEmpty(r.FormValue("auth_mode"), r.FormValue("auth_method")))
+	ci, err := u.cfg.CloudIntegrations.Update(r.Context(), tenantID, id, cloudintegration.Snapshot{
+		Name:                        r.FormValue("name"),
+		Provider:                    r.FormValue("provider"),
+		AuthMode:                    authMode,
+		RoleARN:                     r.FormValue("role_arn"),
+		Region:                      r.FormValue("region"),
+		SessionDurationSeconds:      durationS,
+		ExternalID:                  r.FormValue("external_id"),
+		AccessKeyID:                 r.FormValue("access_key_id"),
+		SecretAccessKey:             r.FormValue("secret_access_key"),
+		Audience:                    r.FormValue("audience"),
+		GCPWorkloadIdentityProvider: r.FormValue("gcp_workload_identity_provider"),
+		GCPServiceAccountEmail:      r.FormValue("gcp_service_account_email"),
+		AzureTenantID:               r.FormValue("azure_tenant_id"),
+		AzureClientID:               r.FormValue("azure_client_id"),
+		AzureSubscriptionID:         r.FormValue("azure_subscription_id"),
+		Tags:                        tags,
+	})
+	if err != nil {
+		if errors.Is(err, cloudintegrationapp.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cs := ci.Snapshot()
+	u.recordAudit(r, tenantID, "cloud_integration.updated", "cloud_integration", string(cs.ID), cs.Name,
+		fmt.Sprintf("Updated %s cloud integration %s", ciProviderLabel(cs.Provider), cs.Name),
+		map[string]any{"provider": cs.Provider, "auth_mode": cs.AuthMode, "target": ciTargetSummary(cs), "tags": project.FormatTags(tags)})
+	http.Redirect(w, r, "/cloud-integrations/"+string(cs.ID), http.StatusSeeOther)
+}
+
+func (u *ui) deleteCloudIntegration(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if u.cfg.CloudIntegrations == nil {
+		http.Error(w, "cloud integrations service not configured", http.StatusInternalServerError)
+		return
+	}
+	id := cloudintegration.ID(r.PathValue("id"))
+	existing, _ := u.cfg.CloudIntegrations.Get(r.Context(), tenantID, id)
+	if err := u.cfg.CloudIntegrations.Delete(r.Context(), tenantID, id); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	name := string(id)
+	if existing != nil {
+		name = existing.Snapshot().Name
+	}
+	u.recordAudit(r, tenantID, "cloud_integration.deleted", "cloud_integration", string(id), name,
+		fmt.Sprintf("Deleted cloud integration %s", name), nil)
+	http.Redirect(w, r, "/cloud-integrations", http.StatusSeeOther)
+}
+
 
 
 

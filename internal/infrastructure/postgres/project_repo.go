@@ -19,7 +19,9 @@ type ProjectRepo struct{ pool *pgxpool.Pool }
 func NewProjectRepo(pool *pgxpool.Pool) *ProjectRepo { return &ProjectRepo{pool: pool} }
 
 const projectColumns = `id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-	terraform_version, COALESCE(approval_policy_id, ''), auto_approve, tags, locked, state_token, active_run_id, created_at, updated_at`
+	terraform_version, COALESCE(approval_policy_id, ''), auto_approve, tags, locked, state_token, active_run_id,
+	drift_enabled, drift_interval_minutes, drift_status, last_drift_check_at,
+	ttl_hours, expires_at, auto_destroy, created_at, updated_at`
 
 func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	s := p.Snapshot()
@@ -31,12 +33,22 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	if err != nil {
 		return err
 	}
+	driftInterval := s.DriftIntervalMinutes
+	if driftInterval <= 0 {
+		driftInterval = project.DefaultDriftIntervalMinutes
+	}
+	driftStatus := s.DriftStatus
+	if driftStatus == "" {
+		driftStatus = project.DriftStatusUnknown
+	}
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO projects (
 			id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-			terraform_version, approval_policy_id, auto_approve, tags, locked, state_token, active_run_id, created_at, updated_at
+			terraform_version, approval_policy_id, auto_approve, tags, locked, state_token, active_run_id,
+			drift_enabled, drift_interval_minutes, drift_status, last_drift_check_at,
+			ttl_hours, expires_at, auto_destroy, created_at, updated_at
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''),$11,$12::jsonb,$13,$14,$15,$16,$17)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''),$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
 		ON CONFLICT (id) DO UPDATE SET
 			tenant_id = EXCLUDED.tenant_id,
 			github_repo_id = EXCLUDED.github_repo_id,
@@ -50,11 +62,19 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			auto_approve = EXCLUDED.auto_approve,
 			tags = EXCLUDED.tags,
 			state_token = EXCLUDED.state_token,
+			drift_enabled = EXCLUDED.drift_enabled,
+			drift_interval_minutes = EXCLUDED.drift_interval_minutes,
+			drift_status = EXCLUDED.drift_status,
+			last_drift_check_at = EXCLUDED.last_drift_check_at,
+			ttl_hours = EXCLUDED.ttl_hours,
+			expires_at = EXCLUDED.expires_at,
+			auto_destroy = EXCLUDED.auto_destroy,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
 		s.TerraformVersion, s.ApprovalPolicyID, s.AutoApprove, string(tagsJSON), s.Locked, s.StateToken, s.ActiveRunID,
-		s.CreatedAt, s.UpdatedAt,
+		s.DriftEnabled, driftInterval, driftStatus, s.LastDriftCheckAt,
+		s.TTLHours, s.ExpiresAt, s.AutoDestroy, s.CreatedAt, s.UpdatedAt,
 	)
 	return err
 }
@@ -86,6 +106,9 @@ func (r *ProjectRepo) Get(ctx context.Context, id project.ID) (*project.Project,
 }
 
 func (r *ProjectRepo) List(ctx context.Context, tenantID string) ([]*project.Project, error) {
+	if tenantID == "" {
+		return r.query(ctx, `SELECT `+projectColumns+` FROM projects ORDER BY created_at, id`)
+	}
 	return r.query(ctx, `SELECT `+projectColumns+` FROM projects WHERE tenant_id = $1 ORDER BY created_at, id`, tenantID)
 }
 
@@ -122,17 +145,21 @@ type projectScanner interface {
 func scanProject(row projectScanner) (*project.Project, error) {
 	var s project.Snapshot
 	var tagsRaw []byte
+	var lastDrift, expiresAt *time.Time
 	var created, updated time.Time
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.GitHubRepoID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
 		&s.TerraformVersion, &s.ApprovalPolicyID, &s.AutoApprove, &tagsRaw, &s.Locked, &s.StateToken, &s.ActiveRunID,
-		&created, &updated,
+		&s.DriftEnabled, &s.DriftIntervalMinutes, &s.DriftStatus, &lastDrift,
+		&s.TTLHours, &expiresAt, &s.AutoDestroy, &created, &updated,
 	); err != nil {
 		return nil, err
 	}
 	if len(tagsRaw) > 0 {
 		_ = json.Unmarshal(tagsRaw, &s.Tags)
 	}
+	s.LastDriftCheckAt = utcTimePtr(lastDrift)
+	s.ExpiresAt = utcTimePtr(expiresAt)
 	s.CreatedAt = utcTime(created)
 	s.UpdatedAt = utcTime(updated)
 	return project.Restore(s), nil

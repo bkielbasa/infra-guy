@@ -58,7 +58,7 @@
     </section>
 
     <section class="form-section">
-      <h2>Automation &amp; Contexts</h2>
+      <h2>Automation, Contexts &amp; Cloud Integrations</h2>
       <label class="check-card">
         <input type="checkbox" name="auto_approve"{{if .AutoApprove}} checked{{end}}>
         <div>
@@ -76,6 +76,61 @@
         </div>
       </div>
       {{end}}
+      <input type="hidden" name="cloud_integrations_present" value="1">
+      {{if .CloudIntegrations}}
+      <div class="field" style="margin-top: 14px;">
+        <label>Attached cloud integrations (OIDC / STS)</label>
+        <div class="context-grid">
+          {{range .CloudIntegrations}}
+          <label class="check"><input type="checkbox" name="cloud_integration_ids" value="{{.ID}}"{{if .Attached}} checked{{end}}> {{.Name}} <span class="muted">({{.ProviderLabel}})</span></label>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      {{if .TagBoundCloudIntegrations}}
+      <div class="field-hint" style="margin-top: 6px;">
+        <strong>Tag-bound cloud integrations automatically applied:</strong>
+        {{range .TagBoundCloudIntegrations}}
+        <a href="/cloud-integrations/{{.ID}}" class="tag-pill" style="text-decoration: none;">{{.Name}} ({{.ProviderLabel}})</a>
+        {{end}}
+      </div>
+      {{end}}
+    </section>
+
+    <section class="form-section">
+      <h2>Drift Detection &amp; Ephemeral Lifecycle (TTL)</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label class="check-card">
+            <input type="checkbox" name="drift_enabled"{{if .DriftEnabled}} checked{{end}}>
+            <div>
+              <strong>Scheduled drift detection</strong>
+              <div class="field-hint">Periodically run plan-only drift checks against live cloud state.</div>
+            </div>
+          </label>
+        </div>
+        <div class="field">
+          <label for="drift-interval">Drift check interval (minutes)</label>
+          <input type="number" id="drift-interval" name="drift_interval_minutes" value="{{if .DriftIntervalMinutes}}{{.DriftIntervalMinutes}}{{else}}360{{end}}" min="5">
+          <span class="field-hint">Status: <strong>{{.DriftStatusLabel}}</strong>{{if .LastDriftCheckAt}} (last checked {{.LastDriftCheckAt}} UTC){{end}}</span>
+        </div>
+      </div>
+      <div class="form-grid" style="margin-top: 12px;">
+        <div class="field">
+          <label for="ttl-hours">Workspace TTL (hours, 0 = permanent)</label>
+          <input type="number" id="ttl-hours" name="ttl_hours" value="{{.TTLHours}}" min="0">
+          <span class="field-hint">{{if .ExpiresAt}}Expires at: <strong>{{.ExpiresAt}} UTC</strong>{{else}}Leave at 0 for permanent production workspaces.{{end}}</span>
+        </div>
+        <div class="field">
+          <label class="check-card">
+            <input type="checkbox" name="auto_destroy"{{if .AutoDestroy}} checked{{end}}>
+            <div>
+              <strong>Auto-destroy on TTL expiration</strong>
+              <div class="field-hint">Automatically queue a <code>terraform destroy</code> run when the workspace TTL expires.</div>
+            </div>
+          </label>
+        </div>
+      </div>
     </section>
 
     <div class="actions">
@@ -85,7 +140,28 @@
   </form>
 
   <section class="form-section danger-zone">
-    <h2>State &amp; Danger Zone</h2>
+    <h2>State, Lifecycle &amp; Danger Zone</h2>
+    {{if .TTLHours}}
+    <div class="danger-row">
+      <div>
+        <strong>Extend workspace TTL</strong>
+        <span class="field-hint">Push the expiration time forward by +{{.TTLHours}} hours.</span>
+      </div>
+      <form method="post" action="/projects/{{.ID}}/extend-ttl" class="inline">
+        <input type="hidden" name="extra_hours" value="{{.TTLHours}}">
+        <button type="submit">+{{.TTLHours}}h TTL</button>
+      </form>
+    </div>
+    {{end}}
+    <div class="danger-row">
+      <div>
+        <strong>Destroy infrastructure</strong>
+        <span class="field-hint">Queue a <code>terraform destroy</code> run to tear down all managed cloud resources in this workspace.</span>
+      </div>
+      <form method="post" action="/projects/{{.ID}}/destroy" class="inline">
+        <button type="submit" class="btn-danger">Queue destroy run</button>
+      </form>
+    </div>
     <div class="danger-row">
       <div>
         <strong>Force-unlock state</strong>

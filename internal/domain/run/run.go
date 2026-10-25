@@ -51,6 +51,8 @@ const (
 	TriggerPush        Trigger = "push"
 	TriggerManual      Trigger = "manual"
 	TriggerPipeline    Trigger = "pipeline"
+	TriggerDrift       Trigger = "drift"
+	TriggerTTL         Trigger = "ttl"
 )
 
 type StepName string
@@ -110,6 +112,7 @@ type OpenInput struct {
 	ProjectID   ProjectID
 	AutoApprove bool
 	PlanOnly    bool
+	IsDestroy   bool
 	Trigger     Trigger
 	SHA         string
 	Branch      string
@@ -143,6 +146,7 @@ type Snapshot struct {
 	PRTitle          string
 	PlanOnly         bool
 	AutoApprove      bool
+	IsDestroy        bool
 	PlanText         string
 	PlanFile         []byte
 	PlanJSON         []byte
@@ -150,6 +154,8 @@ type Snapshot struct {
 	Change           int
 	Destroy          int
 	SummaryPresent   bool
+	MonthlyCost      float64
+	DiffMonthlyCost  float64
 	TerraformVersion string
 	Error            string
 	ApprovedBy       string
@@ -184,7 +190,8 @@ func Open(in OpenInput) (*Run, error) {
 		ID: in.ID, ProjectID: in.ProjectID, Trigger: in.Trigger, Status: StatusQueued,
 		SHA: in.SHA, Branch: in.Branch, Message: in.Message, Author: in.Author,
 		TriggeredBy: in.TriggeredBy, PRNumber: in.PRNumber, PRTitle: in.PRTitle,
-		PlanOnly: in.PlanOnly, AutoApprove: in.AutoApprove, CommittedAt: committedAt, CreatedAt: in.Now, Steps: steps,
+		PlanOnly: in.PlanOnly, AutoApprove: in.AutoApprove, IsDestroy: in.IsDestroy,
+		CommittedAt: committedAt, CreatedAt: in.Now, Steps: steps,
 	}}, nil
 }
 
@@ -224,10 +231,30 @@ func (s Snapshot) SummaryBracket() string {
 	if s.Destroy > 0 {
 		parts = append(parts, fmt.Sprintf("delete: %d", s.Destroy))
 	}
+	if s.DiffMonthlyCost != 0 {
+		parts = append(parts, fmt.Sprintf("cost: %s", FormatCostDiff(s.DiffMonthlyCost)))
+	}
 	if len(parts) == 0 {
 		return "No changes"
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func (s Snapshot) CostEstimate() *CostEstimate {
+	if len(s.PlanJSON) > 0 {
+		if est := EstimatePlanCost(s.PlanJSON); est != nil && est.HasCost() {
+			return est
+		}
+	}
+	if s.MonthlyCost > 0 || s.DiffMonthlyCost != 0 {
+		return &CostEstimate{
+			PrevMonthlyCost: roundCents(s.MonthlyCost - s.DiffMonthlyCost),
+			MonthlyCost:     s.MonthlyCost,
+			DiffMonthlyCost: s.DiffMonthlyCost,
+			Currency:        "USD",
+		}
+	}
+	return nil
 }
 
 func (r *Run) SetTerraformVersion(v string) { r.s.TerraformVersion = v }
@@ -292,6 +319,10 @@ func (r *Run) CompleteStep(name StepName, result StepResult, now time.Time) (Dec
 		r.s.PlanFile = append([]byte(nil), result.PlanFile...)
 		if len(result.PlanJSON) > 0 {
 			r.s.PlanJSON = append([]byte(nil), result.PlanJSON...)
+			if cost := EstimatePlanCost(result.PlanJSON); cost != nil {
+				r.s.MonthlyCost = cost.MonthlyCost
+				r.s.DiffMonthlyCost = cost.DiffMonthlyCost
+			}
 		}
 		sum := ParsePlanSummary(result.PlanText)
 		if !sum.Present && !sum.NoChanges() && len(result.PlanJSON) > 0 {
