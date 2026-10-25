@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"infra-guy/internal/domain/policy"
+	"infra-guy/internal/domain/run"
 	"infra-guy/internal/infrastructure/opa"
 )
 
@@ -261,8 +262,33 @@ func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo, approva
 		approvalMaps = append(approvalMaps, entry)
 	}
 
+	costEst := run.EstimatePlanCost(trimmed)
+	if costEst == nil {
+		costEst = &run.CostEstimate{Currency: "USD"}
+	}
+	costResources := make([]map[string]any, 0, len(costEst.Resources))
+	for _, rc := range costEst.Resources {
+		costResources = append(costResources, map[string]any{
+			"address":           rc.Address,
+			"resource_type":     rc.ResourceType,
+			"action":            rc.Action,
+			"sku":               rc.SKU,
+			"prev_monthly_cost": rc.PrevMonthlyCost,
+			"monthly_cost":      rc.MonthlyCost,
+			"diff_monthly_cost": rc.DiffMonthlyCost,
+		})
+	}
+	costMap := map[string]any{
+		"prev_monthly_cost": costEst.PrevMonthlyCost,
+		"monthly_cost":      costEst.MonthlyCost,
+		"diff_monthly_cost": costEst.DiffMonthlyCost,
+		"currency":          costEst.Currency,
+		"resources":         costResources,
+	}
+
 	displayPayload := map[string]any{
 		"plan":         planObj,
+		"cost":         costMap,
 		"approvals":    approvalMaps,
 		"current_user": userMap,
 		"project":      projectMap,
@@ -274,12 +300,14 @@ func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo, approva
 
 	evalInput := map[string]any{
 		"plan":         planObj,
+		"cost":         costMap,
 		"approvals":    approvalMaps,
 		"reviews":      map[string]any{"approvals": approvalMaps},
 		"current_user": userMap,
 		"project":      projectMap,
 		"input": map[string]any{
 			"plan":      planObj,
+			"cost":      costMap,
 			"approvals": approvalMaps,
 		},
 	}

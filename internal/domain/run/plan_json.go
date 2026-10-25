@@ -18,6 +18,7 @@ type ParsedPlan struct {
 	Destroy          int
 	Resources        []ResourceDiff
 	Outputs          []OutputDiff
+	Cost             *CostEstimate
 }
 
 func (p *ParsedPlan) HasChanges() bool {
@@ -35,6 +36,8 @@ type ResourceDiff struct {
 	ActionSymbol   string
 	ActionLabel    string
 	ActionReason   string
+	CostDiff       string
+	CostSKU        string
 	Attributes     []AttributeDiff
 	UnchangedCount int
 	UnchangedAttrs []AttributeDiff
@@ -120,6 +123,13 @@ func ParsePlanJSON(raw []byte) (*ParsedPlan, error) {
 	out := &ParsedPlan{
 		FormatVersion:    doc.FormatVersion,
 		TerraformVersion: doc.TerraformVersion,
+		Cost:             EstimatePlanCost(trimmed),
+	}
+	costByAddr := make(map[string]ResourceCost)
+	if out.Cost != nil {
+		for _, rc := range out.Cost.Resources {
+			costByAddr[rc.Address] = rc
+		}
 	}
 	for _, rc := range doc.ResourceChanges {
 		action, sym, label := classifyActions(rc.Change.Actions)
@@ -141,6 +151,11 @@ func ParsePlanJSON(raw []byte) (*ParsedPlan, error) {
 		if addr == "" && rc.Type != "" && rc.Name != "" {
 			addr = rc.Type + "." + rc.Name
 		}
+		var costDiff, costSKU string
+		if c, ok := costByAddr[addr]; ok {
+			costDiff = c.FormattedDiff()
+			costSKU = c.SKU
+		}
 		out.Resources = append(out.Resources, ResourceDiff{
 			Address:        addr,
 			ModuleAddress:  rc.ModuleAddress,
@@ -152,6 +167,8 @@ func ParsePlanJSON(raw []byte) (*ParsedPlan, error) {
 			ActionSymbol:   sym,
 			ActionLabel:    label,
 			ActionReason:   humanActionReason(rc.ActionReason),
+			CostDiff:       costDiff,
+			CostSKU:        costSKU,
 			Attributes:     changed,
 			UnchangedCount: len(unchanged),
 			UnchangedAttrs: unchanged,
