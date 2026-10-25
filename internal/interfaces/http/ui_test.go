@@ -2503,11 +2503,11 @@ func TestDefaultBranchAutoDetectTagAutocompleteAndSettingsRedesign(t *testing.T)
 		}
 	}
 
-	// 4. GET /projects includes known-tags datalist on #filter-tag
+	// 4. GET /projects uses hidden #filter-tag input and clickable tag filter chips (no text input)
 	rr = getUI(t, h, "/projects")
 	listBody := rr.Body.String()
-	if !strings.Contains(listBody, `list="known-tags"`) || !strings.Contains(listBody, `<option value="env:prod">`) {
-		t.Fatalf("expected /projects to contain known-tags datalist, got:\n%s", listBody)
+	if !strings.Contains(listBody, `<input type="hidden" id="filter-tag"`) || !strings.Contains(listBody, `class="tag-pill tag-filter-btn" data-tag="env:prod"`) {
+		t.Fatalf("expected /projects to contain hidden #filter-tag and tag-filter-btn chips, got:\n%s", listBody)
 	}
 
 	// 5. GET /projects/p1/tabs/state and /projects/p1/tabs/dependencies use redesigned .form-section layout

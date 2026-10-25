@@ -1112,7 +1112,6 @@ button.tag-filter-btn:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 8px;
 }
 .tag-filter-btn.active {
   background: rgba(139, 124, 247, 0.22);

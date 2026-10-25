@@ -88,14 +88,13 @@
         <details class="filter-group" open>
           <summary class="filter-group-title">Tags</summary>
           <div class="filter-group-body">
-            <input type="text" id="filter-tag" name="tag" value="{{.FilterTag}}" placeholder="Filter by key:value..." list="known-tags" autocomplete="off">
+            <input type="hidden" id="filter-tag" name="tag" value="{{.FilterTag}}">
             {{if .KnownTags}}
-            <datalist id="known-tags">
-              {{range .KnownTags}}<option value="{{.}}">{{end}}
-            </datalist>
             <div class="filter-tag-chips">
               {{range .KnownTags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
             </div>
+            {{else}}
+            <span class="muted">No tags defined yet.</span>
             {{end}}
           </div>
         </details>
