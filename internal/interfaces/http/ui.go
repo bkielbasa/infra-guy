@@ -292,6 +292,17 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 	tagCounts := make(map[string]int)
 	versionCounts := make(map[string]int)
 
+	allRuns, err := u.cfg.Runs.ListSummariesByTenant(r.Context(), tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	runsByProject := make(map[run.ProjectID][]*run.Run, len(items))
+	for _, rn := range allRuns {
+		pid := rn.Snapshot().ProjectID
+		runsByProject[pid] = append(runsByProject[pid], rn)
+	}
+
 	for _, p := range items {
 		ps := p.Snapshot()
 		tags := project.TagList(ps.Tags)
@@ -324,11 +335,7 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 			Tags:             tags,
 		}
 
-		runs, err := u.cfg.Runs.ListByProject(r.Context(), ps.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		runs := runsByProject[run.ProjectID(ps.ID)]
 
 		for _, rn := range runs {
 			rs := rn.Snapshot()
@@ -865,10 +872,12 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		leadEvents     []leadEvent
-		deployEvents   []deployEvent
-		recoveryEvents []recoveryEvent
-		cfrEvents      []terminalTrackedEvent
+		leadEvents        []leadEvent
+		deployEvents      []deployEvent
+		recoveryEvents    []recoveryEvent
+		cfrEvents         []terminalTrackedEvent
+		resolvedIncidents int
+		activeIncidents   int
 	)
 
 	var (
@@ -916,6 +925,17 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 	authorCounts := make(map[string]int)
 	approverCounts := make(map[string]int)
 	versionCounts := make(map[string]int)
+
+	allRuns, err := u.cfg.Runs.ListSummariesByTenant(r.Context(), tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	runsByProject := make(map[run.ProjectID][]*run.Run, len(filteredProjects))
+	for _, rn := range allRuns {
+		pid := rn.Snapshot().ProjectID
+		runsByProject[pid] = append(runsByProject[pid], rn)
+	}
 
 	for _, p := range filteredProjects {
 		ps := p.Snapshot()
@@ -965,11 +985,7 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		runs, err := u.cfg.Runs.ListByProject(r.Context(), ps.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		runs := runsByProject[run.ProjectID(ps.ID)]
 
 		snaps := make([]run.Snapshot, 0, len(runs))
 		for _, rn := range runs {
@@ -1007,6 +1023,7 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 								At:       eventAt,
 								Duration: dur,
 							})
+							resolvedIncidents++
 						}
 					}
 					activeFailureAt = nil
@@ -1131,14 +1148,20 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 					for _, t := range tags {
 						tagStats[t].deployments++
 					}
-					if rs.FinishedAt != nil && !rs.CreatedAt.IsZero() && !rs.FinishedAt.Before(rs.CreatedAt) {
-						lt := rs.FinishedAt.Sub(rs.CreatedAt)
-						leadEvents = append(leadEvents, leadEvent{At: eventAt, Duration: lt})
-						wsLeadSum += lt
-						wsLeadCount++
-						for _, t := range tags {
-							tagStats[t].leadSum += lt
-							tagStats[t].leadCount++
+					if rs.FinishedAt != nil {
+						leadStart := rs.CreatedAt
+						if rs.CommittedAt != nil && !rs.CommittedAt.IsZero() && !rs.FinishedAt.Before(*rs.CommittedAt) {
+							leadStart = *rs.CommittedAt
+						}
+						if !leadStart.IsZero() && !rs.FinishedAt.Before(leadStart) {
+							lt := rs.FinishedAt.Sub(leadStart)
+							leadEvents = append(leadEvents, leadEvent{At: eventAt, Duration: lt})
+							wsLeadSum += lt
+							wsLeadCount++
+							for _, t := range tags {
+								tagStats[t].leadSum += lt
+								tagStats[t].leadCount++
+							}
 						}
 					}
 				case run.StatusFailed:
@@ -1149,6 +1172,25 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		}
+
+		if activeFailureAt != nil && now.After(*activeFailureAt) {
+			dur := now.Sub(*activeFailureAt)
+			if cutoff.IsZero() || !now.Before(cutoff) {
+				recoveryEvents = append(recoveryEvents, recoveryEvent{
+					At:       now,
+					Duration: dur,
+				})
+				activeIncidents++
+			}
+			risks = append(risks, analyticsRiskItem{
+				Severity:    "Active outage",
+				BadgeClass:  "pill-failed",
+				ProjectID:   string(ps.ID),
+				ProjectName: ps.Name,
+				Reason:      fmt.Sprintf("Unresolved failed tracked run for %s", fmtDurationShort(dur)),
+				ActionURL:   "/projects/" + string(ps.ID),
+			})
 		}
 
 		// Staleness check (> 14 days without a run)
@@ -1345,7 +1387,14 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 		avgMTTR := sum / time.Duration(len(recoveryEvents))
 		mttrCard.HasData = true
 		mttrCard.Value = fmtDurationShort(avgMTTR)
-		mttrCard.Subtext = fmt.Sprintf("Across %d resolved %s", len(recoveryEvents), pluralize(len(recoveryEvents), "incident", "incidents"))
+		switch {
+		case resolvedIncidents > 0 && activeIncidents > 0:
+			mttrCard.Subtext = fmt.Sprintf("Across %d resolved, %d active %s", resolvedIncidents, activeIncidents, pluralize(activeIncidents, "incident", "incidents"))
+		case activeIncidents > 0:
+			mttrCard.Subtext = fmt.Sprintf("Across %d active unresolved %s", activeIncidents, pluralize(activeIncidents, "incident", "incidents"))
+		default:
+			mttrCard.Subtext = fmt.Sprintf("Across %d resolved %s", resolvedIncidents, pluralize(resolvedIncidents, "incident", "incidents"))
+		}
 		switch {
 		case avgMTTR < time.Hour:
 			mttrCard.TierLabel, mttrCard.TierClass = "Elite", "pill-finished"

@@ -109,11 +109,13 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	}
 
 	prNumber := 42
+	committedAt := now.Add(-30 * time.Minute)
 	opened, err := run.Open(run.OpenInput{
 		ID: run.ID("run-" + suffix), ProjectID: run.ProjectID(projectID),
 		AutoApprove: true, PlanOnly: false, Trigger: run.TriggerPullRequest,
 		SHA: "abc123", Branch: "feature", Message: "add vpc", Author: "bart",
-		TriggeredBy: "github", PRNumber: &prNumber, PRTitle: "Add VPC", Now: now,
+		TriggeredBy: "github", PRNumber: &prNumber, PRTitle: "Add VPC",
+		CommittedAt: &committedAt, Now: now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,6 +153,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		gotR.Message != wantR.Message || gotR.Author != wantR.Author || gotR.TriggeredBy != wantR.TriggeredBy ||
 		gotR.PRNumber == nil || *gotR.PRNumber != prNumber || gotR.PRTitle != wantR.PRTitle ||
 		gotR.PlanOnly != wantR.PlanOnly || gotR.AutoApprove != wantR.AutoApprove ||
+		gotR.CommittedAt == nil || !gotR.CommittedAt.Equal(committedAt) ||
 		!gotR.CreatedAt.Equal(wantR.CreatedAt) || len(gotR.Steps) != len(wantR.Steps) {
 		t.Fatalf("run snapshot\nwant %#v\ngot  %#v", wantR, gotR)
 	}
@@ -184,6 +187,17 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	savedRun, err := runs.Get(ctx, opened.Snapshot().ID)
 	if err != nil || savedRun == nil || savedRun.Snapshot().TerraformVersion != "1.9.0" || string(savedRun.Snapshot().PlanJSON) != `{"format_version":"1.2"}` {
 		t.Fatalf("save/get: %v %#v", err, savedRun)
+	}
+
+	summaries, err := runs.ListSummariesByTenant(ctx, "ten-"+suffix)
+	if err != nil || len(summaries) != 1 {
+		t.Fatalf("ListSummariesByTenant: err=%v len=%d", err, len(summaries))
+	}
+	sumSnap := summaries[0].Snapshot()
+	if sumSnap.ID != opened.Snapshot().ID || sumSnap.Add != 1 || len(sumSnap.Steps) != 3 ||
+		sumSnap.CommittedAt == nil || !sumSnap.CommittedAt.Equal(committedAt) ||
+		sumSnap.PlanText != "" || len(sumSnap.PlanFile) != 0 || len(sumSnap.PlanJSON) != 0 {
+		t.Fatalf("unexpected summary snapshot: %#v", sumSnap)
 	}
 
 	st, err := states.Load(ctx, string(projectID))

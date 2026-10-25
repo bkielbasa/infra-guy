@@ -12,7 +12,10 @@ import (
 	"infra-guy/internal/domain/run"
 )
 
-var _ run.Repository = (*RunRepo)(nil)
+var (
+	_ run.Repository              = (*RunRepo)(nil)
+	_ run.TenantSummaryRepository = (*RunRepo)(nil)
+)
 
 type RunRepo struct{ pool *pgxpool.Pool }
 
@@ -21,11 +24,16 @@ func NewRunRepo(pool *pgxpool.Pool) *RunRepo { return &RunRepo{pool: pool} }
 const runColumns = `id, project_id, trigger, status, commit_sha, branch, commit_message, author,
 	triggered_by, pr_number, pr_title, plan_only, auto_approve, plan_text, plan_file, plan_json, add_count,
 	change_count, destroy_count, summary_present, terraform_version, error, approved_by, approved_at,
-	created_at, started_at, finished_at`
+	committed_at, created_at, started_at, finished_at`
+
+const runSummaryColumns = `r.id, r.project_id, r.trigger, r.status, r.commit_sha, r.branch, r.commit_message, r.author,
+	r.triggered_by, r.pr_number, r.pr_title, r.plan_only, r.auto_approve, r.add_count,
+	r.change_count, r.destroy_count, r.summary_present, r.terraform_version, r.error, r.approved_by, r.approved_at,
+	r.committed_at, r.created_at, r.started_at, r.finished_at`
 
 const insertIfAbsentSQL = `
-INSERT INTO runs (id, project_id, trigger, status, commit_sha, branch, commit_message, author, triggered_by, pr_number, pr_title, plan_only, auto_approve, plan_text, plan_file, plan_json, created_at)
-SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+INSERT INTO runs (id, project_id, trigger, status, commit_sha, branch, commit_message, author, triggered_by, pr_number, pr_title, plan_only, auto_approve, plan_text, plan_file, plan_json, committed_at, created_at)
+SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
 WHERE NOT EXISTS (
   SELECT 1 FROM runs
   WHERE project_id = $2 AND commit_sha = $5 AND trigger = $3
@@ -43,7 +51,7 @@ func (r *RunRepo) InsertIfAbsent(ctx context.Context, in *run.Run) (bool, error)
 
 	tag, err := tx.Exec(ctx, insertIfAbsentSQL,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
-		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.PlanText, s.PlanFile, s.PlanJSON, s.CreatedAt,
+		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.PlanText, s.PlanFile, s.PlanJSON, s.CommittedAt, s.CreatedAt,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -82,12 +90,12 @@ func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 			plan_only = $12, auto_approve = $13, plan_text = $14, plan_file = $15, plan_json = $16,
 			add_count = $17, change_count = $18, destroy_count = $19, summary_present = $20,
 			terraform_version = $21, error = $22, approved_by = $23, approved_at = $24,
-			created_at = $25, started_at = $26, finished_at = $27
+			committed_at = $25, created_at = $26, started_at = $27, finished_at = $28
 		WHERE id = $1`,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
 		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.PlanText, s.PlanFile, s.PlanJSON,
 		s.Add, s.Change, s.Destroy, s.SummaryPresent, s.TerraformVersion, s.Error, s.ApprovedBy,
-		s.ApprovedAt, s.CreatedAt, s.StartedAt, s.FinishedAt,
+		s.ApprovedAt, s.CommittedAt, s.CreatedAt, s.StartedAt, s.FinishedAt,
 	); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -131,33 +139,132 @@ func (r *RunRepo) ListByProject(ctx context.Context, projectID run.ProjectID) ([
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*run.Run
+	var snaps []run.Snapshot
+	var runIDs []string
 	for rows.Next() {
 		s, err := scanRun(rows)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, run.Restore(s))
+		snaps = append(snaps, s)
+		runIDs = append(runIDs, string(s.ID))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rebuilt := make([]*run.Run, 0, len(out))
-	for _, item := range out {
-		s := item.Snapshot()
-		steps, err := r.loadSteps(ctx, s.ID)
-		if err != nil {
-			return nil, err
-		}
-		s.Steps = steps
-		approvals, err := r.loadApprovals(ctx, s.ID)
-		if err != nil {
-			return nil, err
-		}
-		s.Approvals = approvals
-		rebuilt = append(rebuilt, run.Restore(s))
+	if len(snaps) == 0 {
+		return nil, nil
 	}
-	return rebuilt, nil
+	stepsByRun, err := r.loadStepsBatch(ctx, runIDs, true)
+	if err != nil {
+		return nil, err
+	}
+	approvalsByRun, err := r.loadApprovalsBatch(ctx, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*run.Run, 0, len(snaps))
+	for _, s := range snaps {
+		s.Steps = stepsByRun[s.ID]
+		s.Approvals = approvalsByRun[s.ID]
+		out = append(out, run.Restore(s))
+	}
+	return out, nil
+}
+
+func (r *RunRepo) ListSummariesByTenant(ctx context.Context, tenantID string) ([]*run.Run, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT `+runSummaryColumns+`
+		FROM runs r
+		JOIN projects p ON p.id = r.project_id
+		WHERE p.tenant_id = $1
+		ORDER BY r.created_at DESC, r.id`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var snaps []run.Snapshot
+	var runIDs []string
+	for rows.Next() {
+		s, err := scanRunSummary(rows)
+		if err != nil {
+			return nil, err
+		}
+		snaps = append(snaps, s)
+		runIDs = append(runIDs, string(s.ID))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(snaps) == 0 {
+		return nil, nil
+	}
+	stepsByRun, err := r.loadStepsBatch(ctx, runIDs, false)
+	if err != nil {
+		return nil, err
+	}
+	approvalsByRun, err := r.loadApprovalsBatch(ctx, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*run.Run, 0, len(snaps))
+	for _, s := range snaps {
+		s.Steps = stepsByRun[s.ID]
+		s.Approvals = approvalsByRun[s.ID]
+		out = append(out, run.Restore(s))
+	}
+	return out, nil
+}
+
+func (r *RunRepo) loadStepsBatch(ctx context.Context, runIDs []string, includeLogs bool) (map[run.ID][]run.Step, error) {
+	query := `
+		SELECT run_id, name, position, status, '' AS logs, exit_code, started_at, finished_at
+		FROM steps WHERE run_id = ANY($1) ORDER BY position`
+	if includeLogs {
+		query = `
+			SELECT run_id, name, position, status, logs, exit_code, started_at, finished_at
+			FROM steps WHERE run_id = ANY($1) ORDER BY position`
+	}
+	rows, err := r.pool.Query(ctx, query, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[run.ID][]run.Step, len(runIDs))
+	for rows.Next() {
+		var runID run.ID
+		var st run.Step
+		var started, finished *time.Time
+		if err := rows.Scan(&runID, &st.Name, &st.Position, &st.Status, &st.Logs, &st.ExitCode, &started, &finished); err != nil {
+			return nil, err
+		}
+		st.StartedAt = utcTimePtr(started)
+		st.FinishedAt = utcTimePtr(finished)
+		out[runID] = append(out[runID], st)
+	}
+	return out, rows.Err()
+}
+
+func (r *RunRepo) loadApprovalsBatch(ctx context.Context, runIDs []string) (map[run.ID][]run.Approval, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT run_id, user_id, user_login, user_role, approved_at
+		FROM run_approvals WHERE run_id = ANY($1) ORDER BY approved_at ASC, user_login ASC`, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[run.ID][]run.Approval, len(runIDs))
+	for rows.Next() {
+		var runID run.ID
+		var a run.Approval
+		var approvedAt time.Time
+		if err := rows.Scan(&runID, &a.UserID, &a.Login, &a.Role, &approvedAt); err != nil {
+			return nil, err
+		}
+		a.ApprovedAt = utcTime(approvedAt)
+		out[runID] = append(out[runID], a)
+	}
+	return out, rows.Err()
 }
 
 func (r *RunRepo) loadSteps(ctx context.Context, id run.ID) ([]run.Step, error) {
@@ -250,17 +357,39 @@ type runScanner interface {
 func scanRun(row runScanner) (run.Snapshot, error) {
 	var s run.Snapshot
 	var created time.Time
-	var started, finished, approved *time.Time
+	var started, finished, approved, committed *time.Time
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Trigger, &s.Status, &s.SHA, &s.Branch, &s.Message, &s.Author,
 		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.PlanText, &s.PlanFile, &s.PlanJSON,
 		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
-		&approved, &created, &started, &finished,
+		&approved, &committed, &created, &started, &finished,
 	)
 	if err != nil {
 		return run.Snapshot{}, err
 	}
 	s.ApprovedAt = utcTimePtr(approved)
+	s.CommittedAt = utcTimePtr(committed)
+	s.CreatedAt = utcTime(created)
+	s.StartedAt = utcTimePtr(started)
+	s.FinishedAt = utcTimePtr(finished)
+	return s, nil
+}
+
+func scanRunSummary(row runScanner) (run.Snapshot, error) {
+	var s run.Snapshot
+	var created time.Time
+	var started, finished, approved, committed *time.Time
+	err := row.Scan(
+		&s.ID, &s.ProjectID, &s.Trigger, &s.Status, &s.SHA, &s.Branch, &s.Message, &s.Author,
+		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove,
+		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
+		&approved, &committed, &created, &started, &finished,
+	)
+	if err != nil {
+		return run.Snapshot{}, err
+	}
+	s.ApprovedAt = utcTimePtr(approved)
+	s.CommittedAt = utcTimePtr(committed)
 	s.CreatedAt = utcTime(created)
 	s.StartedAt = utcTimePtr(started)
 	s.FinishedAt = utcTimePtr(finished)

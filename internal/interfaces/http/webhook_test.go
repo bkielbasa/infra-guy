@@ -24,9 +24,12 @@ import (
 )
 
 type fakeOpen struct {
-	mu   sync.Mutex
-	reqs []runapp.OpenRequest
-	err  error
+	mu        sync.Mutex
+	reqs      []runapp.OpenRequest
+	runsByPrj map[project.ID][]*run.Run
+	approvals map[run.ID][]run.Approval
+	confirmed map[run.ID]string
+	err       error
 }
 
 func (f *fakeOpen) Open(_ context.Context, in runapp.OpenRequest) (*run.Run, error) {
@@ -34,6 +37,35 @@ func (f *fakeOpen) Open(_ context.Context, in runapp.OpenRequest) (*run.Run, err
 	defer f.mu.Unlock()
 	f.reqs = append(f.reqs, in)
 	return nil, f.err
+}
+
+func (f *fakeOpen) ListByProject(_ context.Context, projectID project.ID) ([]*run.Run, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.runsByPrj == nil {
+		return nil, nil
+	}
+	return f.runsByPrj[projectID], nil
+}
+
+func (f *fakeOpen) Approve(_ context.Context, id run.ID, a run.Approval) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.approvals == nil {
+		f.approvals = make(map[run.ID][]run.Approval)
+	}
+	f.approvals[id] = append(f.approvals[id], a)
+	return nil
+}
+
+func (f *fakeOpen) Confirm(_ context.Context, id run.ID, actor string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.confirmed == nil {
+		f.confirmed = make(map[run.ID]string)
+	}
+	f.confirmed[id] = actor
+	return nil
 }
 
 func (f *fakeOpen) calls() []runapp.OpenRequest {
@@ -48,6 +80,9 @@ func (f *fakeOpen) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reqs = nil
+	f.runsByPrj = nil
+	f.approvals = nil
+	f.confirmed = nil
 	f.err = nil
 }
 
@@ -600,6 +635,155 @@ func TestGitHubWebhook(t *testing.T) {
 		rr = postWebhook(t, h, "push", secret, pushPayload, "")
 		if rr.Code != http.StatusOK || len(open.calls()) != 0 {
 			t.Fatalf("post-suspend push code=%d calls=%d", rr.Code, len(open.calls()))
+		}
+	})
+}
+
+func TestWebhookMonorepoPathFilteringAndChatOps(t *testing.T) {
+	const secret = "app-secret"
+	ctx := context.Background()
+
+	instStore := newMemInstallationStore()
+	instSvc := &installation.Service{
+		Store: instStore,
+		NewID: func() string { return "id-1" },
+		Now:   time.Now,
+	}
+	ten, err := instStore.UpsertTenant(ctx, tenant.Tenant{
+		ID: "ten-1", Name: "acme", AccountType: "organization", GitHubAccountID: 50,
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := instStore.UpsertInstallation(ctx, tenant.Installation{
+		ID: "inst-9", TenantID: ten.ID, AccountLogin: "acme", AccountType: "organization",
+		GitHubInstallationID: 9, Active: true,
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	projects := newWebhookProjects()
+	pProd := makeProject(t, "p-prod", "infra-prod", "ten-1", 5, "main")
+	if err := pProd.SetWorkingDirectory("envs/prod"); err != nil {
+		t.Fatal(err)
+	}
+	pStage := makeProject(t, "p-stage", "infra-stage", "ten-1", 5, "main")
+	if err := pStage.SetWorkingDirectory("envs/stage"); err != nil {
+		t.Fatal(err)
+	}
+	_ = projects.Save(ctx, pProd)
+	_ = projects.Save(ctx, pStage)
+
+	open := &fakeOpen{}
+	projSvc := &projectapp.Service{Projects: projects, Now: time.Now}
+	h := New(nil, open, projSvc, WithWebhook(instSvc, secret))
+
+	t.Run("monorepo push only opens workspace matching modified path and parses committed_at", func(t *testing.T) {
+		open.reset()
+		payload := []byte(`{
+			"ref":"refs/heads/main",
+			"after":"1111111111111111111111111111111111111111",
+			"commits":[{"added":[],"modified":["envs/prod/main.tf"],"removed":[]}],
+			"head_commit":{
+				"message":"update prod vpc",
+				"timestamp":"2026-10-24T12:30:00Z",
+				"author":{"name":"Alice"}
+			},
+			"sender":{"login":"alice"},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}}
+		}`)
+		rr := postWebhook(t, h, "push", secret, payload, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("push code=%d", rr.Code)
+		}
+		calls := open.calls()
+		if len(calls) != 1 || calls[0].ProjectID != "p-prod" {
+			t.Fatalf("expected only p-prod to open, got %#v", calls)
+		}
+		wantCommitted := time.Date(2026, 10, 24, 12, 30, 0, 0, time.UTC)
+		if calls[0].CommittedAt == nil || !calls[0].CommittedAt.Equal(wantCommitted) {
+			t.Fatalf("expected CommittedAt=%v, got %#v", wantCommitted, calls[0].CommittedAt)
+		}
+	})
+
+	t.Run("ChatOps /infra-guy plan, approve, and apply on pull_request issue_comment", func(t *testing.T) {
+		open.reset()
+		prNum := 77
+		committed := time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC)
+		rProdWait := run.Restore(run.Snapshot{
+			ID: "r-prod-wait", ProjectID: "p-prod", Trigger: run.TriggerPullRequest,
+			Status: run.StatusNeedsApproval, SHA: "abcdef1234567890", Branch: "feat/vpc",
+			PRNumber: &prNum, PRTitle: "VPC peer", CommittedAt: &committed,
+		})
+		rStagePlanned := run.Restore(run.Snapshot{
+			ID: "r-stage-plan", ProjectID: "p-stage", Trigger: run.TriggerPullRequest,
+			PlanOnly: true, Status: run.StatusPlanned, SHA: "abcdef1234567890", Branch: "feat/vpc",
+			PRNumber: &prNum, PRTitle: "VPC peer", CommittedAt: &committed,
+		})
+		open.runsByPrj = map[project.ID][]*run.Run{
+			"p-prod":  {rProdWait},
+			"p-stage": {rStagePlanned},
+		}
+
+		// 1. /infra-guy approve infra-prod
+		approvePayload := []byte(`{
+			"action":"created",
+			"issue":{"number":77,"title":"VPC peer","pull_request":{"url":"https://api.github.com/repos/acme/infra/pulls/77"}},
+			"comment":{"body":"/infra-guy approve infra-prod"},
+			"sender":{"id":42,"login":"reviewer"},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}}
+		}`)
+		rr := postWebhook(t, h, "issue_comment", secret, approvePayload, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("approve comment code=%d", rr.Code)
+		}
+		if len(open.approvals["r-prod-wait"]) != 1 || open.approvals["r-prod-wait"][0].Login != "reviewer" {
+			t.Fatalf("expected approval on r-prod-wait by reviewer, got %#v", open.approvals)
+		}
+		if len(open.approvals["r-stage-plan"]) != 0 {
+			t.Fatalf("did not expect approval on p-stage when targeting infra-prod")
+		}
+
+		// 2. /infra-guy apply (confirms r-prod-wait and opens non-plan-only run on p-stage)
+		applyPayload := []byte(`{
+			"action":"created",
+			"issue":{"number":77,"title":"VPC peer","pull_request":{"url":"https://api.github.com/repos/acme/infra/pulls/77"}},
+			"comment":{"body":"/infra-guy apply"},
+			"sender":{"id":42,"login":"reviewer"},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}}
+		}`)
+		rr = postWebhook(t, h, "issue_comment", secret, applyPayload, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("apply comment code=%d", rr.Code)
+		}
+		if open.confirmed["r-prod-wait"] != "reviewer" {
+			t.Fatalf("expected r-prod-wait confirmed by reviewer, got %#v", open.confirmed)
+		}
+		calls := open.calls()
+		if len(calls) != 1 || calls[0].ProjectID != "p-stage" || calls[0].PlanOnly || calls[0].SHA != "abcdef1234567890" {
+			t.Fatalf("expected non-plan-only run opened for p-stage, got %#v", calls)
+		}
+
+		// 3. /infra-guy plan infra-stage
+		open.reqs = nil
+		planPayload := []byte(`{
+			"action":"created",
+			"issue":{"number":77,"title":"VPC peer","pull_request":{"url":"https://api.github.com/repos/acme/infra/pulls/77"}},
+			"comment":{"body":"/infra-guy plan infra-stage"},
+			"sender":{"id":42,"login":"reviewer"},
+			"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+			"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}}
+		}`)
+		rr = postWebhook(t, h, "issue_comment", secret, planPayload, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("plan comment code=%d", rr.Code)
+		}
+		calls = open.calls()
+		if len(calls) != 1 || calls[0].ProjectID != "p-stage" || !calls[0].PlanOnly {
+			t.Fatalf("expected plan-only run opened for p-stage, got %#v", calls)
 		}
 	})
 }

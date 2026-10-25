@@ -13,3 +13,10 @@ type Repository interface {
 	Get(ctx context.Context, id ID) (*Run, error)
 	ListByProject(ctx context.Context, projectID ProjectID) ([]*Run, error)
 }
+
+// TenantSummaryRepository is an optional fast-path interface implemented by
+// repositories that can fetch lightweight run summaries (without heavy plan
+// blobs) for all workspaces in a tenant in a single batch.
+type TenantSummaryRepository interface {
+	ListSummariesByTenant(ctx context.Context, tenantID string) ([]*Run, error)
+}

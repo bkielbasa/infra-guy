@@ -9,7 +9,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path"
+	"strconv"
 	"strings"
+	"time"
 
 	"infra-guy/internal/application/installation"
 	runapp "infra-guy/internal/application/run"
@@ -19,6 +22,13 @@ import (
 
 type opener interface {
 	Open(context.Context, runapp.OpenRequest) (*run.Run, error)
+}
+
+type chatOpsRunner interface {
+	opener
+	ListByProject(ctx context.Context, projectID project.ID) ([]*run.Run, error)
+	Approve(ctx context.Context, id run.ID, a run.Approval) error
+	Confirm(ctx context.Context, id run.ID, actor string) error
 }
 
 func validSignature(secret, header string, body []byte) bool {
@@ -136,7 +146,7 @@ func (a *api) webhook(w http.ResponseWriter, r *http.Request) {
 	switch event {
 	case "push":
 		for _, p := range matched {
-			req, ok := pushOpen(p.Snapshot().ID, p.Snapshot().DefaultBranch, body)
+			req, ok := pushOpen(p.Snapshot(), body)
 			if !ok {
 				continue
 			}
@@ -150,7 +160,7 @@ func (a *api) webhook(w http.ResponseWriter, r *http.Request) {
 		}
 	case "pull_request":
 		for _, p := range matched {
-			req, ok := pullRequestOpen(p.Snapshot().ID, body)
+			req, ok := pullRequestOpen(p.Snapshot(), body)
 			if !ok {
 				continue
 			}
@@ -162,19 +172,70 @@ func (a *api) webhook(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	case "issue_comment":
+		if err := a.handleIssueComment(r.Context(), matched, body); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
 }
 
-func pullRequestOpen(id project.ID, body []byte) (runapp.OpenRequest, bool) {
+func parseRFC3339Ptr(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		utc := t.UTC()
+		return &utc
+	}
+	return nil
+}
+
+func matchesProjectPaths(ps project.Snapshot, changedFiles []string) bool {
+	if len(changedFiles) == 0 {
+		return true
+	}
+	var prefixes []string
+	if wd := strings.Trim(strings.TrimSpace(ps.WorkingDirectory), "/"); wd != "" && wd != "." {
+		prefixes = append(prefixes, wd)
+	}
+	if watchTag := strings.Trim(strings.TrimSpace(ps.Tags["watch"]), "/"); watchTag != "" {
+		prefixes = append(prefixes, watchTag)
+	}
+	if len(prefixes) == 0 {
+		return true
+	}
+	for _, rawFile := range changedFiles {
+		f := strings.Trim(strings.TrimSpace(rawFile), "/")
+		if f == "" {
+			continue
+		}
+		for _, pref := range prefixes {
+			if f == pref || strings.HasPrefix(f, pref+"/") {
+				return true
+			}
+			if matched, err := path.Match(pref, f); err == nil && matched {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pullRequestOpen(ps project.Snapshot, body []byte) (runapp.OpenRequest, bool) {
 	var ev struct {
-		Action      string `json:"action"`
+		Action      string   `json:"action"`
+		Files       []string `json:"files"`
 		PullRequest struct {
-			Number int    `json:"number"`
-			Title  string `json:"title"`
-			Draft  bool   `json:"draft"`
-			Head   struct {
+			Number            int      `json:"number"`
+			Title             string   `json:"title"`
+			Draft             bool     `json:"draft"`
+			CreatedAt         string   `json:"created_at"`
+			ChangedFilesPaths []string `json:"changed_files_paths"`
+			Head              struct {
 				SHA  string `json:"sha"`
 				Ref  string `json:"ref"`
 				Repo *struct {
@@ -203,26 +264,43 @@ func pullRequestOpen(id project.ID, body []byte) (runapp.OpenRequest, bool) {
 	if ev.PullRequest.Draft {
 		return runapp.OpenRequest{}, false
 	}
+	var changedFiles []string
+	changedFiles = append(changedFiles, ev.Files...)
+	changedFiles = append(changedFiles, ev.PullRequest.ChangedFilesPaths...)
+	if !matchesProjectPaths(ps, changedFiles) {
+		return runapp.OpenRequest{}, false
+	}
 	n := ev.PullRequest.Number
 	return runapp.OpenRequest{
-		ProjectID:   id,
+		ProjectID:   ps.ID,
 		Trigger:     run.TriggerPullRequest,
 		SHA:         ev.PullRequest.Head.SHA,
 		Branch:      ev.PullRequest.Head.Ref,
 		TriggeredBy: ev.Sender.Login,
 		PRTitle:     ev.PullRequest.Title,
 		PRNumber:    &n,
+		CommittedAt: parseRFC3339Ptr(ev.PullRequest.CreatedAt),
 		PlanOnly:    true,
 	}, true
 }
 
-func pushOpen(id project.ID, defaultBranch string, body []byte) (runapp.OpenRequest, bool) {
+func pushOpen(ps project.Snapshot, body []byte) (runapp.OpenRequest, bool) {
+	type commitFiles struct {
+		Added    []string `json:"added"`
+		Modified []string `json:"modified"`
+		Removed  []string `json:"removed"`
+	}
 	var ev struct {
-		Ref        string `json:"ref"`
-		After      string `json:"after"`
+		Ref        string        `json:"ref"`
+		After      string        `json:"after"`
+		Commits    []commitFiles `json:"commits"`
 		HeadCommit struct {
-			Message string `json:"message"`
-			Author  struct {
+			Message   string   `json:"message"`
+			Timestamp string   `json:"timestamp"`
+			Added     []string `json:"added"`
+			Modified  []string `json:"modified"`
+			Removed   []string `json:"removed"`
+			Author    struct {
 				Name string `json:"name"`
 			} `json:"author"`
 		} `json:"head_commit"`
@@ -237,17 +315,207 @@ func pushOpen(id project.ID, defaultBranch string, body []byte) (runapp.OpenRequ
 		return runapp.OpenRequest{}, false
 	}
 	const heads = "refs/heads/"
-	if ev.Ref != heads+defaultBranch {
+	if ev.Ref != heads+ps.DefaultBranch {
+		return runapp.OpenRequest{}, false
+	}
+	var changedFiles []string
+	for _, c := range ev.Commits {
+		changedFiles = append(changedFiles, c.Added...)
+		changedFiles = append(changedFiles, c.Modified...)
+		changedFiles = append(changedFiles, c.Removed...)
+	}
+	changedFiles = append(changedFiles, ev.HeadCommit.Added...)
+	changedFiles = append(changedFiles, ev.HeadCommit.Modified...)
+	changedFiles = append(changedFiles, ev.HeadCommit.Removed...)
+	if !matchesProjectPaths(ps, changedFiles) {
 		return runapp.OpenRequest{}, false
 	}
 	return runapp.OpenRequest{
-		ProjectID:   id,
+		ProjectID:   ps.ID,
 		Trigger:     run.TriggerPush,
 		SHA:         ev.After,
 		Branch:      strings.TrimPrefix(ev.Ref, heads),
 		Message:     ev.HeadCommit.Message,
 		Author:      ev.HeadCommit.Author.Name,
 		TriggeredBy: ev.Sender.Login,
+		CommittedAt: parseRFC3339Ptr(ev.HeadCommit.Timestamp),
 		PlanOnly:    false,
 	}, true
+}
+
+func parseChatOpsCommand(body string) (cmd string, targetProject string, ok bool) {
+	for _, line := range strings.Split(body, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		if !strings.EqualFold(fields[0], "/infra-guy") {
+			continue
+		}
+		switch strings.ToLower(fields[1]) {
+		case "plan":
+			cmd = "plan"
+		case "approve":
+			cmd = "approve"
+		case "apply", "confirm":
+			cmd = "apply"
+		default:
+			continue
+		}
+		if len(fields) >= 3 {
+			targetProject = fields[2]
+		}
+		return cmd, targetProject, true
+	}
+	return "", "", false
+}
+
+func (a *api) handleIssueComment(ctx context.Context, matched []*project.Project, body []byte) error {
+	var ev struct {
+		Action string `json:"action"`
+		Issue  struct {
+			Number      int    `json:"number"`
+			Title       string `json:"title"`
+			PullRequest *struct {
+				URL string `json:"url"`
+			} `json:"pull_request"`
+		} `json:"issue"`
+		Comment struct {
+			Body string `json:"body"`
+		} `json:"comment"`
+		Sender struct {
+			ID    int64  `json:"id"`
+			Login string `json:"login"`
+		} `json:"sender"`
+	}
+	if json.Unmarshal(body, &ev) != nil {
+		return nil
+	}
+	if ev.Action != "created" || ev.Issue.PullRequest == nil || ev.Issue.Number <= 0 {
+		return nil
+	}
+	cmd, targetProject, ok := parseChatOpsCommand(ev.Comment.Body)
+	if !ok {
+		return nil
+	}
+	prNum := ev.Issue.Number
+	runner, hasRunner := a.open.(chatOpsRunner)
+
+	for _, p := range matched {
+		ps := p.Snapshot()
+		if targetProject != "" && !strings.EqualFold(ps.Name, targetProject) {
+			continue
+		}
+
+		var (
+			latestPRRun         *run.Snapshot
+			latestNeedsApproval *run.Snapshot
+			latestApprovable    *run.Snapshot
+		)
+		if hasRunner {
+			runs, err := runner.ListByProject(ctx, ps.ID)
+			if err != nil {
+				return err
+			}
+			for _, rn := range runs {
+				rs := rn.Snapshot()
+				matchesPR := rs.PRNumber != nil && *rs.PRNumber == prNum
+				if matchesPR && latestPRRun == nil {
+					cp := rs
+					latestPRRun = &cp
+				}
+				if rs.Status == run.StatusNeedsApproval {
+					if matchesPR || latestNeedsApproval == nil {
+						cp := rs
+						latestNeedsApproval = &cp
+					}
+				}
+				if rs.Status == run.StatusNeedsApproval || (rs.PlanOnly && rs.Status == run.StatusPlanned) {
+					if matchesPR || latestApprovable == nil {
+						cp := rs
+						latestApprovable = &cp
+					}
+				}
+			}
+		}
+
+		switch cmd {
+		case "plan":
+			if latestPRRun == nil || latestPRRun.SHA == "" {
+				continue
+			}
+			title := latestPRRun.PRTitle
+			if title == "" {
+				title = ev.Issue.Title
+			}
+			_, err := a.open.Open(ctx, runapp.OpenRequest{
+				ProjectID:   ps.ID,
+				Trigger:     run.TriggerPullRequest,
+				SHA:         latestPRRun.SHA,
+				Branch:      latestPRRun.Branch,
+				TriggeredBy: ev.Sender.Login,
+				PRTitle:     title,
+				PRNumber:    &prNum,
+				CommittedAt: latestPRRun.CommittedAt,
+				PlanOnly:    true,
+			})
+			if err != nil && !errors.Is(err, runapp.ErrDuplicate) {
+				return err
+			}
+		case "approve":
+			if !hasRunner || latestApprovable == nil {
+				continue
+			}
+			var senderID string
+			if ev.Sender.ID > 0 {
+				senderID = strconv.FormatInt(ev.Sender.ID, 10)
+			}
+			err := runner.Approve(ctx, latestApprovable.ID, run.Approval{
+				UserID: senderID,
+				Login:  ev.Sender.Login,
+				Role:   "maintainer",
+			})
+			if err != nil && !errors.Is(err, run.ErrNotUnconfirmed) {
+				return err
+			}
+		case "apply":
+			if hasRunner && latestNeedsApproval != nil {
+				var senderID string
+				if ev.Sender.ID > 0 {
+					senderID = strconv.FormatInt(ev.Sender.ID, 10)
+				}
+				_ = runner.Approve(ctx, latestNeedsApproval.ID, run.Approval{
+					UserID: senderID,
+					Login:  ev.Sender.Login,
+					Role:   "maintainer",
+				})
+				err := runner.Confirm(ctx, latestNeedsApproval.ID, ev.Sender.Login)
+				if err != nil && !errors.Is(err, run.ErrNotUnconfirmed) {
+					return err
+				}
+				continue
+			}
+			if latestPRRun != nil && latestPRRun.SHA != "" {
+				title := latestPRRun.PRTitle
+				if title == "" {
+					title = ev.Issue.Title
+				}
+				_, err := a.open.Open(ctx, runapp.OpenRequest{
+					ProjectID:   ps.ID,
+					Trigger:     run.TriggerPullRequest,
+					SHA:         latestPRRun.SHA,
+					Branch:      latestPRRun.Branch,
+					TriggeredBy: ev.Sender.Login,
+					PRTitle:     title,
+					PRNumber:    &prNum,
+					CommittedAt: latestPRRun.CommittedAt,
+					PlanOnly:    false,
+				})
+				if err != nil && !errors.Is(err, runapp.ErrDuplicate) {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }

@@ -118,6 +118,7 @@ type OpenInput struct {
 	TriggeredBy string
 	PRNumber    *int
 	PRTitle     string
+	CommittedAt *time.Time
 	Now         time.Time
 }
 
@@ -154,6 +155,7 @@ type Snapshot struct {
 	ApprovedBy       string
 	ApprovedAt       *time.Time
 	Approvals        []Approval
+	CommittedAt      *time.Time
 	CreatedAt        time.Time
 	StartedAt        *time.Time
 	FinishedAt       *time.Time
@@ -173,11 +175,16 @@ func Open(in OpenInput) (*Run, error) {
 	if !in.PlanOnly {
 		steps = append(steps, Step{Name: StepApply, Position: 3, Status: StepPending})
 	}
+	var committedAt *time.Time
+	if in.CommittedAt != nil && !in.CommittedAt.IsZero() {
+		ts := in.CommittedAt.UTC()
+		committedAt = &ts
+	}
 	return &Run{s: Snapshot{
 		ID: in.ID, ProjectID: in.ProjectID, Trigger: in.Trigger, Status: StatusQueued,
 		SHA: in.SHA, Branch: in.Branch, Message: in.Message, Author: in.Author,
 		TriggeredBy: in.TriggeredBy, PRNumber: in.PRNumber, PRTitle: in.PRTitle,
-		PlanOnly: in.PlanOnly, AutoApprove: in.AutoApprove, CreatedAt: in.Now, Steps: steps,
+		PlanOnly: in.PlanOnly, AutoApprove: in.AutoApprove, CommittedAt: committedAt, CreatedAt: in.Now, Steps: steps,
 	}}, nil
 }
 

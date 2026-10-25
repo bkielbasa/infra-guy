@@ -42,6 +42,7 @@ type OpenRequest struct {
 	TriggeredBy string
 	PRTitle     string
 	PRNumber    *int
+	CommittedAt *time.Time
 	PlanOnly    bool
 }
 
@@ -91,6 +92,34 @@ func (s *Service) ListByProject(ctx context.Context, projectID project.ID) ([]*r
 	return s.Runs.ListByProject(ctx, run.ProjectID(projectID))
 }
 
+func (s *Service) ListSummariesByTenant(ctx context.Context, tenantID string) ([]*run.Run, error) {
+	if tsr, ok := s.Runs.(run.TenantSummaryRepository); ok {
+		return tsr.ListSummariesByTenant(ctx, tenantID)
+	}
+	if s.Projects == nil {
+		return nil, nil
+	}
+	projects, err := s.Projects.List(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	var out []*run.Run
+	for _, p := range projects {
+		runs, err := s.Runs.ListByProject(ctx, run.ProjectID(p.Snapshot().ID))
+		if err != nil {
+			return nil, err
+		}
+		for _, rn := range runs {
+			rs := rn.Snapshot()
+			rs.PlanText = ""
+			rs.PlanFile = nil
+			rs.PlanJSON = nil
+			out = append(out, run.Restore(rs))
+		}
+	}
+	return out, nil
+}
+
 func (s *Service) Open(ctx context.Context, in OpenRequest) (*run.Run, error) {
 	p, err := s.Projects.Get(ctx, in.ProjectID)
 	if err != nil {
@@ -103,7 +132,8 @@ func (s *Service) Open(ctx context.Context, in OpenRequest) (*run.Run, error) {
 		ID: run.ID(s.NewID()), ProjectID: run.ProjectID(in.ProjectID),
 		AutoApprove: p.Snapshot().AutoApprove, PlanOnly: in.PlanOnly, Trigger: in.Trigger,
 		SHA: in.SHA, Branch: in.Branch, Message: in.Message, Author: in.Author,
-		TriggeredBy: in.TriggeredBy, PRNumber: in.PRNumber, PRTitle: in.PRTitle, Now: s.Now(),
+		TriggeredBy: in.TriggeredBy, PRNumber: in.PRNumber, PRTitle: in.PRTitle,
+		CommittedAt: in.CommittedAt, Now: s.Now(),
 	})
 	if err != nil {
 		return nil, err

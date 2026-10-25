@@ -35,10 +35,12 @@ import (
 )
 
 type memRuns struct {
-	items     map[run.ID]*run.Run
-	duplicate bool
-	insertErr error
-	saveErr   error
+	items                      map[run.ID]*run.Run
+	duplicate                  bool
+	insertErr                  error
+	saveErr                    error
+	listByProjectCalls         int
+	listSummariesByTenantCalls int
 }
 
 func (m *memRuns) InsertIfAbsent(_ context.Context, r *run.Run) (bool, error) {
@@ -60,11 +62,24 @@ func (m *memRuns) Save(_ context.Context, r *run.Run) error {
 }
 func (m *memRuns) Get(_ context.Context, id run.ID) (*run.Run, error) { return m.items[id], nil }
 func (m *memRuns) ListByProject(_ context.Context, projectID run.ProjectID) ([]*run.Run, error) {
+	m.listByProjectCalls++
 	var out []*run.Run
 	for _, r := range m.items {
 		if r.Snapshot().ProjectID == projectID {
 			out = append(out, r)
 		}
+	}
+	return out, nil
+}
+func (m *memRuns) ListSummariesByTenant(_ context.Context, _ string) ([]*run.Run, error) {
+	m.listSummariesByTenantCalls++
+	var out []*run.Run
+	for _, r := range m.items {
+		rs := r.Snapshot()
+		rs.PlanText = ""
+		rs.PlanFile = nil
+		rs.PlanJSON = nil
+		out = append(out, run.Restore(rs))
 	}
 	return out, nil
 }
@@ -3097,6 +3112,102 @@ func TestAnalyticsDORAAndMetricsWithData(t *testing.T) {
 		if !strings.Contains(metricsBody, want) {
 			t.Fatalf("expected Metrics tab to contain %q, got:\n%s", want, metricsBody)
 		}
+	}
+}
+
+func TestAnalyticsCommittedAtActiveMTTRAndBatchQuery(t *testing.T) {
+	now := time.Date(2026, 10, 24, 15, 0, 0, 0, time.UTC)
+	repo, _ := project.ParseSourceRepo("acme/infra")
+
+	p1, _ := project.New("p-1", "core-net", repo, now.Add(-10*24*time.Hour))
+	_ = p1.SetPlacement("ten", 10)
+	_ = p1.SetTags(map[string]string{"env": "prod"})
+
+	p2, _ := project.New("p-2", "core-db", repo, now.Add(-10*24*time.Hour))
+	_ = p2.SetPlacement("ten", 10)
+	_ = p2.SetTags(map[string]string{"env": "prod"})
+
+	projects := &memProjects{items: map[project.ID]*project.Project{
+		"p-1": p1,
+		"p-2": p2,
+	}}
+
+	// Run 1 on p-1: CommittedAt 5h ago, CreatedAt 2h ago, FinishedAt 1h ago -> Lead time should be 4h 0m (from CommittedAt!)
+	committedAt := now.Add(-5 * time.Hour)
+	createdAt := now.Add(-2 * time.Hour)
+	finishedAt := now.Add(-1 * time.Hour)
+	r1 := run.Restore(run.Snapshot{
+		ID: "r-1", ProjectID: "p-1", Trigger: run.TriggerPush,
+		Status: run.StatusSucceeded, Branch: "main", SHA: "1111111",
+		CommittedAt: &committedAt, CreatedAt: createdAt, StartedAt: &createdAt, FinishedAt: &finishedAt,
+	})
+
+	// Run 2 on p-2: Failed 3h ago and STILL UNRESOLVED -> Active incident of 3h 0m in MTTR!
+	failAt := now.Add(-3 * time.Hour)
+	r2 := run.Restore(run.Snapshot{
+		ID: "r-2", ProjectID: "p-2", Trigger: run.TriggerPush,
+		Status: run.StatusFailed, Branch: "main", SHA: "2222222",
+		CreatedAt: failAt, StartedAt: &failAt, FinishedAt: &failAt,
+	})
+
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"r-1": r1,
+		"r-2": r2,
+	}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc,
+		Runs:     runsSvc,
+		States:   stSvc,
+		Checkout: &stubTip{sha: "abc1234"},
+		Lookup:   &stubLookup{},
+		Tokens:   uiTokenSource{store: store},
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+	})
+
+	// Verify GET / uses ListSummariesByTenant (1 call) and 0 ListByProject calls
+	rr := getUI(t, h, "/")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET / = %d", rr.Code)
+	}
+	if runs.listSummariesByTenantCalls != 1 || runs.listByProjectCalls != 0 {
+		t.Fatalf("expected 1 ListSummariesByTenant call and 0 ListByProject calls on /, got %d and %d",
+			runs.listSummariesByTenantCalls, runs.listByProjectCalls)
+	}
+
+	// Verify GET /analytics uses ListSummariesByTenant, CommittedAt lead time (4h 0m), and active incident MTTR (3h 0m)
+	rr = getUI(t, h, "/analytics?window=30d")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /analytics = %d: %s", rr.Code, body)
+	}
+	if runs.listSummariesByTenantCalls != 2 || runs.listByProjectCalls != 0 {
+		t.Fatalf("expected 2 total ListSummariesByTenant calls and 0 ListByProject calls, got %d and %d",
+			runs.listSummariesByTenantCalls, runs.listByProjectCalls)
+	}
+	for _, want := range []string{
+		`4h 0m`, // Lead time from CommittedAt (-5h) to FinishedAt (-1h)
+		`3h 0m`, // Active unresolved incident duration from -3h to now
+		`Across 1 active unresolved incident`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected analytics body to contain %q, got:\n%s", want, body)
+		}
+	}
+
+	rr = getUI(t, h, "/analytics?tab=metrics&window=30d")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `Active outage`) {
+		t.Fatalf("expected metrics tab to contain Active outage risk, got:\n%s", rr.Body.String())
 	}
 }
 
