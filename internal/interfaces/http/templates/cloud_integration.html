@@ -1,0 +1,163 @@
+{{define "cloud_integration"}}
+<nav class="crumb"><a href="/cloud-integrations">Cloud Integrations</a> / {{.Name}}</nav>
+<div class="panel form-panel">
+  <div class="headline headline-spread form-header">
+    <div>
+      <h1>{{.Name}}</h1>
+      <p class="sub">{{.ProviderLabel}} &middot; {{.AuthMethodLabel}}</p>
+      {{if .TagList}}
+      <div class="tag-pills" style="margin-top: 8px;">
+        {{range .TagList}}<span class="tag-pill">{{.}}</span>{{end}}
+      </div>
+      {{end}}
+    </div>
+  </div>
+
+  <section class="form-section">
+    <h2>OIDC Trust Configuration</h2>
+    <p class="sub">Configure your cloud provider's identity trust policy with the following OIDC claims:</p>
+    <div class="form-grid" style="margin-top: 10px;">
+      <div class="field">
+        <label>Issuer URL</label>
+        <code>{{.OIDCIssuer}}</code>
+      </div>
+      <div class="field">
+        <label>Audience (<code>aud</code>)</label>
+        <code>{{.OIDCAudience}}</code>
+      </div>
+      <div class="field">
+        <label>Subject (<code>sub</code>) Pattern</label>
+        <code>tenant:&lt;tenant&gt;:project:&lt;workspace-name&gt;:branch:&lt;branch&gt;:trigger:&lt;trigger&gt;</code>
+      </div>
+    </div>
+  </section>
+
+  <form method="post" action="/cloud-integrations/{{.ID}}" class="project-form">
+    <section class="form-section">
+      <h2>Integration Settings</h2>
+      <div class="form-grid">
+        <div class="field">
+          <label for="ci-name">Name</label>
+          <input id="ci-name" type="text" name="name" value="{{.Name}}" required>
+        </div>
+        <div class="field">
+          <label for="ci-provider">Cloud Provider</label>
+          <select id="ci-provider" name="provider" required>
+            <option value="aws"{{if eq .Provider "aws"}} selected{{end}}>Amazon Web Services (AWS)</option>
+            <option value="gcp"{{if eq .Provider "gcp"}} selected{{end}}>Google Cloud Platform (GCP)</option>
+            <option value="azure"{{if eq .Provider "azure"}} selected{{end}}>Microsoft Azure</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="aws-fields" class="provider-section"{{if ne .Provider "aws"}} hidden{{end}}>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-auth-method">AWS Authentication Method</label>
+            <select id="ci-auth-method" name="auth_method">
+              <option value="oidc"{{if eq .AuthMethod "oidc"}} selected{{end}}>OIDC Federation (STS AssumeRoleWithWebIdentity)</option>
+              <option value="sts_assume_role"{{if eq .AuthMethod "sts_assume_role"}} selected{{end}}>IAM Role Chaining (STS AssumeRole)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ci-role-arn">IAM Role ARN</label>
+            <input type="text" id="ci-role-arn" name="role_arn" value="{{.RoleARN}}" placeholder="arn:aws:iam::123456789012:role/infra-guy-deployer">
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-region">Default AWS Region</label>
+            <input type="text" id="ci-region" name="region" value="{{.Region}}" placeholder="us-east-1">
+          </div>
+          <div class="field">
+            <label for="ci-session-duration">Session Duration (seconds)</label>
+            <input type="number" id="ci-session-duration" name="session_duration_seconds" value="{{.SessionDurationS}}" min="900" max="43200">
+          </div>
+          <div class="field">
+            <label for="ci-external-id">External ID (optional)</label>
+            <input type="text" id="ci-external-id" name="external_id" value="{{.ExternalID}}">
+          </div>
+        </div>
+      </div>
+
+      <div id="gcp-fields" class="provider-section"{{if ne .Provider "gcp"}} hidden{{end}}>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-gcp-wip">Workload Identity Provider Resource Name</label>
+            <input type="text" id="ci-gcp-wip" name="gcp_workload_identity_provider" value="{{.GCPWorkloadIdentityProvider}}">
+          </div>
+          <div class="field">
+            <label for="ci-gcp-sa">Service Account Email (optional)</label>
+            <input type="text" id="ci-gcp-sa" name="gcp_service_account_email" value="{{.GCPServiceAccountEmail}}">
+          </div>
+          <div class="field">
+            <label for="ci-gcp-project">GCP Project ID (optional)</label>
+            <input type="text" id="ci-gcp-project" name="gcp_project_id" value="{{.GCPProjectID}}">
+          </div>
+        </div>
+      </div>
+
+      <div id="azure-fields" class="provider-section"{{if ne .Provider "azure"}} hidden{{end}}>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-azure-tenant">Azure Tenant ID</label>
+            <input type="text" id="ci-azure-tenant" name="azure_tenant_id" value="{{.AzureTenantID}}">
+          </div>
+          <div class="field">
+            <label for="ci-azure-client">Azure Client ID</label>
+            <input type="text" id="ci-azure-client" name="azure_client_id" value="{{.AzureClientID}}">
+          </div>
+          <div class="field">
+            <label for="ci-azure-sub">Azure Subscription ID (optional)</label>
+            <input type="text" id="ci-azure-sub" name="azure_subscription_id" value="{{.AzureSubscriptionID}}">
+          </div>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="field">
+          <label for="ci-audience">OIDC Audience Override (optional)</label>
+          <input type="text" id="ci-audience" name="audience" value="{{.Audience}}">
+        </div>
+        <div class="field">
+          <label for="tags-input">Auto-Bind Tags (key:value)</label>
+          <input type="text" id="tags-input" name="tags" value="{{.Tags}}" placeholder="env:prod, cloud:aws" autocomplete="off">
+          <span class="field-hint">Workspaces matching all tags on this integration automatically receive its dynamic credentials.</span>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn-trigger">Save settings</button>
+      </div>
+    </section>
+  </form>
+
+  <section class="form-section danger-zone">
+    <h2>Danger Zone</h2>
+    <div class="danger-row">
+      <div>
+        <strong>Delete cloud integration</strong>
+        <span class="field-hint">Permanently remove this integration and detach it from any linked workspaces.</span>
+      </div>
+      <form method="post" action="/cloud-integrations/{{.ID}}/delete" class="inline">
+        <button type="submit" class="btn-danger">Delete integration</button>
+      </form>
+    </div>
+  </section>
+</div>
+<script>
+(function() {
+  const providerSelect = document.getElementById('ci-provider');
+  const awsFields = document.getElementById('aws-fields');
+  const gcpFields = document.getElementById('gcp-fields');
+  const azureFields = document.getElementById('azure-fields');
+  if (providerSelect) {
+    providerSelect.addEventListener('change', () => {
+      const p = providerSelect.value;
+      if (awsFields) awsFields.hidden = p !== 'aws';
+      if (gcpFields) gcpFields.hidden = p !== 'gcp';
+      if (azureFields) azureFields.hidden = p !== 'azure';
+    });
+  }
+})();
+</script>
+{{end}}

@@ -1,0 +1,321 @@
+{{define "cloud_integrations"}}
+<div class="projects-page">
+  <div class="projects-header">
+    <div>
+      <h1>Cloud Integrations</h1>
+      <p class="settings-card-desc">Dynamically generate short-lived cloud credentials and OIDC tokens (AWS, GCP, Azure) for workspace runs without storing static keys.</p>
+    </div>
+    <button type="button" class="btn btn-trigger" id="toggle-new-integration">New integration</button>
+  </div>
+
+  {{if .OIDCIssuer}}
+  <div class="panel" style="margin-bottom: 16px; padding: 14px 18px; display: flex; flex-wrap: wrap; gap: 18px; align-items: center; justify-content: space-between; font-size: 13px;">
+    <div>
+      <strong>OIDC Federation Provider</strong>
+      <span class="muted" style="margin-left: 8px;">Configure your cloud IAM trust policy with these endpoints:</span>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 14px; align-items: center;">
+      <span><span class="muted">Issuer:</span> <code>{{.OIDCIssuer}}</code></span>
+      <span><span class="muted">JWKS:</span> <a href="/.well-known/jwks.json" target="_blank"><code>/.well-known/jwks.json</code></a></span>
+      <span><span class="muted">Discovery:</span> <a href="/.well-known/openid-configuration" target="_blank"><code>/.well-known/openid-configuration</code></a></span>
+      <span><span class="muted">Default Audience:</span> <code>{{.OIDCAudience}}</code></span>
+    </div>
+  </div>
+  {{end}}
+
+  <div id="new-integration-panel" class="panel form-panel" style="margin-bottom: 18px;"{{if .Integrations}} hidden{{end}}>
+    <div class="form-header">
+      <h2>New Cloud Integration</h2>
+      <p class="sub">Configure dynamic OIDC federation or AWS STS role assumption for Terraform runs.</p>
+    </div>
+    <form method="post" action="/cloud-integrations" class="project-form">
+      <section class="form-section">
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-name">Name</label>
+            <input type="text" id="ci-name" name="name" placeholder="e.g. aws-prod-admin" required>
+            <span class="field-hint">Unique identifier within your organization.</span>
+          </div>
+          <div class="field">
+            <label for="ci-provider">Cloud Provider</label>
+            <select id="ci-provider" name="provider" required>
+              <option value="aws">Amazon Web Services (AWS)</option>
+              <option value="gcp">Google Cloud Platform (GCP)</option>
+              <option value="azure">Microsoft Azure</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="aws-fields" class="provider-section">
+          <div class="form-grid">
+            <div class="field">
+              <label for="ci-auth-method">AWS Authentication Method</label>
+              <select id="ci-auth-method" name="auth_method">
+                <option value="oidc">OIDC Federation (STS AssumeRoleWithWebIdentity)</option>
+                <option value="sts_assume_role">IAM Role Chaining (STS AssumeRole)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="ci-role-arn">IAM Role ARN</label>
+              <input type="text" id="ci-role-arn" name="role_arn" placeholder="arn:aws:iam::123456789012:role/infra-guy-deployer">
+            </div>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="ci-region">Default AWS Region</label>
+              <input type="text" id="ci-region" name="region" value="us-east-1" placeholder="us-east-1">
+            </div>
+            <div class="field">
+              <label for="ci-session-duration">Session Duration (seconds)</label>
+              <input type="number" id="ci-session-duration" name="session_duration_seconds" value="3600" min="900" max="43200">
+              <span class="field-hint">Short-lived STS token lifetime (900s to 43200s).</span>
+            </div>
+            <div class="field">
+              <label for="ci-external-id">External ID (optional)</label>
+              <input type="text" id="ci-external-id" name="external_id" placeholder="Optional STS ExternalId">
+            </div>
+          </div>
+        </div>
+
+        <div id="gcp-fields" class="provider-section" hidden>
+          <div class="form-grid">
+            <div class="field">
+              <label for="ci-gcp-wip">Workload Identity Provider Resource Name</label>
+              <input type="text" id="ci-gcp-wip" name="gcp_workload_identity_provider" placeholder="projects/123456/locations/global/workloadIdentityPools/infra-guy/providers/oidc">
+            </div>
+            <div class="field">
+              <label for="ci-gcp-sa">Service Account Email (optional)</label>
+              <input type="text" id="ci-gcp-sa" name="gcp_service_account_email" placeholder="terraform@my-gcp-project.iam.gserviceaccount.com">
+            </div>
+            <div class="field">
+              <label for="ci-gcp-project">GCP Project ID (optional)</label>
+              <input type="text" id="ci-gcp-project" name="gcp_project_id" placeholder="my-gcp-project">
+            </div>
+          </div>
+        </div>
+
+        <div id="azure-fields" class="provider-section" hidden>
+          <div class="form-grid">
+            <div class="field">
+              <label for="ci-azure-tenant">Azure Tenant ID</label>
+              <input type="text" id="ci-azure-tenant" name="azure_tenant_id" placeholder="00000000-0000-0000-0000-000000000000">
+            </div>
+            <div class="field">
+              <label for="ci-azure-client">Azure Client ID (Application ID)</label>
+              <input type="text" id="ci-azure-client" name="azure_client_id" placeholder="11111111-1111-1111-1111-111111111111">
+            </div>
+            <div class="field">
+              <label for="ci-azure-sub">Azure Subscription ID (optional)</label>
+              <input type="text" id="ci-azure-sub" name="azure_subscription_id" placeholder="22222222-2222-2222-2222-222222222222">
+            </div>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-audience">OIDC Audience Override (optional)</label>
+            <input type="text" id="ci-audience" name="audience" placeholder="Defaults to {{.OIDCAudience}} (or sts.amazonaws.com)">
+          </div>
+          <div class="field">
+            <label for="tags-input">Auto-Bind Tags (key:value)</label>
+            <div class="repo-Combobox" id="tag-combobox">
+              <input type="text" id="tags-input" name="tags" placeholder="env:prod, cloud:aws" autocomplete="off">
+              <div id="tag-results" class="repo-results" role="listbox"></div>
+              <div id="known-tags-data" hidden>
+                {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
+              </div>
+            </div>
+            <div id="tags-preview" class="tag-pills"></div>
+            <span class="field-hint">Workspaces matching all tags on this integration automatically receive its dynamic credentials.</span>
+          </div>
+        </div>
+      </section>
+      <div class="actions">
+        <button type="submit" class="btn-trigger">Create integration</button>
+        <button type="button" class="btn" id="cancel-new-integration">Cancel</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="projects-topbar">
+    <div class="projects-search-wrap">
+      <input type="search" id="filter-query" class="projects-search-input" placeholder="Search cloud integrations by name, provider, or tag..." autocomplete="off">
+    </div>
+    <div class="status-filter-tabs" role="tablist" aria-label="Cloud integrations summary">
+      <button type="button" class="status-tab active" data-status-filter="all">All <span class="status-tab-count">{{.CountAll}}</span></button>
+    </div>
+  </div>
+
+  <div class="projects-layout">
+    <aside class="filters-sidebar">
+      <div class="filters-sidebar-head">
+        <span>Filters</span>
+        <button type="button" class="filters-reset-btn" id="filters-reset">Reset</button>
+      </div>
+      <form method="get" action="/cloud-integrations" id="ci-filter-form" class="filters-sidebar-form">
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Name</summary>
+          <div class="filter-group-body">
+            <input type="text" id="filter-name" name="name" value="{{.FilterName}}" placeholder="Filter by name..." autocomplete="off">
+          </div>
+        </details>
+
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Tags</summary>
+          <div class="filter-group-body">
+            <input type="hidden" id="filter-tag" name="tag" value="{{.FilterTag}}">
+            {{if .KnownTags}}
+            <div class="filter-tag-chips">
+              {{range .KnownTags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
+            </div>
+            {{else}}
+            <span class="muted">No tags defined yet.</span>
+            {{end}}
+          </div>
+        </details>
+      </form>
+    </aside>
+
+    <div class="projects-main panel">
+      <table id="ci-table">
+        <thead>
+          <tr><th>Name</th><th>Provider</th><th>Method</th><th>Target Identity</th><th>Auto-Bind Tags</th><th>Updated</th></tr>
+        </thead>
+        <tbody>
+          {{range .Integrations}}
+          <tr class="ci-row" data-name="{{.Name}}" data-tags="{{.TagsCSV}}">
+            <td><a href="/cloud-integrations/{{.ID}}"><strong>{{.Name}}</strong></a></td>
+            <td><span class="pill">{{.ProviderLabel}}</span></td>
+            <td class="muted">{{.AuthMethodLabel}}</td>
+            <td><code>{{.TargetSummary}}</code></td>
+            <td>
+              {{if .Tags}}
+              <div class="tag-pills">
+                {{range .Tags}}<button type="button" class="tag-pill tag-filter-btn" data-tag="{{.}}">{{.}}</button>{{end}}
+              </div>
+              {{else}}
+              <span class="muted">&mdash;</span>
+              {{end}}
+            </td>
+            <td class="muted">{{if .UpdatedAt}}{{.UpdatedAt}}{{else}}&mdash;{{end}}</td>
+          </tr>
+          {{else}}
+          <tr>
+            <td colspan="6" class="empty">No cloud integrations configured yet.</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script>
+(function() {
+  const toggleBtn = document.getElementById('toggle-new-integration');
+  const cancelBtn = document.getElementById('cancel-new-integration');
+  const panel = document.getElementById('new-integration-panel');
+  const nameField = document.getElementById('ci-name');
+  if (toggleBtn && panel) {
+    toggleBtn.addEventListener('click', () => {
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden && nameField) nameField.focus();
+    });
+  }
+  if (cancelBtn && panel) {
+    cancelBtn.addEventListener('click', () => {
+      panel.hidden = true;
+    });
+  }
+
+  const providerSelect = document.getElementById('ci-provider');
+  const awsFields = document.getElementById('aws-fields');
+  const gcpFields = document.getElementById('gcp-fields');
+  const azureFields = document.getElementById('azure-fields');
+  function syncProviderFields() {
+    if (!providerSelect) return;
+    const p = providerSelect.value;
+    if (awsFields) awsFields.hidden = p !== 'aws';
+    if (gcpFields) gcpFields.hidden = p !== 'gcp';
+    if (azureFields) azureFields.hidden = p !== 'azure';
+  }
+  if (providerSelect) {
+    providerSelect.addEventListener('change', syncProviderFields);
+    syncProviderFields();
+  }
+
+  const queryInput = document.getElementById('filter-query');
+  const nameInput = document.getElementById('filter-name');
+  const tagInput = document.getElementById('filter-tag');
+  const resetBtn = document.getElementById('filters-reset');
+  const rows = Array.from(document.querySelectorAll('#ci-table tbody .ci-row'));
+  const tagBtns = Array.from(document.querySelectorAll('.tag-filter-btn'));
+
+  function parseTagTokens(raw) {
+    return (raw || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  }
+
+  function syncTagButtons() {
+    if (!tagInput) return;
+    const selected = new Set(parseTagTokens(tagInput.value).map(s => s.toLowerCase()));
+    for (const btn of tagBtns) {
+      const t = (btn.dataset.tag || '').toLowerCase();
+      btn.classList.toggle('active', selected.has(t));
+    }
+  }
+
+  function applyFilter() {
+    if (!nameInput || !tagInput) return;
+    const q = (queryInput ? queryInput.value : '').trim().toLowerCase();
+    const n = nameInput.value.trim().toLowerCase();
+    const tagTokens = parseTagTokens(tagInput.value.toLowerCase());
+
+    syncTagButtons();
+
+    for (const row of rows) {
+      const rName = (row.dataset.name || '').toLowerCase();
+      const rTagsRaw = (row.dataset.tags || '').toLowerCase();
+      const rTags = rTagsRaw.split(',').filter(Boolean);
+
+      const matchQuery = !q || rName.includes(q) || rTagsRaw.includes(q);
+      const matchName = !n || rName.includes(n);
+      const matchTag = tagTokens.length === 0 || tagTokens.every(tok => rTags.some(tag => tag.includes(tok)));
+
+      row.style.display = (matchQuery && matchName && matchTag) ? '' : 'none';
+    }
+  }
+
+  [queryInput, nameInput, tagInput].forEach(inp => {
+    if (inp) inp.addEventListener('input', applyFilter);
+  });
+
+  tagBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!tagInput) return;
+      const tag = (btn.dataset.tag || '').trim();
+      if (!tag) return;
+      const current = parseTagTokens(tagInput.value);
+      const lower = tag.toLowerCase();
+      const idx = current.findIndex(t => t.toLowerCase() === lower);
+      if (idx >= 0) {
+        current.splice(idx, 1);
+      } else {
+        current.push(tag);
+      }
+      tagInput.value = current.join(', ');
+      applyFilter();
+    });
+  });
+
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (queryInput) queryInput.value = '';
+      if (nameInput) nameInput.value = '';
+      if (tagInput) tagInput.value = '';
+      applyFilter();
+    });
+  }
+
+  syncTagButtons();
+})();
+</script>
+{{end}}
