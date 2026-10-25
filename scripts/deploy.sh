@@ -51,8 +51,12 @@ else
 fi
 
 if ! gh release view "$VERSION" --repo "$REPO" >/dev/null 2>&1; then
+  echo "==> Generating grouped release notes for ${VERSION}..."
+  NOTES_FILE="$(mktemp)"
+  ./scripts/release-notes.sh "$VERSION" > "$NOTES_FILE"
   echo "==> Creating GitHub release ${VERSION}..."
-  gh release create "$VERSION" --repo "$REPO" --generate-notes
+  gh release create "$VERSION" --repo "$REPO" --title "$VERSION" --notes-file "$NOTES_FILE"
+  rm -f "$NOTES_FILE"
 fi
 
 echo "==> locating GitHub Actions Release workflow run for ${VERSION}..."

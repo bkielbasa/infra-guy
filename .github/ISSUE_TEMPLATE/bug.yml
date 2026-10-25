@@ -1,0 +1,18 @@
+name: Bug Fix
+description: Report a bug using Conventional Ticket format
+title: "fix(component): "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug and steps to reproduce.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Expected Behavior
+      value: |
+        - [ ] 

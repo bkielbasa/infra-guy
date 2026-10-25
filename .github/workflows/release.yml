@@ -5,7 +5,8 @@ on:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write
+  issues: read
   packages: write
 
 jobs:
@@ -14,6 +15,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update release notes (grouped by change type and component)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          NOTES_FILE="$(mktemp)"
+          ./scripts/release-notes.sh "${{ github.ref_name }}" > "$NOTES_FILE"
+          gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --notes-file "$NOTES_FILE"
+          rm -f "$NOTES_FILE"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

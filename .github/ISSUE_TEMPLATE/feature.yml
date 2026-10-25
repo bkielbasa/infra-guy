@@ -1,0 +1,18 @@
+name: Feature / Enhancement
+description: Propose a new feature or enhancement using Conventional Ticket format
+title: "feat(component): "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Overview
+      description: What capability should be added and why?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      value: |
+        - [ ] 
