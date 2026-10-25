@@ -2363,7 +2363,7 @@ func TestProjectTagsAndFilters(t *testing.T) {
 	}
 
 	// 5. GET /projects shows filter controls and tags, and filters by name, branch, and tag
-	rr = getUI(t, h, "/")
+	rr = getUI(t, h, "/projects")
 	body := rr.Body.String()
 	if rr.Code != http.StatusOK || !strings.Contains(body, `id="filter-name"`) || !strings.Contains(body, `id="filter-branch"`) || !strings.Contains(body, `id="filter-tag"`) {
 		t.Fatalf("projects list missing filter inputs: %s", body)
@@ -2488,11 +2488,11 @@ func TestDefaultBranchAutoDetectTagAutocompleteAndSettingsRedesign(t *testing.T)
 		}
 	}
 
-	// 4. GET / includes known-tags datalist on #filter-tag
-	rr = getUI(t, h, "/")
+	// 4. GET /projects includes known-tags datalist on #filter-tag
+	rr = getUI(t, h, "/projects")
 	listBody := rr.Body.String()
 	if !strings.Contains(listBody, `list="known-tags"`) || !strings.Contains(listBody, `<option value="env:prod">`) {
-		t.Fatalf("expected / to contain known-tags datalist, got:\n%s", listBody)
+		t.Fatalf("expected /projects to contain known-tags datalist, got:\n%s", listBody)
 	}
 
 	// 5. GET /projects/p1/tabs/state and /projects/p1/tabs/dependencies use redesigned .form-section layout
@@ -2543,11 +2543,11 @@ func TestProjectsSidebarFiltersAndProfilePage(t *testing.T) {
 		},
 	})
 
-	// 1. GET / renders left filter sidebar, status tabs, top search, and header profile menu
-	rr := getUI(t, h, "/")
+	// 1. GET /projects renders left filter sidebar, status tabs, top search, and header profile menu
+	rr := getUI(t, h, "/projects")
 	body := rr.Body.String()
 	if rr.Code != http.StatusOK {
-		t.Fatalf("GET / = %d: %s", rr.Code, body)
+		t.Fatalf("GET /projects = %d: %s", rr.Code, body)
 	}
 	for _, want := range []string{
 		`class="projects-layout"`,
@@ -2783,6 +2783,135 @@ func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
 		t.Fatalf("expected /policies/pol-1 to contain updated tag compliance:iso27001, got:\n%s", polDetailBody)
 	}
 }
+
+func TestDashboardOverviewAndInsights(t *testing.T) {
+	now := time.Date(2026, 10, 25, 8, 0, 0, 0, time.UTC)
+
+	pApproval := project.Restore(project.Snapshot{
+		ID: "p-approval", TenantID: "ten", Name: "payments-prod",
+		Repo: project.SourceRepo{Owner: "acme", Name: "infra"}, DefaultBranch: "main",
+		TerraformVersion: "1.9.8", ApprovalPolicyID: "pol-1",
+		Tags: map[string]string{"env": "prod", "team": "payments"},
+	})
+	pFailed := project.Restore(project.Snapshot{
+		ID: "p-failed", TenantID: "ten", Name: "network-edge",
+		Repo: project.SourceRepo{Owner: "acme", Name: "net"}, DefaultBranch: "main",
+		TerraformVersion: "1.8.5", Locked: true,
+		Tags: map[string]string{"env": "prod", "tier": "network"},
+	})
+	pHealthy := project.Restore(project.Snapshot{
+		ID: "p-healthy", TenantID: "ten", Name: "billing-staging",
+		Repo: project.SourceRepo{Owner: "acme", Name: "billing"}, DefaultBranch: "staging",
+		TerraformVersion: "1.9.8", AutoApprove: true,
+		Tags: map[string]string{"env": "staging"},
+	})
+
+	projects := &memProjects{items: map[project.ID]*project.Project{
+		"p-approval": pApproval,
+		"p-failed":   pFailed,
+		"p-healthy":  pHealthy,
+	}}
+
+	rApproval := run.Restore(run.Snapshot{
+		ID: "r-wait", ProjectID: "p-approval", Trigger: run.TriggerPush,
+		Status: run.StatusNeedsApproval, Branch: "main", SHA: "1111111abcdef",
+		Message: "scale RDS instance", TriggeredBy: "alice",
+		SummaryPresent: true, Add: 3, Change: 2, Destroy: 1,
+		CreatedAt: now.Add(-15 * time.Minute),
+	})
+	rFailed := run.Restore(run.Snapshot{
+		ID: "r-fail", ProjectID: "p-failed", Trigger: run.TriggerPullRequest,
+		Status: run.StatusFailed, Branch: "feat/vpc", SHA: "2222222abcdef",
+		PRTitle: "Update route tables", TriggeredBy: "bob",
+		CreatedAt: now.Add(-30 * time.Minute),
+	})
+	rHealthy := run.Restore(run.Snapshot{
+		ID: "r-ok", ProjectID: "p-healthy", Trigger: run.TriggerManual,
+		Status: run.StatusSucceeded, Branch: "staging", SHA: "3333333abcdef",
+		Message: "deploy staging", TriggeredBy: "carol",
+		SummaryPresent: true, Add: 5, Change: 0, Destroy: 0,
+		CreatedAt: now.Add(-2 * time.Hour),
+	})
+
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"r-wait": rApproval,
+		"r-fail": rFailed,
+		"r-ok":   rHealthy,
+	}}
+	states := &memStates{items: map[string]*state.State{}}
+
+	ctxRepo := newUIMemContexts()
+	ctxSvc := &tfcontextapp.Service{
+		Contexts: ctxRepo,
+		Now:      func() time.Time { return now },
+		NewID:    func() string { return "ctx-1" },
+	}
+	_, _ = ctxSvc.Create(context.Background(), "ten", "aws-prod-creds", map[string]string{"env": "prod"})
+
+	polRepo := newUIMemPolicies(projects)
+	polSvc := &policyapp.Service{
+		Policies: polRepo,
+		Engine:   opa.NewEvaluator(),
+		Now:      func() time.Time { return now },
+		NewID:    func() string { return "pol-1" },
+	}
+	_, _ = polSvc.Create(context.Background(), policyapp.CreateInput{
+		TenantID: "ten", Name: "prod-guardrails", Description: "Prod policy",
+		Rego: "package infraguy.approval\ndefault allow := true\n",
+		Tags: map[string]string{"env": "prod"},
+	})
+
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc,
+		Runs:     runsSvc,
+		States:   stSvc,
+		Contexts: ctxSvc,
+		Policies: polSvc,
+		Checkout: &stubTip{sha: "abc1234"},
+		Lookup:   &stubLookup{},
+		Tokens:   uiTokenSource{store: store},
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+	})
+
+	rr := getUI(t, h, "/")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET / = %d: %s", rr.Code, body)
+	}
+	for _, want := range []string{
+		`class="dashboard-page"`,
+		`class="dashboard-kpi-grid"`,
+		`Needs attention`,
+		`Recent runs`,
+		`payments-prod`,
+		`network-edge`,
+		`billing-staging`,
+		`/runs/r-wait`,
+		`+3 ~2 −1`,
+		`scale RDS instance`,
+		`Update route tables`,
+		`env:prod`,
+		`1.9.8`,
+		`1.8.5`,
+		`/projects`,
+		`/contexts`,
+		`/policies`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected dashboard GET / to contain %q, got:\n%s", want, body)
+		}
+	}
+}
+
 
 
 

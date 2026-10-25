@@ -117,7 +117,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /github/logout", u.githubLogout)
 	mux.HandleFunc("POST /github/logout", u.githubLogout)
 	mux.HandleFunc("GET /profile", u.profile)
-	mux.HandleFunc("GET /{$}", u.list)
+	mux.HandleFunc("GET /{$}", u.dashboard)
 	mux.HandleFunc("GET /projects", u.list)
 	mux.HandleFunc("GET /projects/new", u.newProject)
 	mux.HandleFunc("POST /projects", u.create)
@@ -208,6 +208,339 @@ func (u *ui) fragment(w http.ResponseWriter, name string, data any) {
 	if err := pages.ExecuteTemplate(w, name, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+type dashboardProjectRow struct {
+	ID, Name, Repo, Branch, TerraformVersion string
+	Status, StatusClass, StatusCategory      string
+	Locked                                   bool
+	Tags                                     []string
+}
+
+type dashboardRunRow struct {
+	ID, ProjectID, ProjectName string
+	Title, Status, StatusClass string
+	Branch, SHA, TriggeredBy   string
+	Delta                      template.HTML
+	Date                       string
+	sortAt                     time.Time
+}
+
+type dashboardAttentionItem struct {
+	Kind                    string
+	BadgeLabel, BadgeClass  string
+	ProjectID, ProjectName  string
+	RunID, Title, Branch    string
+	Delta                   template.HTML
+	Date                    string
+	ActionURL, ActionLabel  string
+	sortAt                  time.Time
+}
+
+type dashboardCountItem struct {
+	Label string
+	Value string
+	Count int
+}
+
+func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	if tenantID == "" {
+		u.picker(w, r)
+		return
+	}
+	q := r.URL.Query()
+	if strings.TrimSpace(q.Get("name")) != "" || strings.TrimSpace(q.Get("branch")) != "" || len(q["tag"]) > 0 {
+		u.list(w, r)
+		return
+	}
+
+	items, err := u.cfg.Projects.List(r.Context(), tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	now := u.now()
+	cutoff24h := now.Add(-24 * time.Hour)
+
+	projRows := make([]dashboardProjectRow, 0, len(items))
+	var recentRuns []dashboardRunRow
+	var attention []dashboardAttentionItem
+
+	var (
+		countNeedsApproval int
+		countFailed        int
+		countInProgress    int
+		countFinished      int
+		countIdle          int
+		countLocked        int
+		policyProtected    int
+		autoApproveCount   int
+		totalRuns          int
+		activeRuns         int
+		terminalRuns       int
+		successfulRuns     int
+		runsLast24h        int
+	)
+
+	tagCounts := make(map[string]int)
+	versionCounts := make(map[string]int)
+
+	for _, p := range items {
+		ps := p.Snapshot()
+		tags := project.TagList(ps.Tags)
+		for _, t := range tags {
+			tagCounts[t]++
+		}
+		tfVer := ps.TerraformVersion
+		if tfVer == "" {
+			tfVer = project.DefaultTerraformVersion
+		}
+		versionCounts[tfVer]++
+
+		if ps.Locked {
+			countLocked++
+		}
+		if ps.ApprovalPolicyID != "" {
+			policyProtected++
+		}
+		if ps.AutoApprove {
+			autoApproveCount++
+		}
+
+		pRow := dashboardProjectRow{
+			ID:               string(ps.ID),
+			Name:             ps.Name,
+			Repo:             ps.Repo.String(),
+			Branch:           ps.DefaultBranch,
+			TerraformVersion: tfVer,
+			Locked:           ps.Locked,
+			Tags:             tags,
+		}
+
+		runs, err := u.cfg.Runs.ListByProject(r.Context(), ps.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		for _, rn := range runs {
+			rs := rn.Snapshot()
+			totalRuns++
+			if !rs.CreatedAt.IsZero() && rs.CreatedAt.After(cutoff24h) {
+				runsLast24h++
+			}
+			if !rs.Status.Terminal() {
+				activeRuns++
+			} else {
+				terminalRuns++
+				if rs.Status == run.StatusSucceeded || rs.Status == run.StatusPlanned {
+					successfulRuns++
+				}
+			}
+
+			triggered := rs.TriggeredBy
+			if triggered == "" {
+				triggered = string(rs.Trigger)
+			}
+			recentRuns = append(recentRuns, dashboardRunRow{
+				ID:          string(rs.ID),
+				ProjectID:   string(ps.ID),
+				ProjectName: ps.Name,
+				Title:       firstNonEmpty(runTitle(rs), string(rs.ID)),
+				Status:      rs.Status.Label(),
+				StatusClass: statusClass(rs.Status),
+				Branch:      firstNonEmpty(rs.Branch, ps.DefaultBranch),
+				SHA:         shortSHA(rs.SHA),
+				TriggeredBy: triggered,
+				Delta:       template.HTML(delta(rs)),
+				Date:        fmtTime(rs.CreatedAt),
+				sortAt:      rs.CreatedAt,
+			})
+
+			if rs.Status == run.StatusNeedsApproval {
+				attention = append(attention, dashboardAttentionItem{
+					Kind:        "approval",
+					BadgeLabel:  rs.Status.Label(),
+					BadgeClass:  statusClass(rs.Status),
+					ProjectID:   string(ps.ID),
+					ProjectName: ps.Name,
+					RunID:       string(rs.ID),
+					Title:       firstNonEmpty(runTitle(rs), "Run awaiting confirmation"),
+					Branch:      firstNonEmpty(rs.Branch, ps.DefaultBranch),
+					Delta:       template.HTML(delta(rs)),
+					Date:        fmtTime(rs.CreatedAt),
+					ActionURL:   "/runs/" + string(rs.ID),
+					ActionLabel: "Review & confirm",
+					sortAt:      rs.CreatedAt,
+				})
+			}
+		}
+
+		if latest := latestSnapshot(runs); latest != nil {
+			pRow.Status = latest.Status.Label()
+			pRow.StatusClass = statusClass(latest.Status)
+			pRow.StatusCategory = statusCategory(latest.Status)
+			switch pRow.StatusCategory {
+			case "needs_approval":
+				countNeedsApproval++
+			case "failed":
+				countFailed++
+				attention = append(attention, dashboardAttentionItem{
+					Kind:        "failed",
+					BadgeLabel:  "failed",
+					BadgeClass:  "pill-failed",
+					ProjectID:   string(ps.ID),
+					ProjectName: ps.Name,
+					RunID:       string(latest.ID),
+					Title:       firstNonEmpty(runTitle(*latest), "Latest run failed"),
+					Branch:      firstNonEmpty(latest.Branch, ps.DefaultBranch),
+					Delta:       template.HTML(delta(*latest)),
+					Date:        fmtTime(latest.CreatedAt),
+					ActionURL:   "/runs/" + string(latest.ID),
+					ActionLabel: "Inspect failure",
+					sortAt:      latest.CreatedAt,
+				})
+			case "in_progress":
+				countInProgress++
+			case "finished":
+				countFinished++
+			default:
+				countIdle++
+			}
+		} else {
+			countIdle++
+		}
+
+		if ps.Locked {
+			attention = append(attention, dashboardAttentionItem{
+				Kind:        "locked",
+				BadgeLabel:  "locked",
+				BadgeClass:  "pill-cancelled",
+				ProjectID:   string(ps.ID),
+				ProjectName: ps.Name,
+				Title:       "Workspace is locked against new runs",
+				Branch:      ps.DefaultBranch,
+				ActionURL:   "/projects/" + string(ps.ID),
+				ActionLabel: "Manage lock",
+				sortAt:      ps.UpdatedAt,
+			})
+		}
+
+		projRows = append(projRows, pRow)
+	}
+
+	sort.Slice(recentRuns, func(i, j int) bool {
+		return recentRuns[i].sortAt.After(recentRuns[j].sortAt)
+	})
+	if len(recentRuns) > 10 {
+		recentRuns = recentRuns[:10]
+	}
+
+	sort.Slice(attention, func(i, j int) bool {
+		if attention[i].Kind != attention[j].Kind {
+			rank := func(k string) int {
+				switch k {
+				case "approval":
+					return 0
+				case "failed":
+					return 1
+				default:
+					return 2
+				}
+			}
+			return rank(attention[i].Kind) < rank(attention[j].Kind)
+		}
+		return attention[i].sortAt.After(attention[j].sortAt)
+	})
+
+	successRate := 100
+	if terminalRuns > 0 {
+		successRate = (successfulRuns * 100) / terminalRuns
+	}
+
+	var totalContexts, totalPolicies int
+	if u.cfg.Contexts != nil {
+		if ctxList, err := u.cfg.Contexts.List(r.Context(), tenantID); err == nil {
+			totalContexts = len(ctxList)
+		}
+	}
+	if u.cfg.Policies != nil {
+		if polList, err := u.cfg.Policies.List(r.Context(), tenantID); err == nil {
+			totalPolicies = len(polList)
+		}
+	}
+
+	topTags := make([]dashboardCountItem, 0, len(tagCounts))
+	for k, c := range tagCounts {
+		topTags = append(topTags, dashboardCountItem{Label: k, Value: k, Count: c})
+	}
+	sort.Slice(topTags, func(i, j int) bool {
+		if topTags[i].Count != topTags[j].Count {
+			return topTags[i].Count > topTags[j].Count
+		}
+		return topTags[i].Label < topTags[j].Label
+	})
+	if len(topTags) > 12 {
+		topTags = topTags[:12]
+	}
+
+	tfVersions := make([]dashboardCountItem, 0, len(versionCounts))
+	for v, c := range versionCounts {
+		tfVersions = append(tfVersions, dashboardCountItem{Label: v, Value: v, Count: c})
+	}
+	sort.Slice(tfVersions, func(i, j int) bool {
+		if tfVersions[i].Count != tfVersions[j].Count {
+			return tfVersions[i].Count > tfVersions[j].Count
+		}
+		return tfVersions[i].Label > tfVersions[j].Label
+	})
+
+	totalProj := len(items)
+	pct := func(n int) int {
+		if totalProj == 0 || n == 0 {
+			return 0
+		}
+		p := (n * 100) / totalProj
+		if p == 0 {
+			return 1
+		}
+		return p
+	}
+
+	u.page(w, "Dashboard", "dashboard", map[string]any{
+		"TotalProjects":           totalProj,
+		"CountNeedsApproval":      countNeedsApproval,
+		"CountFailed":             countFailed,
+		"CountInProgress":         countInProgress,
+		"CountFinished":           countFinished,
+		"CountIdle":               countIdle,
+		"CountLocked":             countLocked,
+		"PctFinished":             pct(countFinished),
+		"PctNeedsApproval":        pct(countNeedsApproval),
+		"PctInProgress":           pct(countInProgress),
+		"PctFailed":               pct(countFailed),
+		"PctIdle":                 pct(countIdle),
+		"TotalRuns":               totalRuns,
+		"ActiveRuns":              activeRuns,
+		"SuccessRate":             successRate,
+		"RunsLast24h":             runsLast24h,
+		"AttentionCount":          len(attention),
+		"Attention":               attention,
+		"RecentRuns":              recentRuns,
+		"Projects":                projRows,
+		"TotalContexts":           totalContexts,
+		"TotalPolicies":           totalPolicies,
+		"PolicyProtectedProjects": policyProtected,
+		"AutoApproveProjects":     autoApproveCount,
+		"TopTags":                 topTags,
+		"TerraformVersions":       tfVersions,
+	})
 }
 
 func (u *ui) list(w http.ResponseWriter, r *http.Request) {

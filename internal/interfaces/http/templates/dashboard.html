@@ -1,0 +1,255 @@
+{{define "dashboard"}}
+<div class="dashboard-page">
+  <div class="projects-header">
+    <div>
+      <h1>Dashboard</h1>
+      <p class="settings-card-desc">Operational overview, runs awaiting action, and infrastructure health across your workspaces.</p>
+    </div>
+    <div class="dashboard-header-actions">
+      <a href="/projects" class="btn">All projects</a>
+      <a href="/projects/new" class="btn btn-trigger">New project</a>
+    </div>
+  </div>
+
+  <div class="dashboard-kpi-grid">
+    <div class="dashboard-kpi-card">
+      <div class="dashboard-kpi-head">
+        <span class="dashboard-kpi-label">Workspaces</span>
+        <a href="/projects" class="dashboard-kpi-link">View all &rarr;</a>
+      </div>
+      <div class="dashboard-kpi-value">{{.TotalProjects}}</div>
+      <div class="dashboard-kpi-sub">
+        <span class="pill pill-finished">{{.CountFinished}} healthy</span>
+        {{if gt .CountInProgress 0}}<span class="pill pill-running">{{.CountInProgress}} active</span>{{end}}
+        {{if gt .CountLocked 0}}<span class="pill pill-cancelled">{{.CountLocked}} locked</span>{{end}}
+      </div>
+    </div>
+
+    <div class="dashboard-kpi-card">
+      <div class="dashboard-kpi-head">
+        <span class="dashboard-kpi-label">Needs attention</span>
+        <span class="dashboard-kpi-badge {{if gt .AttentionCount 0}}pill-failed{{else}}pill-finished{{end}}">{{if gt .AttentionCount 0}}Action required{{else}}All clear{{end}}</span>
+      </div>
+      <div class="dashboard-kpi-value">{{.AttentionCount}}</div>
+      <div class="dashboard-kpi-sub">
+        <span class="pill pill-unconfirmed">{{.CountNeedsApproval}} awaiting approval</span>
+        <span class="pill pill-failed">{{.CountFailed}} failed</span>
+      </div>
+    </div>
+
+    <div class="dashboard-kpi-card">
+      <div class="dashboard-kpi-head">
+        <span class="dashboard-kpi-label">Run reliability</span>
+        <span class="dashboard-kpi-meta">{{.TotalRuns}} total runs</span>
+      </div>
+      <div class="dashboard-kpi-value">{{.SuccessRate}}%</div>
+      <div class="dashboard-kpi-sub">
+        <span>{{.RunsLast24h}} in last 24h</span>
+        <span>&middot;</span>
+        <span>{{.ActiveRuns}} running/queued</span>
+      </div>
+    </div>
+
+    <div class="dashboard-kpi-card">
+      <div class="dashboard-kpi-head">
+        <span class="dashboard-kpi-label">Governance &amp; config</span>
+        <a href="/policies" class="dashboard-kpi-link">Policies &rarr;</a>
+      </div>
+      <div class="dashboard-kpi-value">{{.TotalPolicies}} <span class="dashboard-kpi-unit">policies</span> &middot; {{.TotalContexts}} <span class="dashboard-kpi-unit">contexts</span></div>
+      <div class="dashboard-kpi-sub">
+        <span>{{.PolicyProtectedProjects}} policy-guarded</span>
+        <span>&middot;</span>
+        <span>{{.AutoApproveProjects}} auto-approve</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="dashboard-main-grid">
+    <div class="dashboard-main-col">
+      <section class="panel dashboard-section">
+        <div class="dashboard-section-head">
+          <div>
+            <h2>Needs attention</h2>
+            <p class="settings-card-desc">Runs awaiting confirmation, failed deployments, and locked workspaces.</p>
+          </div>
+          <span class="status-tab-count">{{.AttentionCount}}</span>
+        </div>
+        {{if .Attention}}
+        <div class="dashboard-attention-list">
+          {{range .Attention}}
+          <div class="dashboard-attention-item">
+            <div class="dashboard-attention-main">
+              <div class="dashboard-attention-top">
+                <span class="pill {{.BadgeClass}}">{{.BadgeLabel}}</span>
+                <a href="/projects/{{.ProjectID}}" class="dashboard-project-link"><strong>{{.ProjectName}}</strong></a>
+                {{if .Branch}}<span class="branch-badge">{{.Branch}}</span>{{end}}
+                {{if .Delta}}<span class="delta">{{.Delta}}</span>{{end}}
+              </div>
+              <div class="dashboard-attention-sub">
+                {{if .Title}}<span>{{.Title}}</span>{{end}}
+                {{if .Date}}<span class="muted">&middot; {{.Date}}</span>{{end}}
+              </div>
+            </div>
+            <div class="dashboard-attention-action">
+              <a href="{{.ActionURL}}" class="btn {{if eq .Kind "approval"}}btn-trigger{{end}}">{{.ActionLabel}}</a>
+            </div>
+          </div>
+          {{end}}
+        </div>
+        {{else}}
+        <p class="empty">No runs awaiting approval, failed workspaces, or locked projects.</p>
+        {{end}}
+      </section>
+
+      <section class="panel dashboard-section">
+        <div class="dashboard-section-head">
+          <div>
+            <h2>Recent runs</h2>
+            <p class="settings-card-desc">Latest Terraform executions across all workspaces.</p>
+          </div>
+          <a href="/projects" class="dashboard-kpi-link">Browse projects &rarr;</a>
+        </div>
+        {{if .RecentRuns}}
+        <table id="dashboard-runs-table">
+          <thead>
+            <tr><th>Run</th><th>Project</th><th>Branch / SHA</th><th>Changes</th><th>Triggered by</th><th>When</th></tr>
+          </thead>
+          <tbody>
+            {{range .RecentRuns}}
+            <tr>
+              <td>
+                <a href="/runs/{{.ID}}"><strong>{{.Title}}</strong></a>
+                <div><span class="pill {{.StatusClass}}">{{.Status}}</span></div>
+              </td>
+              <td><a href="/projects/{{.ProjectID}}">{{.ProjectName}}</a></td>
+              <td>
+                {{if .Branch}}<span class="branch-badge">{{.Branch}}</span>{{end}}
+                {{if .SHA}}<span class="sha muted">{{.SHA}}</span>{{end}}
+              </td>
+              <td class="delta">{{if .Delta}}{{.Delta}}{{else}}<span class="muted">&mdash;</span>{{end}}</td>
+              <td>{{.TriggeredBy}}</td>
+              <td class="muted">{{.Date}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        {{else}}
+        <p class="empty">No runs recorded yet.</p>
+        {{end}}
+      </section>
+
+      <section class="panel dashboard-section">
+        <div class="dashboard-section-head">
+          <div>
+            <h2>Workspaces</h2>
+            <p class="settings-card-desc">Quick status overview of your configured projects.</p>
+          </div>
+          <a href="/projects" class="dashboard-kpi-link">Filter workspaces &rarr;</a>
+        </div>
+        {{if .Projects}}
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Terraform</th><th>Tags</th><th>Latest status</th></tr>
+          </thead>
+          <tbody>
+            {{range .Projects}}
+            <tr>
+              <td>
+                <a href="/projects/{{.ID}}"><strong>{{.Name}}</strong></a>
+                {{if .Locked}}<span class="pill pill-cancelled">locked</span>{{end}}
+              </td>
+              <td class="mono">{{.Repo}}</td>
+              <td><span class="branch-badge">{{.Branch}}</span></td>
+              <td class="mono">{{.TerraformVersion}}</td>
+              <td>
+                <div class="tag-pills">
+                  {{range .Tags}}<a href="/projects?tag={{.}}" class="tag-pill">{{.}}</a>{{end}}
+                </div>
+              </td>
+              <td>{{if .Status}}<span class="pill {{.StatusClass}}">{{.Status}}</span>{{else}}<span class="muted">&mdash;</span>{{end}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        {{else}}
+        <p class="empty">No projects found. <a href="/projects/new">Create your first project</a>.</p>
+        {{end}}
+      </section>
+    </div>
+
+    <aside class="dashboard-side-col">
+      <section class="panel dashboard-section">
+        <h2>Workspace health</h2>
+        <div class="dashboard-health-bar" role="img" aria-label="Workspace status distribution">
+          {{if gt .PctFinished 0}}<div class="health-seg health-seg-finished" style="width: {{.PctFinished}}%" title="Healthy: {{.CountFinished}}"></div>{{end}}
+          {{if gt .PctNeedsApproval 0}}<div class="health-seg health-seg-approval" style="width: {{.PctNeedsApproval}}%" title="Needs approval: {{.CountNeedsApproval}}"></div>{{end}}
+          {{if gt .PctInProgress 0}}<div class="health-seg health-seg-running" style="width: {{.PctInProgress}}%" title="In progress: {{.CountInProgress}}"></div>{{end}}
+          {{if gt .PctFailed 0}}<div class="health-seg health-seg-failed" style="width: {{.PctFailed}}%" title="Failed: {{.CountFailed}}"></div>{{end}}
+          {{if gt .PctIdle 0}}<div class="health-seg health-seg-idle" style="width: {{.PctIdle}}%" title="No runs: {{.CountIdle}}"></div>{{end}}
+        </div>
+        <div class="dashboard-legend">
+          <div class="dashboard-legend-row"><span class="legend-dot legend-dot-finished"></span><span>Healthy / finished</span><strong>{{.CountFinished}}</strong></div>
+          <div class="dashboard-legend-row"><span class="legend-dot legend-dot-approval"></span><span>Needs approval</span><strong>{{.CountNeedsApproval}}</strong></div>
+          <div class="dashboard-legend-row"><span class="legend-dot legend-dot-running"></span><span>In progress</span><strong>{{.CountInProgress}}</strong></div>
+          <div class="dashboard-legend-row"><span class="legend-dot legend-dot-failed"></span><span>Failed</span><strong>{{.CountFailed}}</strong></div>
+          <div class="dashboard-legend-row"><span class="legend-dot legend-dot-idle"></span><span>No runs yet</span><strong>{{.CountIdle}}</strong></div>
+        </div>
+      </section>
+
+      <section class="panel dashboard-section">
+        <div class="dashboard-section-head">
+          <h2>Top tags</h2>
+          <a href="/projects" class="dashboard-kpi-link">Filter &rarr;</a>
+        </div>
+        {{if .TopTags}}
+        <div class="filter-tag-chips">
+          {{range .TopTags}}
+          <a href="/projects?tag={{.Value}}" class="tag-pill">{{.Label}} <span class="muted">({{.Count}})</span></a>
+          {{end}}
+        </div>
+        {{else}}
+        <p class="empty">No tags assigned yet.</p>
+        {{end}}
+      </section>
+
+      <section class="panel dashboard-section">
+        <h2>Terraform versions</h2>
+        {{if .TerraformVersions}}
+        <div class="dashboard-kv-list">
+          {{range .TerraformVersions}}
+          <div class="dashboard-kv-row">
+            <span class="mono">{{.Label}}</span>
+            <span class="status-tab-count">{{.Count}} {{if eq .Count 1}}project{{else}}projects{{end}}</span>
+          </div>
+          {{end}}
+        </div>
+        {{else}}
+        <p class="empty">No projects configured.</p>
+        {{end}}
+      </section>
+
+      <section class="panel dashboard-section">
+        <h2>Quick links</h2>
+        <div class="dashboard-quick-links">
+          <a href="/projects" class="dashboard-quick-link">
+            <span>Projects</span>
+            <span class="muted">{{.TotalProjects}}</span>
+          </a>
+          <a href="/contexts" class="dashboard-quick-link">
+            <span>Contexts</span>
+            <span class="muted">{{.TotalContexts}}</span>
+          </a>
+          <a href="/policies" class="dashboard-quick-link">
+            <span>OPA Policies</span>
+            <span class="muted">{{.TotalPolicies}}</span>
+          </a>
+          <a href="/profile" class="dashboard-quick-link">
+            <span>Profile &amp; Organizations</span>
+            <span class="muted">&rarr;</span>
+          </a>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+{{end}}
