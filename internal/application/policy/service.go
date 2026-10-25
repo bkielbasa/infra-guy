@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,22 +58,43 @@ type ApprovalInfo struct {
 }
 
 type ProjectInfo struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	RepoOwner        string `json:"repo_owner"`
-	RepoName         string `json:"repo_name"`
-	WorkingDirectory string `json:"working_directory"`
-	TerraformVersion string `json:"terraform_version"`
-	AutoApprove      bool   `json:"auto_approve"`
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	RepoOwner        string            `json:"repo_owner"`
+	RepoName         string            `json:"repo_name"`
+	WorkingDirectory string            `json:"working_directory"`
+	TerraformVersion string            `json:"terraform_version"`
+	AutoApprove      bool              `json:"auto_approve"`
+	Tags             map[string]string `json:"tags,omitempty"`
+}
+
+type ResolvedPolicy struct {
+	Policy     *policy.Policy
+	Source     string // "explicit", "tag-bound", "global"
+	MatchedTag string
+}
+
+type PolicyEvalItem struct {
+	PolicyID   policy.ID          `json:"policy_id"`
+	PolicyName string             `json:"policy_name"`
+	Source     string             `json:"source,omitempty"`
+	MatchedTag string             `json:"matched_tag,omitempty"`
+	Status     opa.DecisionStatus `json:"status"`
+	Allowed    bool               `json:"allowed"`
+	Undecided  bool               `json:"undecided"`
+	Deny       []string           `json:"deny"`
 }
 
 type ApprovalDecision struct {
 	PolicyID   policy.ID          `json:"policy_id"`
 	PolicyName string             `json:"policy_name"`
+	Source     string             `json:"source,omitempty"`
+	MatchedTag string             `json:"matched_tag,omitempty"`
 	Status     opa.DecisionStatus `json:"status"`
 	Allowed    bool               `json:"allowed"`
 	Undecided  bool               `json:"undecided"`
 	Deny       []string           `json:"deny"`
+	Policies   []PolicyEvalItem   `json:"policies,omitempty"`
 }
 
 type RunPolicyDecision = ApprovalDecision
@@ -215,6 +237,13 @@ func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo, approva
 		"terraform_version": p.TerraformVersion,
 		"auto_approve":      p.AutoApprove,
 	}
+	if len(p.Tags) > 0 {
+		tagsMap := make(map[string]any, len(p.Tags))
+		for k, v := range p.Tags {
+			tagsMap[k] = v
+		}
+		projectMap["tags"] = tagsMap
+	}
 	var flatApprovals []ApprovalInfo
 	for _, list := range approvals {
 		flatApprovals = append(flatApprovals, list...)
@@ -289,6 +318,163 @@ func (s *Service) EvaluateApproval(ctx context.Context, tenantID string, policyI
 
 func (s *Service) EvaluateForRun(ctx context.Context, tenantID string, policyID policy.ID, planJSON []byte, u UserInfo, p ProjectInfo, approvals ...[]ApprovalInfo) (*RunPolicyDecision, error) {
 	return s.EvaluateApproval(ctx, tenantID, policyID, planJSON, u, p, approvals...)
+}
+
+// ResolveForProject returns all policies that apply to a workspace:
+// 1. The explicit ApprovalPolicyID assigned to the workspace (if any)
+// 2. Any tenant policies whose tags match the workspace tags (tag-bound or global scope),
+//    deduplicated by policy ID and ordered deterministically.
+func (s *Service) ResolveForProject(ctx context.Context, tenantID string, explicitPolicyID policy.ID, projectTags map[string]string) ([]ResolvedPolicy, error) {
+	seen := make(map[policy.ID]bool)
+	var out []ResolvedPolicy
+
+	explicitID := policy.ID(strings.TrimSpace(string(explicitPolicyID)))
+	if explicitID != "" {
+		pol, err := s.Get(ctx, tenantID, explicitID)
+		if err != nil {
+			return nil, err
+		}
+		seen[pol.ID()] = true
+		out = append(out, ResolvedPolicy{
+			Policy: pol,
+			Source: "explicit",
+		})
+	}
+
+	if strings.TrimSpace(tenantID) == "" || s.Policies == nil {
+		return out, nil
+	}
+	all, err := s.Policies.ListByTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt().Equal(all[j].CreatedAt()) {
+			return string(all[i].ID()) < string(all[j].ID())
+		}
+		return all[i].CreatedAt().Before(all[j].CreatedAt())
+	})
+	for _, pol := range all {
+		if pol == nil || seen[pol.ID()] {
+			continue
+		}
+		matched, source, matchedTag := policy.MatchesProjectTags(pol.Tags(), projectTags)
+		if !matched {
+			continue
+		}
+		seen[pol.ID()] = true
+		out = append(out, ResolvedPolicy{
+			Policy:     pol,
+			Source:     source,
+			MatchedTag: matchedTag,
+		})
+	}
+	return out, nil
+}
+
+// EvaluateForProject evaluates all policies applicable to a workspace (explicit + tag-bound + global).
+// Every applicable policy must allow the run for the aggregate decision to be Allowed.
+// Any deny across any policy results in StatusDenied with all deny messages aggregated.
+func (s *Service) EvaluateForProject(ctx context.Context, tenantID string, explicitPolicyID policy.ID, projectTags map[string]string, planJSON []byte, u UserInfo, p ProjectInfo, approvals ...[]ApprovalInfo) (*ApprovalDecision, error) {
+	resolved, err := s.ResolveForProject(ctx, tenantID, explicitPolicyID, projectTags)
+	if err != nil {
+		return nil, err
+	}
+	if len(resolved) == 0 {
+		return &ApprovalDecision{
+			Status:  opa.StatusAllowed,
+			Allowed: true,
+			Deny:    []string{},
+		}, nil
+	}
+	if len(p.Tags) == 0 && len(projectTags) > 0 {
+		p.Tags = projectTags
+	}
+	inputMap, _, err := s.BuildInput(planJSON, u, p, approvals...)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]PolicyEvalItem, 0, len(resolved))
+	var allDeny []string
+	anyDenied := false
+	anyUndecided := false
+
+	for _, rp := range resolved {
+		res, evalErr := s.engine().Evaluate(ctx, rp.Policy.Rego(), inputMap)
+		if evalErr != nil {
+			return nil, fmt.Errorf("policy %s (%s): %w", rp.Policy.Name(), rp.Policy.ID(), evalErr)
+		}
+		item := PolicyEvalItem{
+			PolicyID:   rp.Policy.ID(),
+			PolicyName: rp.Policy.Name(),
+			Source:     rp.Source,
+			MatchedTag: rp.MatchedTag,
+			Status:     res.Status,
+			Allowed:    res.Allowed,
+			Undecided:  res.Undecided,
+			Deny:       res.Deny,
+		}
+		items = append(items, item)
+		if !res.Allowed {
+			if res.Undecided {
+				anyUndecided = true
+			} else {
+				anyDenied = true
+			}
+		}
+		for _, d := range res.Deny {
+			if len(resolved) > 1 {
+				allDeny = append(allDeny, fmt.Sprintf("[%s] %s", rp.Policy.Name(), d))
+			} else {
+				allDeny = append(allDeny, d)
+			}
+		}
+	}
+
+	primary := items[0]
+	for _, it := range items {
+		if !it.Allowed && !it.Undecided {
+			primary = it
+			break
+		}
+	}
+	if primary.Allowed {
+		for _, it := range items {
+			if it.Undecided {
+				primary = it
+				break
+			}
+		}
+	}
+
+	aggStatus := opa.StatusAllowed
+	aggAllowed := true
+	aggUndecided := false
+	if anyDenied {
+		aggStatus = opa.StatusDenied
+		aggAllowed = false
+		aggUndecided = false
+	} else if anyUndecided {
+		aggStatus = opa.StatusUndecided
+		aggAllowed = false
+		aggUndecided = true
+	}
+	if allDeny == nil {
+		allDeny = []string{}
+	}
+
+	return &ApprovalDecision{
+		PolicyID:   primary.PolicyID,
+		PolicyName: primary.PolicyName,
+		Source:     primary.Source,
+		MatchedTag: primary.MatchedTag,
+		Status:     aggStatus,
+		Allowed:    aggAllowed,
+		Undecided:  aggUndecided,
+		Deny:       allDeny,
+		Policies:   items,
+	}, nil
 }
 
 func ensurePlanAliases(inputMap map[string]any) {

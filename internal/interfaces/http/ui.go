@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,11 +16,13 @@ import (
 	"strings"
 	"time"
 
+	auditapp "infra-guy/internal/application/audit"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
+	"infra-guy/internal/domain/audit"
 	"infra-guy/internal/domain/dependency"
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
@@ -87,14 +90,31 @@ type stepView struct {
 	Logs    string
 }
 
+type runPolicyEvalItemView struct {
+	PolicyID    string
+	PolicyName  string
+	SourceBadge string
+	Allowed     bool
+	Undecided   bool
+	Deny        []string
+}
+
 type runPolicyEvalView struct {
-	PolicyID   string
-	PolicyName string
-	Status     string
-	Allowed    bool
-	Undecided  bool
-	Deny       []string
-	Error      string
+	PolicyID    string
+	PolicyName  string
+	SourceBadge string
+	Status      string
+	Allowed     bool
+	Undecided   bool
+	Deny        []string
+	Error       string
+	Policies    []runPolicyEvalItemView
+}
+
+type tagBoundPolicyView struct {
+	ID    string
+	Name  string
+	Badge string
 }
 
 type historyView struct {
@@ -168,7 +188,34 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /policies/{id}", u.policyDetails)
 	mux.HandleFunc("POST /policies/{id}", u.updatePolicy)
 	mux.HandleFunc("POST /policies/{id}/delete", u.deletePolicy)
+	mux.HandleFunc("GET /audit", u.auditLog)
+	mux.HandleFunc("GET /audit/export", u.exportAuditLog)
 	mux.Handle("GET /static/", http.FileServer(http.FS(content)))
+}
+
+func (u *ui) recordAudit(r *http.Request, tenantID, action, resourceType, resourceID, resourceName, summary string, metadata map[string]any) {
+	if u.cfg.Audits == nil {
+		return
+	}
+	info := u.userInfo(r)
+	actorLogin := firstNonEmpty(firstNonEmpty(info.Login, u.actor(r)), "system")
+	ip := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if ip == "" {
+		ip = strings.TrimSpace(r.RemoteAddr)
+	}
+	_, _ = u.cfg.Audits.Record(r.Context(), auditapp.RecordInput{
+		TenantID:     tenantID,
+		ActorID:      info.ID,
+		ActorLogin:   actorLogin,
+		ActorRole:    info.Role,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		ResourceName: resourceName,
+		Summary:      summary,
+		Metadata:     metadata,
+		IPAddress:    ip,
+	})
 }
 
 func (u *ui) actor(r *http.Request) string {
@@ -1905,6 +1952,9 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	u.recordAudit(r, tenantID, "workspace.created", "workspace", string(p.Snapshot().ID), p.Snapshot().Name,
+		fmt.Sprintf("Created workspace %s (%s)", p.Snapshot().Name, sourceRepo.String()),
+		map[string]any{"repo": sourceRepo.String(), "branch": branch, "tags": project.FormatTags(tags), "approval_policy_id": policyID})
 	http.Redirect(w, r, "/projects/"+string(p.Snapshot().ID), http.StatusSeeOther)
 }
 
@@ -1998,6 +2048,9 @@ func (u *ui) importState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "state.imported", "state", string(ps.ID), ps.Name,
+		fmt.Sprintf("Imported Terraform state (%d B) into workspace %s", len(data), ps.Name),
+		map[string]any{"size_bytes": len(data)})
 	if r.Header.Get("HX-Request") == "true" {
 		u.tabState(w, r)
 		return
@@ -2023,6 +2076,7 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 		"Versions":         u.versions(r.Context()),
 		"Contexts":         u.contextChoices(r.Context(), ps.TenantID, ps.ID),
 		"Policies":         u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
+		"TagBoundPolicies": u.tagBoundPolicies(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags),
 	})
 }
 
@@ -2072,6 +2126,9 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	u.recordAudit(r, ps.TenantID, "workspace.updated", "workspace", string(id), ps.Name,
+		fmt.Sprintf("Updated settings for workspace %s", ps.Name),
+		map[string]any{"branch": r.FormValue("branch"), "workdir": r.FormValue("workdir"), "auto_approve": r.FormValue("auto_approve") == "on", "approval_policy_id": policyID, "tags": project.FormatTags(tags)})
 	http.Redirect(w, r, "/projects/"+string(id)+"/details", http.StatusSeeOther)
 }
 
@@ -2096,6 +2153,9 @@ func (u *ui) updateProjectPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "workspace.policy_updated", "workspace", string(ps.ID), ps.Name,
+		fmt.Sprintf("Updated approval policy on workspace %s to %s", ps.Name, firstNonEmpty(policyID, "none")),
+		map[string]any{"approval_policy_id": policyID})
 	http.Redirect(w, r, "/projects/"+string(ps.ID), http.StatusSeeOther)
 }
 
@@ -2104,11 +2164,22 @@ func (u *ui) lock(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	if err := u.cfg.Projects.SetLocked(r.Context(), p.Snapshot().ID, !p.Snapshot().Locked); err != nil {
+	ps := p.Snapshot()
+	nextLocked := !ps.Locked
+	if err := u.cfg.Projects.SetLocked(r.Context(), ps.ID, nextLocked); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/projects/"+string(p.Snapshot().ID), http.StatusSeeOther)
+	action := "workspace.unlocked"
+	verb := "Unlocked"
+	if nextLocked {
+		action = "workspace.locked"
+		verb = "Locked"
+	}
+	u.recordAudit(r, ps.TenantID, action, "workspace", string(ps.ID), ps.Name,
+		fmt.Sprintf("%s workspace %s", verb, ps.Name),
+		map[string]any{"locked": nextLocked})
+	http.Redirect(w, r, "/projects/"+string(ps.ID), http.StatusSeeOther)
 }
 
 func (u *ui) trigger(w http.ResponseWriter, r *http.Request) {
@@ -2147,7 +2218,11 @@ func (u *ui) trigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/runs/"+string(opened.Snapshot().ID), http.StatusSeeOther)
+	rs := opened.Snapshot()
+	u.recordAudit(r, ps.TenantID, "run.triggered", "run", string(rs.ID), ps.Name,
+		fmt.Sprintf("Manually triggered run %s on workspace %s (%s@%s)", rs.ID, ps.Name, ps.DefaultBranch, shortSHA(sha)),
+		map[string]any{"project_id": string(ps.ID), "sha": sha, "branch": ps.DefaultBranch})
+	http.Redirect(w, r, "/runs/"+string(rs.ID), http.StatusSeeOther)
 }
 
 func (u *ui) forceUnlock(w http.ResponseWriter, r *http.Request) {
@@ -2155,11 +2230,14 @@ func (u *ui) forceUnlock(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	id := p.Snapshot().ID
+	ps := p.Snapshot()
+	id := ps.ID
 	if err := u.cfg.Projects.ForceUnlock(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "workspace.force_unlocked", "workspace", string(id), ps.Name,
+		fmt.Sprintf("Force-unlocked state on workspace %s", ps.Name), nil)
 	http.Redirect(w, r, "/projects/"+string(id)+"/details", http.StatusSeeOther)
 }
 
@@ -2168,10 +2246,13 @@ func (u *ui) delete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	if err := u.cfg.Projects.Delete(r.Context(), p.Snapshot().ID); err != nil {
+	ps := p.Snapshot()
+	if err := u.cfg.Projects.Delete(r.Context(), ps.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "workspace.deleted", "workspace", string(ps.ID), ps.Name,
+		fmt.Sprintf("Deleted workspace %s (%s)", ps.Name, ps.Repo.String()), nil)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -2229,11 +2310,13 @@ func (u *ui) changes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) approve(w http.ResponseWriter, r *http.Request) {
-	rn, _, err := u.loadRun(w, r)
+	rn, p, err := u.loadRun(w, r)
 	if err != nil {
 		return
 	}
-	id := rn.Snapshot().ID
+	rs := rn.Snapshot()
+	ps := p.Snapshot()
+	id := rs.ID
 	info := u.userInfo(r)
 	if err := u.cfg.Runs.Approve(r.Context(), id, run.Approval{
 		UserID: info.ID,
@@ -2243,6 +2326,9 @@ func (u *ui) approve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "run.approved", "run", string(id), ps.Name,
+		fmt.Sprintf("Approved run %s on workspace %s", id, ps.Name),
+		map[string]any{"project_id": string(ps.ID), "sha": rs.SHA})
 	if r.Header.Get("HX-Request") == "true" {
 		w.Header().Set("HX-Redirect", "/runs/"+string(id))
 		w.WriteHeader(http.StatusOK)
@@ -2252,16 +2338,21 @@ func (u *ui) approve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) unapprove(w http.ResponseWriter, r *http.Request) {
-	rn, _, err := u.loadRun(w, r)
+	rn, p, err := u.loadRun(w, r)
 	if err != nil {
 		return
 	}
-	id := rn.Snapshot().ID
+	rs := rn.Snapshot()
+	ps := p.Snapshot()
+	id := rs.ID
 	info := u.userInfo(r)
 	if err := u.cfg.Runs.Unapprove(r.Context(), id, firstNonEmpty(info.Login, u.actor(r)), info.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "run.unapproved", "run", string(id), ps.Name,
+		fmt.Sprintf("Revoked approval for run %s on workspace %s", id, ps.Name),
+		map[string]any{"project_id": string(ps.ID), "sha": rs.SHA})
 	if r.Header.Get("HX-Request") == "true" {
 		w.Header().Set("HX-Redirect", "/runs/"+string(id))
 		w.WriteHeader(http.StatusOK)
@@ -2277,26 +2368,36 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 	}
 	rs := rn.Snapshot()
 	ps := p.Snapshot()
-	if ps.ApprovalPolicyID != "" {
-		if u.cfg.Policies == nil {
-			http.Error(w, "policy service not configured", http.StatusInternalServerError)
+	if ps.ApprovalPolicyID != "" && u.cfg.Policies == nil {
+		http.Error(w, "policy service not configured", http.StatusInternalServerError)
+		return
+	}
+	if u.cfg.Policies != nil {
+		resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags)
+		if rErr != nil {
+			http.Error(w, "Policy evaluation failed: "+rErr.Error(), http.StatusForbidden)
 			return
 		}
-		res, err := u.cfg.Policies.EvaluateForRun(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
-		if err != nil {
-			http.Error(w, "Policy evaluation failed: "+err.Error(), http.StatusForbidden)
-			return
-		}
-		if !res.Allowed {
-			msg := "Approval denied by policy"
-			if res.Undecided {
-				msg = "Approval undecided by policy"
+		if len(resolved) > 0 {
+			res, evalErr := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
+			if evalErr != nil {
+				http.Error(w, "Policy evaluation failed: "+evalErr.Error(), http.StatusForbidden)
+				return
 			}
-			if len(res.Deny) > 0 {
-				msg += ": " + strings.Join(res.Deny, "; ")
+			if !res.Allowed {
+				msg := "Approval denied by policy"
+				if res.Undecided {
+					msg = "Approval undecided by policy"
+				}
+				if len(res.Deny) > 0 {
+					msg += ": " + strings.Join(res.Deny, "; ")
+				}
+				u.recordAudit(r, ps.TenantID, "policy.enforcement_blocked", "run", string(rs.ID), ps.Name,
+					fmt.Sprintf("Policy %s blocked confirmation of run %s on workspace %s (%s)", res.PolicyName, rs.ID, ps.Name, msg),
+					map[string]any{"project_id": string(ps.ID), "policy_id": string(res.PolicyID), "status": string(res.Status), "deny": res.Deny})
+				http.Error(w, msg, http.StatusForbidden)
+				return
 			}
-			http.Error(w, msg, http.StatusForbidden)
-			return
 		}
 	}
 	id := rs.ID
@@ -2308,6 +2409,9 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "run.confirmed", "run", string(id), ps.Name,
+		fmt.Sprintf("Confirmed apply for run %s on workspace %s", id, ps.Name),
+		map[string]any{"project_id": string(ps.ID), "sha": rs.SHA})
 	if r.Header.Get("HX-Request") == "true" {
 		u.history(w, r)
 		return
@@ -2316,15 +2420,20 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *ui) cancel(w http.ResponseWriter, r *http.Request) {
-	rn, _, err := u.loadRun(w, r)
+	rn, p, err := u.loadRun(w, r)
 	if err != nil {
 		return
 	}
-	id := rn.Snapshot().ID
+	rs := rn.Snapshot()
+	ps := p.Snapshot()
+	id := rs.ID
 	if err := u.cfg.Runs.Cancel(r.Context(), id, u.actor(r)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "run.cancelled", "run", string(id), ps.Name,
+		fmt.Sprintf("Cancelled run %s on workspace %s", id, ps.Name),
+		map[string]any{"project_id": string(ps.ID), "sha": rs.SHA})
 	if r.Header.Get("HX-Request") == "true" {
 		u.history(w, r)
 		return
@@ -2883,6 +2992,9 @@ func (u *ui) createContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, tenantID, "context.created", "context", string(c.Snapshot().ID), c.Snapshot().Name,
+		fmt.Sprintf("Created context %s", c.Snapshot().Name),
+		map[string]any{"tags": project.FormatTags(tags)})
 	http.Redirect(w, r, "/contexts/"+string(c.Snapshot().ID), http.StatusSeeOther)
 }
 
@@ -2960,6 +3072,9 @@ func (u *ui) updateContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, tenantID, "context.updated", "context", string(id), r.FormValue("name"),
+		fmt.Sprintf("Updated context %s", r.FormValue("name")),
+		map[string]any{"tags": project.FormatTags(tags)})
 	http.Redirect(w, r, "/contexts/"+string(id), http.StatusSeeOther)
 }
 
@@ -2978,10 +3093,12 @@ func (u *ui) upsertContextEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := tfcontext.ID(r.PathValue("id"))
+	kind := tfcontext.EntryKind(r.FormValue("kind"))
+	key := r.FormValue("key")
 	err := u.cfg.Contexts.UpsertEntry(
 		r.Context(), tenantID, id,
-		tfcontext.EntryKind(r.FormValue("kind")),
-		r.FormValue("key"),
+		kind,
+		key,
 		r.FormValue("value"),
 	)
 	if err != nil {
@@ -2992,6 +3109,9 @@ func (u *ui) upsertContextEntry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, tenantID, "context.entry_upserted", "context", string(id), key,
+		fmt.Sprintf("Upserted %s entry %s in context %s (value redacted)", kind, key, id),
+		map[string]any{"kind": string(kind), "key": key, "secret": kind != tfcontext.KindPlainEnv})
 	http.Redirect(w, r, "/contexts/"+string(id), http.StatusSeeOther)
 }
 
@@ -3006,7 +3126,8 @@ func (u *ui) deleteContextEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := tfcontext.ID(r.PathValue("id"))
-	err := u.cfg.Contexts.DeleteEntry(r.Context(), tenantID, id, r.PathValue("entryID"))
+	entryID := r.PathValue("entryID")
+	err := u.cfg.Contexts.DeleteEntry(r.Context(), tenantID, id, entryID)
 	if err != nil {
 		if errors.Is(err, tfcontextapp.ErrNotFound) {
 			http.NotFound(w, r)
@@ -3015,6 +3136,9 @@ func (u *ui) deleteContextEntry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, tenantID, "context.entry_deleted", "context", string(id), entryID,
+		fmt.Sprintf("Deleted entry %s from context %s", entryID, id),
+		map[string]any{"entry_id": entryID})
 	http.Redirect(w, r, "/contexts/"+string(id), http.StatusSeeOther)
 }
 
@@ -3037,6 +3161,8 @@ func (u *ui) deleteContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, tenantID, "context.deleted", "context", string(id), string(id),
+		fmt.Sprintf("Deleted context %s", id), nil)
 	http.Redirect(w, r, "/contexts", http.StatusSeeOther)
 }
 
@@ -3174,9 +3300,53 @@ func approvalsInfoFrom(approvals []run.Approval) []policyapp.ApprovalInfo {
 	return out
 }
 
+func (u *ui) tagBoundPolicies(ctx context.Context, tenantID string, explicitID policy.ID, projectTags map[string]string) []tagBoundPolicyView {
+	if u.cfg.Policies == nil || tenantID == "" {
+		return nil
+	}
+	resolved, err := u.cfg.Policies.ResolveForProject(ctx, tenantID, explicitID, projectTags)
+	if err != nil {
+		return nil
+	}
+	var out []tagBoundPolicyView
+	for _, rp := range resolved {
+		if rp.Source == "explicit" {
+			continue
+		}
+		badge := "Tag: " + rp.MatchedTag
+		if rp.Source == "global" {
+			badge = "Global (" + rp.MatchedTag + ")"
+		}
+		out = append(out, tagBoundPolicyView{
+			ID:    string(rp.Policy.ID()),
+			Name:  rp.Policy.Name(),
+			Badge: badge,
+		})
+	}
+	return out
+}
+
+func policySourceBadge(source, matchedTag string, multi bool) string {
+	switch source {
+	case "tag-bound":
+		return "Tag: " + matchedTag
+	case "global":
+		return "Global (" + matchedTag + ")"
+	case "explicit":
+		if multi {
+			return "Explicit"
+		}
+	}
+	return ""
+}
+
 func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snapshot) *runPolicyEvalView {
 	approvable := rs.Status == run.StatusNeedsApproval || (rs.PlanOnly && rs.Status == run.StatusPlanned && rs.HasChanges())
-	if !approvable || ps.ApprovalPolicyID == "" || u.cfg.Policies == nil {
+	if !approvable || u.cfg.Policies == nil {
+		return nil
+	}
+	resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags)
+	if rErr == nil && len(resolved) == 0 {
 		return nil
 	}
 	polID := policy.ID(ps.ApprovalPolicyID)
@@ -3184,7 +3354,7 @@ func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snap
 	if polName == "" {
 		polName = ps.ApprovalPolicyID
 	}
-	res, err := u.cfg.Policies.EvaluateForRun(r.Context(), ps.TenantID, polID, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
+	res, err := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, polID, ps.Tags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
 	if err != nil {
 		return &runPolicyEvalView{
 			PolicyID:   ps.ApprovalPolicyID,
@@ -3193,13 +3363,27 @@ func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snap
 			Deny:       []string{"Policy evaluation error: " + err.Error()},
 		}
 	}
+	multi := len(res.Policies) > 1
+	items := make([]runPolicyEvalItemView, 0, len(res.Policies))
+	for _, it := range res.Policies {
+		items = append(items, runPolicyEvalItemView{
+			PolicyID:    string(it.PolicyID),
+			PolicyName:  it.PolicyName,
+			SourceBadge: policySourceBadge(it.Source, it.MatchedTag, multi),
+			Allowed:     it.Allowed,
+			Undecided:   it.Undecided,
+			Deny:        it.Deny,
+		})
+	}
 	return &runPolicyEvalView{
-		PolicyID:   string(res.PolicyID),
-		PolicyName: firstNonEmpty(res.PolicyName, polName),
-		Status:     string(res.Status),
-		Allowed:    res.Allowed,
-		Undecided:  res.Undecided,
-		Deny:       res.Deny,
+		PolicyID:    string(res.PolicyID),
+		PolicyName:  firstNonEmpty(res.PolicyName, polName),
+		SourceBadge: policySourceBadge(res.Source, res.MatchedTag, multi),
+		Status:      string(res.Status),
+		Allowed:     res.Allowed,
+		Undecided:   res.Undecided,
+		Deny:        res.Deny,
+		Policies:    items,
 	}
 }
 
@@ -3279,7 +3463,11 @@ func (u *ui) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	http.Redirect(w, r, "/policies/"+string(p.Snapshot().ID), http.StatusSeeOther)
+	ps := p.Snapshot()
+	u.recordAudit(r, tenantID, "policy.created", "policy", string(ps.ID), ps.Name,
+		fmt.Sprintf("Created OPA policy %s", ps.Name),
+		map[string]any{"tags": project.FormatTags(tags)})
+	http.Redirect(w, r, "/policies/"+string(ps.ID), http.StatusSeeOther)
 }
 
 func (u *ui) testPolicy(w http.ResponseWriter, r *http.Request) {
@@ -3416,6 +3604,9 @@ func (u *ui) updatePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, tenantID, "policy.updated", "policy", string(id), r.FormValue("name"),
+		fmt.Sprintf("Updated OPA policy %s", r.FormValue("name")),
+		map[string]any{"tags": project.FormatTags(tags)})
 	http.Redirect(w, r, "/policies/"+string(id), http.StatusSeeOther)
 }
 
@@ -3430,6 +3621,7 @@ func (u *ui) deletePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := policy.ID(r.PathValue("id"))
+	polName := u.policyName(r.Context(), tenantID, id)
 	if err := u.cfg.Policies.Delete(r.Context(), tenantID, id); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
 			http.NotFound(w, r)
@@ -3438,6 +3630,8 @@ func (u *ui) deletePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Cannot delete policy (detach it from any projects first): "+err.Error(), http.StatusConflict)
 		return
 	}
+	u.recordAudit(r, tenantID, "policy.deleted", "policy", string(id), firstNonEmpty(polName, string(id)),
+		fmt.Sprintf("Deleted OPA policy %s", firstNonEmpty(polName, string(id))), nil)
 	http.Redirect(w, r, "/policies", http.StatusSeeOther)
 }
 
@@ -3734,7 +3928,260 @@ func (u *ui) deleteDependencyMapping(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	u.recordAudit(r, ps.TenantID, "dependency.updated", "dependency", string(depID), ps.Name,
+		fmt.Sprintf("Removed output mapping from workspace %s dependency %s", ps.Name, depID), nil)
 	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/dependencies", http.StatusSeeOther)
 }
+
+type auditEntryRow struct {
+	ID            string
+	Timestamp     string
+	ActorLogin    string
+	ActorRole     string
+	Action        string
+	ActionClass   string
+	ResourceType  string
+	ResourceID    string
+	ResourceLabel string
+	ResourceURL   string
+	Summary       string
+	PrevHash      string
+	EntryHash     string
+	ShortHash     string
+	Verified      bool
+}
+
+func auditActionClass(action string) string {
+	switch {
+	case strings.HasSuffix(action, ".deleted") || strings.Contains(action, "blocked") || strings.Contains(action, "cancelled") || strings.Contains(action, "force_unlocked"):
+		return "pill-failed"
+	case strings.HasSuffix(action, ".created") || strings.HasSuffix(action, ".confirmed") || strings.HasSuffix(action, ".approved"):
+		return "pill-finished"
+	case strings.Contains(action, "locked") || strings.Contains(action, "policy") || strings.Contains(action, "imported") || strings.Contains(action, "entry"):
+		return "pill-unconfirmed"
+	default:
+		return "pill-running"
+	}
+}
+
+func auditResourceURL(resourceType, resourceID string) string {
+	if resourceID == "" {
+		return ""
+	}
+	switch resourceType {
+	case "workspace":
+		return "/projects/" + resourceID
+	case "state":
+		return "/projects/" + resourceID + "/tabs/state"
+	case "run":
+		return "/runs/" + resourceID
+	case "policy":
+		return "/policies/" + resourceID
+	case "context":
+		return "/contexts/" + resourceID
+	default:
+		return ""
+	}
+}
+
+func isSecurityOrGovernanceAudit(e audit.Snapshot) bool {
+	switch e.ResourceType {
+	case "policy", "context", "state":
+		return true
+	}
+	return strings.Contains(e.Action, "lock") || strings.Contains(e.Action, "policy") || strings.Contains(e.Action, "approve") || strings.Contains(e.Action, "confirm")
+}
+
+func (u *ui) parseAuditFilter(r *http.Request) (audit.Filter, string) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	resType := strings.TrimSpace(r.URL.Query().Get("resource_type"))
+	actor := strings.TrimSpace(r.URL.Query().Get("actor"))
+	action := strings.TrimSpace(r.URL.Query().Get("action"))
+	window := strings.TrimSpace(r.URL.Query().Get("window"))
+
+	now := u.now()
+	var since time.Time
+	switch window {
+	case "24h":
+		since = now.Add(-24 * time.Hour)
+	case "7d":
+		since = now.Add(-7 * 24 * time.Hour)
+	case "30d":
+		since = now.Add(-30 * 24 * time.Hour)
+	case "90d":
+		since = now.Add(-90 * 24 * time.Hour)
+	default:
+		window = ""
+	}
+	return audit.Filter{
+		ResourceType: resType,
+		ActorLogin:   actor,
+		Action:       action,
+		Query:        q,
+		Since:        since,
+		Limit:        500,
+	}, window
+}
+
+func (u *ui) auditLog(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	filter, window := u.parseAuditFilter(r)
+
+	var allEntries []audit.Snapshot
+	var filtered []audit.Snapshot
+	if u.cfg.Audits != nil {
+		var err error
+		allEntries, err = u.cfg.Audits.List(r.Context(), tenantID, audit.Filter{Limit: 1000})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, e := range allEntries {
+			if audit.MatchesFilter(e, filter) {
+				filtered = append(filtered, e)
+			}
+		}
+	}
+
+	chainVerified := audit.VerifyChain(allEntries, true)
+	var headHash string
+	if len(allEntries) > 0 && len(allEntries[0].EntryHash) >= 12 {
+		headHash = allEntries[0].EntryHash[:12]
+	}
+
+	actors := make(map[string]bool)
+	securityEvents := 0
+	for _, e := range allEntries {
+		if e.ActorLogin != "" {
+			actors[e.ActorLogin] = true
+		}
+		if isSecurityOrGovernanceAudit(e) {
+			securityEvents++
+		}
+	}
+
+	rows := make([]auditEntryRow, 0, len(filtered))
+	for _, e := range filtered {
+		shortHash := e.EntryHash
+		if len(shortHash) > 12 {
+			shortHash = shortHash[:12]
+		}
+		label := firstNonEmpty(firstNonEmpty(e.ResourceName, e.ResourceID), "-")
+		rows = append(rows, auditEntryRow{
+			ID:            string(e.ID),
+			Timestamp:     e.CreatedAt.UTC().Format("2006-01-02 15:04:05"),
+			ActorLogin:    firstNonEmpty(e.ActorLogin, "system"),
+			ActorRole:     e.ActorRole,
+			Action:        e.Action,
+			ActionClass:   auditActionClass(e.Action),
+			ResourceType:  e.ResourceType,
+			ResourceID:    e.ResourceID,
+			ResourceLabel: label,
+			ResourceURL:   auditResourceURL(e.ResourceType, e.ResourceID),
+			Summary:       e.Summary,
+			PrevHash:      e.PrevHash,
+			EntryHash:     e.EntryHash,
+			ShortHash:     shortHash,
+			Verified:      audit.VerifyEntry(e),
+		})
+	}
+
+	u.page(w, "Audit Log", "audit", map[string]any{
+		"TenantID":       tenantID,
+		"TotalEvents":    len(allEntries),
+		"FilteredCount":  len(filtered),
+		"ChainVerified":  chainVerified,
+		"HeadHash":       headHash,
+		"UniqueActors":   len(actors),
+		"SecurityEvents": securityEvents,
+		"Query":          filter.Query,
+		"ResourceType":   filter.ResourceType,
+		"Actor":          filter.ActorLogin,
+		"Window":         window,
+		"RawQuery":       r.URL.RawQuery,
+		"Entries":        rows,
+	})
+}
+
+func (u *ui) exportAuditLog(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return
+	}
+	filter, _ := u.parseAuditFilter(r)
+	filter.Limit = 5000
+
+	var entries []audit.Snapshot
+	if u.cfg.Audits != nil {
+		var err error
+		entries, err = u.cfg.Audits.List(r.Context(), tenantID, filter)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "json" {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"audit-log-%s.json\"", tenantID))
+		payload := map[string]any{
+			"tenant_id":      tenantID,
+			"exported_at":    u.now().UTC().Format(time.RFC3339),
+			"count":          len(entries),
+			"chain_verified": audit.VerifyChain(entries, filter.ResourceType == "" && filter.ActorLogin == "" && filter.Query == "" && filter.Since.IsZero()),
+			"entries":        entries,
+		}
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(payload)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"audit-log-%s.csv\"", tenantID))
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{
+		"id",
+		"timestamp_utc",
+		"tenant_id",
+		"actor_id",
+		"actor_login",
+		"actor_role",
+		"action",
+		"resource_type",
+		"resource_id",
+		"resource_name",
+		"summary",
+		"ip_address",
+		"prev_hash",
+		"entry_hash",
+	})
+	for _, e := range entries {
+		_ = cw.Write([]string{
+			string(e.ID),
+			e.CreatedAt.UTC().Format(time.RFC3339),
+			e.TenantID,
+			e.ActorID,
+			e.ActorLogin,
+			e.ActorRole,
+			e.Action,
+			e.ResourceType,
+			e.ResourceID,
+			e.ResourceName,
+			e.Summary,
+			e.IPAddress,
+			e.PrevHash,
+			e.EntryHash,
+		})
+	}
+	cw.Flush()
+}
+
 
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	authapp "infra-guy/internal/application/auth"
+	auditapp "infra-guy/internal/application/audit"
 	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
@@ -14,6 +15,7 @@ import (
 	stateapp "infra-guy/internal/application/state"
 	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/application/worker"
+	"infra-guy/internal/domain/audit"
 	"infra-guy/internal/domain/project"
 )
 
@@ -36,6 +38,7 @@ type ServerConfig struct {
 	Contexts      *tfcontextapp.Service
 	Policies      *policyapp.Service
 	Dependencies  *dependencyapp.Service
+	Audits        *auditapp.Service
 	Versions      VersionLister
 	Checkout      brancher
 	Lookup        commitLookup
@@ -47,6 +50,16 @@ type ServerConfig struct {
 }
 
 func NewServer(cfg ServerConfig) http.Handler {
+	if cfg.Audits == nil {
+		var nowFn func() = nil
+		_ = nowFn
+		cfg.Audits = &auditapp.Service{
+			Repo: audit.NewMemoryRepository(),
+		}
+		if cfg.Auth != nil && cfg.Auth.Now != nil {
+			cfg.Audits.Now = cfg.Auth.Now
+		}
+	}
 	api := New(cfg.States, cfg.Runs, cfg.Projects, WithWebhook(cfg.Installations, cfg.WebhookSecret))
 	uiMux := http.NewServeMux()
 	(&ui{cfg: cfg}).routes(uiMux)

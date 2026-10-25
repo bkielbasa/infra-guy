@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"infra-guy/internal/domain/audit"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/state"
@@ -733,3 +734,70 @@ func TestContextRepoCRUDAndEncryption(t *testing.T) {
 		t.Fatalf("after Delete: err=%v got=%#v", err, deleted)
 	}
 }
+
+func TestAuditRepoAppendListAndChainVerification(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewAuditRepo(pool)
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenantID := "ten-audit-" + suffix
+	if _, err := pool.Exec(ctx, `INSERT INTO tenants (id, name, github_account_id, account_type, created_at, updated_at)
+		VALUES ($1, 'acme', $2, 'organization', now(), now())`, tenantID, time.Now().UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+
+	s1, err := repo.Append(ctx, audit.Snapshot{
+		ID:           audit.ID("aud-1-" + suffix),
+		TenantID:     tenantID,
+		ActorID:      "u-1",
+		ActorLogin:   "alice",
+		ActorRole:    "admin",
+		Action:       "workspace.created",
+		ResourceType: "workspace",
+		ResourceID:   "p-1",
+		ResourceName: "prod-vpc",
+		Summary:      "Created workspace prod-vpc",
+		Metadata:     map[string]any{"provider": "opentofu"},
+		CreatedAt:    now,
+	})
+	if err != nil {
+		t.Fatalf("append 1: %v", err)
+	}
+	s2, err := repo.Append(ctx, audit.Snapshot{
+		ID:           audit.ID("aud-2-" + suffix),
+		TenantID:     tenantID,
+		ActorID:      "u-2",
+		ActorLogin:   "bob",
+		ActorRole:    "member",
+		Action:       "run.confirmed",
+		ResourceType: "run",
+		ResourceID:   "r-1",
+		ResourceName: "prod-vpc",
+		Summary:      "Confirmed apply for run r-1 on workspace prod-vpc",
+		Metadata:     map[string]any{"status": "applying"},
+		CreatedAt:    now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("append 2: %v", err)
+	}
+	if s2.PrevHash != s1.EntryHash {
+		t.Fatalf("expected s2.PrevHash (%q) == s1.EntryHash (%q)", s2.PrevHash, s1.EntryHash)
+	}
+
+	entries, err := repo.ListByTenant(ctx, tenantID, audit.Filter{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if !audit.VerifyChain(entries, true) {
+		t.Fatalf("expected hash chain to verify after postgres round-trip")
+	}
+}
+

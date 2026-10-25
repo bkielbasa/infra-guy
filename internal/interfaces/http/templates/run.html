@@ -5,12 +5,30 @@
   {{if .PolicyEval}}
   <div class="policy-eval">
     <strong>Approval Policy:</strong> <a href="/policies/{{.PolicyEval.PolicyID}}">{{.PolicyEval.PolicyName}}</a>
+    {{if .PolicyEval.SourceBadge}}<span class="tag-pill">{{.PolicyEval.SourceBadge}}</span>{{end}}
     {{if .PolicyEval.Allowed}}
     <span class="pill pill-finished">Allowed</span>
     {{else if .PolicyEval.Undecided}}
     <span class="pill pill-unconfirmed">Undecided</span>
     {{else}}
     <span class="pill pill-failed">Denied</span>
+    {{end}}
+    {{if gt (len .PolicyEval.Policies) 1}}
+    <div class="policy-eval-list" style="margin-top: 8px; display: flex; flex-direction: column; gap: 6px;">
+      {{range .PolicyEval.Policies}}
+      <div class="policy-eval-item" style="display: flex; align-items: center; gap: 8px; font-size: 13px;">
+        <a href="/policies/{{.PolicyID}}"><strong>{{.PolicyName}}</strong></a>
+        {{if .SourceBadge}}<span class="tag-pill">{{.SourceBadge}}</span>{{end}}
+        {{if .Allowed}}
+        <span class="pill pill-finished">Allowed</span>
+        {{else if .Undecided}}
+        <span class="pill pill-unconfirmed">Undecided</span>
+        {{else}}
+        <span class="pill pill-failed">Denied</span>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
     {{end}}
     {{if .PolicyEval.Error}}
     <p class="policy-deny">{{.PolicyEval.Error}}</p>

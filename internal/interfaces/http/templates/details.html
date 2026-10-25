@@ -32,6 +32,14 @@
             <option value="">None</option>
             {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
           </select>
+          {{if .TagBoundPolicies}}
+          <div class="field-hint" style="margin-top: 6px;">
+            <strong>Tag-bound &amp; global policies automatically enforced:</strong>
+            {{range .TagBoundPolicies}}
+            <a href="/policies/{{.ID}}" class="tag-pill" style="text-decoration: none;">{{.Name}} ({{.Badge}})</a>
+            {{end}}
+          </div>
+          {{end}}
         </div>
       </div>
 

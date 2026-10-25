@@ -3211,6 +3211,268 @@ func TestAnalyticsCommittedAtActiveMTTRAndBatchQuery(t *testing.T) {
 	}
 }
 
+func TestTagBoundMultiPolicyUIAndEnforcement(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	repo, _ := project.ParseSourceRepo("acme/infra")
+
+	p, _ := project.New("p-prod", "prod-vpc", repo, now)
+	_ = p.SetPlacement("ten", 101)
+	_ = p.SetTags(map[string]string{"env": "prod", "team": "platform"})
+
+	projects := &memProjects{items: map[project.ID]*project.Project{"p-prod": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"r-prod": run.Restore(run.Snapshot{
+			ID:        "r-prod",
+			ProjectID: "p-prod",
+			Trigger:   run.TriggerManual,
+			Status:    run.StatusNeedsApproval,
+			SHA:       "deadbeef",
+			Branch:    "main",
+			PlanJSON:  []byte(`{"resource_changes":[{"address":"aws_s3_bucket.b","type":"aws_s3_bucket","change":{"actions":["delete"]}}]}`),
+			CreatedAt: now,
+		}),
+	}}
+	states := &memStates{items: map[string]*state.State{}}
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+
+	polRepo := newUIMemPolicies(projects)
+	polSeq := 0
+	polSvc := &policyapp.Service{
+		Policies: polRepo,
+		Engine:   opa.NewEvaluator(),
+		Now:      func() time.Time { return now },
+		NewID: func() string {
+			polSeq++
+			return fmt.Sprintf("pol-%d", polSeq)
+		},
+	}
+
+	// Create a global policy that allows everything
+	_, err := polSvc.Create(ctx, policyapp.CreateInput{
+		TenantID: "ten",
+		Name:     "Global Baseline",
+		Tags:     map[string]string{"scope": "global"},
+		Rego: `package infraguy.approval
+import rego.v1
+default allow := true
+`,
+	})
+	if err != nil {
+		t.Fatalf("create global policy: %v", err)
+	}
+
+	// Create a tag-bound policy (env:prod) that denies deleting aws_s3_bucket
+	_, err = polSvc.Create(ctx, policyapp.CreateInput{
+		TenantID: "ten",
+		Name:     "Prod No S3 Delete",
+		Tags:     map[string]string{"env": "prod"},
+		Rego: `package infraguy.approval
+import rego.v1
+default allow := true
+deny contains "prod: cannot delete s3 bucket in production" if {
+	some rc in input.plan.resource_changes
+	rc.type == "aws_s3_bucket"
+	"delete" in rc.change.actions
+}
+`,
+	})
+	if err != nil {
+		t.Fatalf("create prod policy: %v", err)
+	}
+
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc,
+		Runs:     runsSvc,
+		States:   stSvc,
+		Policies: polSvc,
+		Checkout: &stubTip{sha: "deadbeef"},
+		Lookup:   &stubLookup{},
+		Tokens:   uiTokenSource{store: store},
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+	})
+
+	// 1. Project details page shows inherited tag-bound & global policies even with no explicit ApprovalPolicyID
+	rr := getUI(t, h, "/projects/p-prod/details")
+	detailsBody := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /projects/p-prod/details = %d", rr.Code)
+	}
+	for _, want := range []string{
+		"Global Baseline",
+		"Prod No S3 Delete",
+		"env:prod",
+		"global",
+	} {
+		if !strings.Contains(detailsBody, want) {
+			t.Fatalf("expected details page to contain %q, got:\n%s", want, detailsBody)
+		}
+	}
+
+	// 2. Run page shows multi-policy evaluation breakdown and denies confirmation due to tag-bound policy
+	rr = getUI(t, h, "/runs/r-prod")
+	runBody := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /runs/r-prod = %d", rr.Code)
+	}
+	for _, want := range []string{
+		"Global Baseline",
+		"Prod No S3 Delete",
+		"prod: cannot delete s3 bucket in production",
+	} {
+		if !strings.Contains(runBody, want) {
+			t.Fatalf("expected run page to contain %q, got:\n%s", want, runBody)
+		}
+	}
+
+	// 3. POST /runs/r-prod/confirm is blocked by the tag-bound policy!
+	rrConfirm := postUI(t, h, "/runs/r-prod/confirm", nil)
+	if rrConfirm.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when tag-bound policy denies, got %d: %s", rrConfirm.Code, rrConfirm.Body.String())
+	}
+}
+
+func TestAuditLogUIAndComplianceExport(t *testing.T) {
+	now := time.Date(2026, 10, 25, 14, 0, 0, 0, time.UTC)
+	repo, _ := project.ParseSourceRepo("acme/infra")
+	p, _ := project.New("p1", "core-vpc", repo, now)
+	_ = p.SetPlacement("ten", 101)
+
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"r1": run.Restore(run.Snapshot{
+			ID:        "r1",
+			ProjectID: "p1",
+			Trigger:   run.TriggerManual,
+			Status:    run.StatusNeedsApproval,
+			SHA:       "abc1234",
+			Branch:    "main",
+			CreatedAt: now,
+		}),
+	}}
+	states := &memStates{items: map[string]*state.State{}}
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+
+	ctxRepo := newUIMemContexts()
+	ctxSeq := 0
+	ctxSvc := &tfcontextapp.Service{
+		Contexts: ctxRepo,
+		Now:      func() time.Time { return now },
+		NewID: func() string {
+			ctxSeq++
+			return fmt.Sprintf("ctx-%d", ctxSeq)
+		},
+	}
+
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+		repos: map[int64][]installation.Repo{100: {{ID: 101, Owner: "acme", Name: "infra"}}},
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc,
+		Runs:     runsSvc,
+		States:   stSvc,
+		Contexts: ctxSvc,
+		Checkout: &stubTip{sha: "abc1234"},
+		Lookup:   &stubLookup{},
+		Tokens:   uiTokenSource{store: store},
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: func() time.Time { return now }, NewID: func() string { return "inst-1" },
+		},
+	})
+
+	// Perform audited actions:
+	// 1) Lock and unlock workspace (POST /projects/p1/lock toggles lock state)
+	if rr := postUI(t, h, "/projects/p1/lock", nil); rr.Code != http.StatusSeeOther {
+		t.Fatalf("lock project = %d", rr.Code)
+	}
+	if rr := postUI(t, h, "/projects/p1/lock", nil); rr.Code != http.StatusSeeOther {
+		t.Fatalf("unlock project = %d", rr.Code)
+	}
+	// 2) Create context and add a secret entry (ensure secret value is redacted in audit log!)
+	if rr := postUI(t, h, "/contexts", strings.NewReader("name=aws-creds")); rr.Code != http.StatusSeeOther {
+		t.Fatalf("create context = %d", rr.Code)
+	}
+	if rr := postUI(t, h, "/contexts/ctx-1/entries", strings.NewReader("kind=secret_env&key=AWS_SECRET_ACCESS_KEY&value=top-secret-never-log")); rr.Code != http.StatusSeeOther {
+		t.Fatalf("upsert secret entry = %d", rr.Code)
+	}
+	// 3) Confirm run
+	if rr := postUI(t, h, "/runs/r1/confirm", nil); rr.Code != http.StatusSeeOther {
+		t.Fatalf("confirm run = %d", rr.Code)
+	}
+
+	// Verify GET /audit renders audit log entries, SHA-256 chain verification badge, and redacts secret values
+	rrAudit := getUI(t, h, "/audit")
+	auditBody := rrAudit.Body.String()
+	if rrAudit.Code != http.StatusOK {
+		t.Fatalf("GET /audit = %d: %s", rrAudit.Code, auditBody)
+	}
+	for _, want := range []string{
+		"Audit Log &amp; Compliance",
+		"Hash Chain Integrity",
+		"Verified",
+		"workspace.locked",
+		"workspace.unlocked",
+		"context.created",
+		"context.entry_upserted",
+		"run.confirmed",
+		"(value redacted)",
+	} {
+		if !strings.Contains(auditBody, want) {
+			t.Fatalf("expected /audit to contain %q, got:\n%s", want, auditBody)
+		}
+	}
+	if strings.Contains(auditBody, "top-secret-never-log") {
+		t.Fatalf("/audit leaked secret plaintext!")
+	}
+
+	// Verify GET /audit/export?format=csv
+	rrCSV := getUI(t, h, "/audit/export?format=csv")
+	if rrCSV.Code != http.StatusOK || !strings.Contains(rrCSV.Header().Get("Content-Type"), "text/csv") {
+		t.Fatalf("GET /audit/export?format=csv = %d (%s)", rrCSV.Code, rrCSV.Header().Get("Content-Type"))
+	}
+	csvBody := rrCSV.Body.String()
+	if !strings.Contains(csvBody, "id,timestamp_utc,tenant_id,actor_id,actor_login,actor_role,action,resource_type") || !strings.Contains(csvBody, "run.confirmed") {
+		t.Fatalf("unexpected CSV export:\n%s", csvBody)
+	}
+	if strings.Contains(csvBody, "top-secret-never-log") {
+		t.Fatalf("CSV export leaked secret plaintext!")
+	}
+
+	// Verify GET /audit/export?format=json
+	rrJSON := getUI(t, h, "/audit/export?format=json")
+	if rrJSON.Code != http.StatusOK || !strings.Contains(rrJSON.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("GET /audit/export?format=json = %d (%s)", rrJSON.Code, rrJSON.Header().Get("Content-Type"))
+	}
+	var exported struct {
+		TenantID      string           `json:"tenant_id"`
+		Count         int              `json:"count"`
+		ChainVerified bool             `json:"chain_verified"`
+		Entries       []map[string]any `json:"entries"`
+	}
+	if err := json.Unmarshal(rrJSON.Body.Bytes(), &exported); err != nil {
+		t.Fatalf("unmarshal JSON export: %v", err)
+	}
+	if !exported.ChainVerified || exported.Count != 5 || len(exported.Entries) != 5 {
+		t.Fatalf("unexpected JSON export payload: %+v", exported)
+	}
+}
+
+
 
 
 

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	authapp "infra-guy/internal/application/auth"
+	auditapp "infra-guy/internal/application/audit"
 	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
@@ -145,6 +146,12 @@ func main() {
 		Now:      now,
 		NewID:    newID,
 	}
+	auditRepo := postgres.NewAuditRepo(pool)
+	auditSvc := &auditapp.Service{
+		Repo:  auditRepo,
+		Now:   now,
+		NewID: newID,
+	}
 
 	tfInstaller := &terraform.Installer{CacheDir: filepath.Join(workDir, "bin")}
 	tfCatalog := &terraform.VersionCatalog{}
@@ -258,6 +265,7 @@ func main() {
 		Contexts:      contextSvc,
 		Policies:      policySvc,
 		Dependencies:  dependencySvc,
+		Audits:        auditSvc,
 		Versions:      tfCatalog,
 		Checkout:      git.Checkout{},
 		Lookup:        git.CommitLookup{},
@@ -466,11 +474,18 @@ func newMergeabilityChecker(policySvc *policyapp.Service) runapp.MergeabilityChe
 }
 
 func (c policyMergeabilityChecker) IsMergeable(ctx context.Context, ps project.Snapshot, rs run.Snapshot) bool {
-	if ps.ApprovalPolicyID == "" {
+	if c.policySvc == nil {
+		if ps.ApprovalPolicyID != "" {
+			return false
+		}
 		return ps.AutoApprove || len(rs.Approvals) > 0
 	}
-	if c.policySvc == nil {
+	resolved, err := c.policySvc.ResolveForProject(ctx, ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags)
+	if err != nil {
 		return false
+	}
+	if len(resolved) == 0 {
+		return ps.AutoApprove || len(rs.Approvals) > 0
 	}
 	approvals := make([]policyapp.ApprovalInfo, 0, len(rs.Approvals))
 	for _, a := range rs.Approvals {
@@ -498,8 +513,9 @@ func (c policyMergeabilityChecker) IsMergeable(ctx context.Context, ps project.S
 		WorkingDirectory: ps.WorkingDirectory,
 		TerraformVersion: ps.TerraformVersion,
 		AutoApprove:      ps.AutoApprove,
+		Tags:             ps.Tags,
 	}
-	res, err := c.policySvc.EvaluateForRun(ctx, ps.TenantID, policy.ID(ps.ApprovalPolicyID), rs.PlanJSON, userInfo, projInfo, approvals)
+	res, err := c.policySvc.EvaluateForProject(ctx, ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags, rs.PlanJSON, userInfo, projInfo, approvals)
 	return err == nil && res.Allowed
 }
 

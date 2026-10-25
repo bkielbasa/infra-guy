@@ -1,0 +1,118 @@
+{{define "audit"}}
+<div class="dashboard">
+  <section class="dash-hero">
+    <div>
+      <h1>Audit Log &amp; Compliance</h1>
+      <p class="sub">Immutable, tamper-evident SHA-256 ledger of workspace, run, state, secret, and policy actions for SOC2 &amp; ISO27001 compliance{{if .TenantID}} in <strong>{{.TenantID}}</strong>{{end}}.</p>
+    </div>
+    <div class="dash-hero-actions">
+      <a href="/audit/export?format=csv{{if .RawQuery}}&amp;{{.RawQuery}}{{end}}" class="btn">Export CSV</a>
+      <a href="/audit/export?format=json{{if .RawQuery}}&amp;{{.RawQuery}}{{end}}" class="btn btn-trigger">Export JSON</a>
+    </div>
+  </section>
+
+  <section class="dash-kpis">
+    <div class="dash-kpi">
+      <span class="dash-kpi-label">Recorded Events</span>
+      <span class="dash-kpi-value">{{.TotalEvents}}</span>
+      <span class="dash-kpi-sub">{{.FilteredCount}} matching current filter</span>
+    </div>
+    <div class="dash-kpi {{if .ChainVerified}}dash-kpi-ok{{else}}dash-kpi-danger{{end}}">
+      <span class="dash-kpi-label">Hash Chain Integrity</span>
+      <span class="dash-kpi-value">{{if .ChainVerified}}Verified{{else}}Tampered{{end}}</span>
+      <span class="dash-kpi-sub">SHA-256 linked ledger{{if .HeadHash}} &middot; <code>{{.HeadHash}}</code>{{end}}</span>
+    </div>
+    <div class="dash-kpi">
+      <span class="dash-kpi-label">Unique Actors</span>
+      <span class="dash-kpi-value">{{.UniqueActors}}</span>
+      <span class="dash-kpi-sub">Authenticated users &amp; automation</span>
+    </div>
+    <div class="dash-kpi {{if gt .SecurityEvents 0}}dash-kpi-warn{{end}}">
+      <span class="dash-kpi-label">Governance &amp; State Events</span>
+      <span class="dash-kpi-value">{{.SecurityEvents}}</span>
+      <span class="dash-kpi-sub">Policy, secret, lock &amp; state actions</span>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-bottom: 18px;">
+    <form method="get" action="/audit" class="filter-bar" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
+      <div class="field" style="flex: 2; min-width: 200px; margin: 0;">
+        <label for="audit-q">Search</label>
+        <input type="text" id="audit-q" name="q" value="{{.Query}}" placeholder="Filter by action, resource, actor, or summary...">
+      </div>
+      <div class="field" style="flex: 1; min-width: 150px; margin: 0;">
+        <label for="audit-resource">Resource Type</label>
+        <select id="audit-resource" name="resource_type">
+          <option value="">All resources</option>
+          <option value="workspace"{{if eq .ResourceType "workspace"}} selected{{end}}>Workspace</option>
+          <option value="run"{{if eq .ResourceType "run"}} selected{{end}}>Run</option>
+          <option value="state"{{if eq .ResourceType "state"}} selected{{end}}>State</option>
+          <option value="policy"{{if eq .ResourceType "policy"}} selected{{end}}>Policy</option>
+          <option value="context"{{if eq .ResourceType "context"}} selected{{end}}>Context / Secret</option>
+          <option value="dependency"{{if eq .ResourceType "dependency"}} selected{{end}}>Dependency</option>
+        </select>
+      </div>
+      <div class="field" style="flex: 1; min-width: 140px; margin: 0;">
+        <label for="audit-actor">Actor</label>
+        <input type="text" id="audit-actor" name="actor" value="{{.Actor}}" placeholder="e.g. alice">
+      </div>
+      <div class="field" style="flex: 1; min-width: 140px; margin: 0;">
+        <label for="audit-window">Time Window</label>
+        <select id="audit-window" name="window">
+          <option value=""{{if eq .Window ""}} selected{{end}}>All time</option>
+          <option value="24h"{{if eq .Window "24h"}} selected{{end}}>Last 24 hours</option>
+          <option value="7d"{{if eq .Window "7d"}} selected{{end}}>Last 7 days</option>
+          <option value="30d"{{if eq .Window "30d"}} selected{{end}}>Last 30 days</option>
+          <option value="90d"{{if eq .Window "90d"}} selected{{end}}>Last 90 days</option>
+        </select>
+      </div>
+      <div class="actions" style="margin: 0;">
+        <button type="submit" class="btn-trigger">Filter</button>
+        <a href="/audit" class="btn">Reset</a>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    {{if .Entries}}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Timestamp (UTC)</th>
+          <th>Actor</th>
+          <th>Action</th>
+          <th>Resource</th>
+          <th>Summary</th>
+          <th>SHA-256 Chain</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Entries}}
+        <tr>
+          <td class="muted" style="white-space: nowrap;"><code>{{.Timestamp}}</code></td>
+          <td>
+            <strong>{{.ActorLogin}}</strong>
+            {{if .ActorRole}}<span class="tag-pill">{{.ActorRole}}</span>{{end}}
+          </td>
+          <td><span class="pill {{.ActionClass}}">{{.Action}}</span></td>
+          <td>
+            <span class="muted">{{.ResourceType}}:</span>
+            {{if .ResourceURL}}<a href="{{.ResourceURL}}"><strong>{{.ResourceLabel}}</strong></a>{{else}}<strong>{{.ResourceLabel}}</strong>{{end}}
+          </td>
+          <td>{{.Summary}}</td>
+          <td style="white-space: nowrap;">
+            <code title="Entry SHA-256: {{.EntryHash}}&#10;Prev SHA-256: {{if .PrevHash}}{{.PrevHash}}{{else}}GENESIS{{end}}">{{.ShortHash}}</code>
+            {{if .Verified}}<span class="pill pill-finished" title="Cryptographic hash verified">&#10003;</span>{{else}}<span class="pill pill-failed" title="Hash mismatch">!</span>{{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="dash-empty">
+      <p>No audit log events match the selected filters.</p>
+    </div>
+    {{end}}
+  </section>
+</div>
+{{end}}
