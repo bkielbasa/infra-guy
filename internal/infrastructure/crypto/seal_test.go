@@ -82,8 +82,8 @@ func TestKeyringRotationAndLegacyBackwardsCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate a legacy pre-envelope raw AES-256-GCM ciphertext.
-	legacyAEAD, err := deriveKEK(oldSecret)
+	// Simulate a legacy pre-envelope raw AES-256-GCM ciphertext (SHA-256 derived key).
+	legacyAEAD, err := deriveLegacySHA256KEK(oldSecret)
 	if err != nil {
 		t.Fatal(err)
 	}

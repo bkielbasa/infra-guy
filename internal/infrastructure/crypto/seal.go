@@ -35,6 +35,7 @@ const (
 type Sealer struct {
 	activeKeyID string
 	keks        map[string]cipher.AEAD
+	legacyKEKs  []cipher.AEAD
 	kekOrder    []string
 }
 
@@ -66,6 +67,7 @@ func NewKeyring(activeKeyID string, secrets map[string][]byte) (*Sealer, error) 
 	}
 
 	keks := make(map[string]cipher.AEAD, len(secrets))
+	legacy := make([]cipher.AEAD, 0, len(secrets)*2)
 	order := make([]string, 0, len(secrets))
 	order = append(order, activeKeyID)
 
@@ -82,6 +84,10 @@ func NewKeyring(activeKeyID string, secrets map[string][]byte) (*Sealer, error) 
 			return nil, err
 		}
 		keks[id] = aead
+		legacy = append(legacy, aead)
+		if shaAEAD, err := deriveLegacySHA256KEK(raw); err == nil {
+			legacy = append(legacy, shaAEAD)
+		}
 		if id != activeKeyID {
 			order = append(order, id)
 		}
@@ -90,6 +96,7 @@ func NewKeyring(activeKeyID string, secrets map[string][]byte) (*Sealer, error) 
 	return &Sealer{
 		activeKeyID: activeKeyID,
 		keks:        keks,
+		legacyKEKs:  legacy,
 		kekOrder:    order,
 	}, nil
 }
@@ -142,6 +149,11 @@ func deriveKEK(secret []byte) (cipher.AEAD, error) {
 		return nil, err
 	}
 	return newGCM(key)
+}
+
+func deriveLegacySHA256KEK(secret []byte) (cipher.AEAD, error) {
+	sum := sha256.Sum256(secret)
+	return newGCM(sum[:])
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {
@@ -243,8 +255,7 @@ func (s *Sealer) OpenWithAAD(ciphertext, aad []byte) ([]byte, error) {
 
 	// Legacy fallback: raw AES-256-GCM (`nonce || ciphertext || tag`).
 	var lastErr error
-	for _, id := range s.kekOrder {
-		kek := s.keks[id]
+	for _, kek := range s.legacyKEKs {
 		ns := kek.NonceSize()
 		if len(ciphertext) < ns+kek.Overhead() {
 			lastErr = errors.New("ciphertext too short")
