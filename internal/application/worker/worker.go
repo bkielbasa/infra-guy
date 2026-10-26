@@ -16,6 +16,7 @@ import (
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
+	"infra-guy/internal/infrastructure/telemetry"
 )
 
 const (
@@ -240,7 +241,19 @@ func (w *Worker) heartbeat(ctx context.Context, jobID int64) {
 	}
 }
 
-func (w *Worker) runJob(ctx context.Context, job Job) error {
+func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
+	ctx, jobSpan := telemetry.Default().StartSpan(ctx, "worker.run_job",
+		telemetry.Attr("run.id", string(job.RunID)),
+		telemetry.Attr("run.step", string(job.Step)),
+		telemetry.Attr("worker.id", w.WorkerID),
+	)
+	defer func() {
+		if retErr != nil {
+			jobSpan.RecordError(retErr)
+		}
+		jobSpan.End()
+	}()
+
 	r, err := w.Service.BeginStep(ctx, job.RunID, job.Step)
 	if err != nil {
 		return err
@@ -252,6 +265,25 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	}
 	ps := p.Snapshot()
 	rs := r.Snapshot()
+	op := "apply"
+	if rs.IsDestroy {
+		op = "destroy"
+	} else if rs.PlanOnly {
+		op = "plan"
+	}
+	jobSpan.SetAttribute("tenant.id", ps.TenantID)
+	jobSpan.SetAttribute("project.id", string(ps.ID))
+	jobSpan.SetAttribute("project.name", ps.Name)
+	jobSpan.SetAttribute("run.operation", op)
+	jobSpan.SetAttribute("run.trigger", string(rs.Trigger))
+
+	now := time.Now().UTC()
+	if w.Now != nil {
+		now = w.Now().UTC()
+	}
+	if job.Step == run.StepInit && !rs.CreatedAt.IsZero() && !now.Before(rs.CreatedAt) {
+		telemetry.Default().RecordRunQueueWait(ps.TenantID, string(ps.ID), ps.Name, op, now.Sub(rs.CreatedAt))
+	}
 
 	if w.Tokens == nil {
 		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "missing token source"); ferr != nil {
@@ -284,8 +316,17 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 			_ = w.Service.UpdateStepLogs(ctx, job.RunID, job.Step, logs)
 		},
 	}
-	if err := w.prepareWorkspace(ctx, job, ps, rs, token, dest, cacheKey, logger); err != nil {
-		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
+	prepCtx, prepSpan := telemetry.Default().StartSpan(ctx, "worker.prepare_workspace",
+		telemetry.Attr("run.id", string(job.RunID)),
+		telemetry.Attr("run.step", string(job.Step)),
+	)
+	prepErr := w.prepareWorkspace(prepCtx, job, ps, rs, token, dest, cacheKey, logger)
+	if prepErr != nil {
+		prepSpan.RecordError(prepErr)
+	}
+	prepSpan.End()
+	if prepErr != nil {
+		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, prepErr.Error()); ferr != nil {
 			return ferr
 		}
 		return w.completeAndCleanup(ctx, job)
@@ -328,8 +369,16 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 
 	var redactSecrets []string
 	if w.CloudIntegrations != nil {
+		credCtx, credSpan := telemetry.Default().StartSpan(ctx, "worker.cloud_credentials",
+			telemetry.Attr("run.id", string(job.RunID)),
+			telemetry.Attr("project.id", string(ps.ID)),
+		)
 		homeDir := filepath.Join(dest, ".home")
-		creds, cerr := w.CloudIntegrations.ResolveCredentialsForRun(ctx, ps, string(job.RunID), rs.Branch, rs.SHA, string(rs.Trigger), homeDir)
+		creds, cerr := w.CloudIntegrations.ResolveCredentialsForRun(credCtx, ps, string(job.RunID), rs.Branch, rs.SHA, string(rs.Trigger), homeDir)
+		if cerr != nil {
+			credSpan.RecordError(cerr)
+		}
+		credSpan.End()
 		if cerr != nil {
 			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, cerr.Error()); ferr != nil {
 				return ferr
@@ -364,7 +413,15 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 	}
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	res, err := w.Executor.Run(stepCtx, Request{
+	tfCtx, tfSpan := telemetry.Default().StartSpan(stepCtx, "terraform."+string(job.Step),
+		telemetry.Attr("run.id", string(job.RunID)),
+		telemetry.Attr("run.step", string(job.Step)),
+		telemetry.Attr("project.id", string(ps.ID)),
+		telemetry.Attr("project.name", ps.Name),
+		telemetry.Attr("terraform.version", ps.TerraformVersion),
+	)
+	execStart := time.Now()
+	res, err := w.Executor.Run(tfCtx, Request{
 		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID), RunID: string(job.RunID),
 		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: token,
 		TerraformVersion: ps.TerraformVersion, Step: job.Step, Destroy: rs.IsDestroy, PlanFile: rs.PlanFile,
@@ -373,18 +430,32 @@ func (w *Worker) runJob(ctx context.Context, job Job) error {
 			logger.SetExec(logs)
 		},
 	})
+	execDur := time.Since(execStart)
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
+		tfSpan.RecordError(stepCtx.Err())
+		tfSpan.End()
+		telemetry.Default().RecordRunDuration(ps.TenantID, string(ps.ID), ps.Name, op, "failed", string(job.Step), execDur)
 		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "step timed out"); ferr != nil {
 			return ferr
 		}
 		return w.completeAndCleanup(ctx, job)
 	}
 	if err != nil {
+		tfSpan.RecordError(err)
+		tfSpan.End()
+		telemetry.Default().RecordRunDuration(ps.TenantID, string(ps.ID), ps.Name, op, "failed", string(job.Step), execDur)
 		if ferr := w.Service.Fail(ctx, job.RunID, job.Step, err.Error()); ferr != nil {
 			return ferr
 		}
 		return w.completeAndCleanup(ctx, job)
 	}
+	stepStatus := "succeeded"
+	if res.ExitCode != 0 && !(job.Step == run.StepPlan && res.ExitCode == 2) {
+		stepStatus = "failed"
+	}
+	tfSpan.SetAttribute("terraform.exit_code", fmt.Sprintf("%d", res.ExitCode))
+	tfSpan.End()
+	telemetry.Default().RecordRunDuration(ps.TenantID, string(ps.ID), ps.Name, op, stepStatus, string(job.Step), execDur)
 	logger.SetExec(res.Logs)
 	if job.Step == run.StepInit && res.ExitCode == 0 && w.Cache != nil {
 		logger.LogAfterf("Uploading initialized workspace cache to S3 (%s)...", cacheKey)

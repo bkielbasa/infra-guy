@@ -35,6 +35,17 @@ type SecretSealer interface {
 	Open(ciphertext []byte) ([]byte, error)
 }
 
+type AADSecretSealer interface {
+	SecretSealer
+	SealWithAAD(plaintext, aad []byte) ([]byte, error)
+	OpenWithAAD(ciphertext, aad []byte) ([]byte, error)
+}
+
+// IntegrationAAD constructs the deterministic AEAD Associated Data for a cloud integration's secret key.
+func IntegrationAAD(id cloudintegration.ID) []byte {
+	return []byte("cloud_integration:" + string(id) + ":secret_access_key")
+}
+
 type ResolvedIntegration struct {
 	Integration *cloudintegration.Integration
 	Source      string // "workspace", "tag", "global"
@@ -258,7 +269,12 @@ func (s *Service) Create(ctx context.Context, in cloudintegration.Snapshot) (*cl
 		return nil, err
 	}
 	if in.SecretAccessKey != "" && s.Sealer != nil {
-		ct, err := s.Sealer.Seal([]byte(in.SecretAccessKey))
+		var ct []byte
+		if aadSealer, ok := s.Sealer.(AADSecretSealer); ok {
+			ct, err = aadSealer.SealWithAAD([]byte(in.SecretAccessKey), IntegrationAAD(c.Snapshot().ID))
+		} else {
+			ct, err = s.Sealer.Seal([]byte(in.SecretAccessKey))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("seal secret access key: %w", err)
 		}
@@ -282,7 +298,12 @@ func (s *Service) Update(ctx context.Context, tenantID string, id cloudintegrati
 		return nil, err
 	}
 	if in.SecretAccessKey != "" && s.Sealer != nil {
-		ct, err := s.Sealer.Seal([]byte(in.SecretAccessKey))
+		var ct []byte
+		if aadSealer, ok := s.Sealer.(AADSecretSealer); ok {
+			ct, err = aadSealer.SealWithAAD([]byte(in.SecretAccessKey), IntegrationAAD(id))
+		} else {
+			ct, err = s.Sealer.Seal([]byte(in.SecretAccessKey))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("seal secret access key: %w", err)
 		}
@@ -485,7 +506,13 @@ func (s *Service) resolveAWS(ctx context.Context, snap cloudintegration.Snapshot
 	if snap.AuthMode == cloudintegration.AuthModeAssumeRole {
 		secretKey := snap.SecretAccessKey
 		if secretKey == "" && len(snap.SecretAccessKeyCiphertext) > 0 && s.Sealer != nil {
-			pt, err := s.Sealer.Open(snap.SecretAccessKeyCiphertext)
+			var pt []byte
+			var err error
+			if aadSealer, ok := s.Sealer.(AADSecretSealer); ok {
+				pt, err = aadSealer.OpenWithAAD(snap.SecretAccessKeyCiphertext, IntegrationAAD(snap.ID))
+			} else {
+				pt, err = s.Sealer.Open(snap.SecretAccessKeyCiphertext)
+			}
 			if err != nil {
 				return fmt.Errorf("decrypt AWS secret key for %q: %w", snap.Name, err)
 			}

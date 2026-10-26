@@ -12,6 +12,7 @@ import (
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/infrastructure/opa"
+	"infra-guy/internal/infrastructure/telemetry"
 )
 
 type EvalResult = opa.EvalResult
@@ -330,10 +331,23 @@ func (s *Service) EvaluateApproval(ctx context.Context, tenantID string, policyI
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.engine().Evaluate(ctx, pol.Rego(), inputMap)
+	evalCtx, span := telemetry.Default().StartSpan(ctx, "opa.evaluate",
+		telemetry.Attr("tenant.id", tenantID),
+		telemetry.Attr("policy.id", string(pol.ID())),
+		telemetry.Attr("policy.name", pol.Name()),
+	)
+	start := time.Now()
+	res, err := s.engine().Evaluate(evalCtx, pol.Rego(), inputMap)
+	dur := time.Since(start)
 	if err != nil {
+		span.RecordError(err)
+		span.End()
+		telemetry.Default().RecordPolicyEvaluation(tenantID, p.ID, p.Name, "mandatory", "error", dur)
 		return nil, err
 	}
+	span.SetAttribute("policy.decision", string(res.Status))
+	span.End()
+	telemetry.Default().RecordPolicyEvaluation(tenantID, p.ID, p.Name, "mandatory", string(res.Status), dur)
 	return &ApprovalDecision{
 		PolicyID:   pol.ID(),
 		PolicyName: pol.Name(),
@@ -429,10 +443,24 @@ func (s *Service) EvaluateForProject(ctx context.Context, tenantID string, expli
 	anyUndecided := false
 
 	for _, rp := range resolved {
-		res, evalErr := s.engine().Evaluate(ctx, rp.Policy.Rego(), inputMap)
+		evalCtx, span := telemetry.Default().StartSpan(ctx, "opa.evaluate",
+			telemetry.Attr("tenant.id", tenantID),
+			telemetry.Attr("policy.id", string(rp.Policy.ID())),
+			telemetry.Attr("policy.name", rp.Policy.Name()),
+			telemetry.Attr("policy.source", rp.Source),
+		)
+		start := time.Now()
+		res, evalErr := s.engine().Evaluate(evalCtx, rp.Policy.Rego(), inputMap)
+		dur := time.Since(start)
 		if evalErr != nil {
+			span.RecordError(evalErr)
+			span.End()
+			telemetry.Default().RecordPolicyEvaluation(tenantID, p.ID, p.Name, "mandatory", "error", dur)
 			return nil, fmt.Errorf("policy %s (%s): %w", rp.Policy.Name(), rp.Policy.ID(), evalErr)
 		}
+		span.SetAttribute("policy.decision", string(res.Status))
+		span.End()
+		telemetry.Default().RecordPolicyEvaluation(tenantID, p.ID, p.Name, "mandatory", string(res.Status), dur)
 		item := PolicyEvalItem{
 			PolicyID:   rp.Policy.ID(),
 			PolicyName: rp.Policy.Name(),

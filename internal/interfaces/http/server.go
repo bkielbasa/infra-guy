@@ -19,6 +19,7 @@ import (
 	"infra-guy/internal/application/worker"
 	"infra-guy/internal/domain/audit"
 	"infra-guy/internal/domain/project"
+	"infra-guy/internal/infrastructure/telemetry"
 )
 
 type brancher interface {
@@ -70,7 +71,11 @@ func NewServer(cfg ServerConfig) http.Handler {
 	uiMux := http.NewServeMux()
 	(&ui{cfg: cfg}).routes(uiMux)
 	protected := http.NewCrossOriginProtection().Handler(withSession(uiMux, cfg))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/metrics" {
+			telemetry.Default().MetricsHandler().ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodGet && r.URL.Path == "/.well-known/openid-configuration" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(cfg.CloudIntegrations.DiscoveryDocument())
@@ -87,4 +92,5 @@ func NewServer(cfg ServerConfig) http.Handler {
 		}
 		protected.ServeHTTP(w, r)
 	})
+	return telemetry.Default().Middleware(root)
 }

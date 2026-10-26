@@ -10,6 +10,7 @@ import (
 
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/state"
+	"infra-guy/internal/infrastructure/crypto"
 )
 
 type Service struct {
@@ -29,7 +30,17 @@ func (s *Service) authorize(ctx context.Context, projectID, token string) (Outco
 	if err != nil {
 		return Outcome{}, err, false
 	}
-	if p == nil || subtle.ConstantTimeCompare([]byte(token), []byte(p.Snapshot().StateToken)) != 1 {
+	if p == nil || token == "" {
+		return Outcome{Code: 401}, nil, false
+	}
+	ps := p.Snapshot()
+	if ps.StateTokenHash != "" {
+		if crypto.VerifyTokenHash(token, ps.StateTokenHash) {
+			return Outcome{}, nil, true
+		}
+		return Outcome{Code: 401}, nil, false
+	}
+	if ps.StateToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(ps.StateToken)) != 1 {
 		return Outcome{Code: 401}, nil, false
 	}
 	return Outcome{}, nil, true

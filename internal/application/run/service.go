@@ -9,6 +9,7 @@ import (
 
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
+	"infra-guy/internal/infrastructure/telemetry"
 )
 
 var ErrDuplicate = errors.New("run already queued or running for this commit")
@@ -210,12 +211,24 @@ func (s *Service) Confirm(ctx context.Context, id run.ID, actor string) error {
 	if err != nil || r == nil {
 		return fmt.Errorf("run %s not found", id)
 	}
-	d, err := r.Confirm(actor, s.Now())
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	beforeSnap := r.Snapshot()
+	d, err := r.Confirm(actor, now)
 	if err != nil {
 		return err
 	}
 	if err := s.Runs.Save(ctx, r); err != nil {
 		return err
+	}
+	for _, st := range beforeSnap.Steps {
+		if st.Name == run.StepPlan && st.FinishedAt != nil && now.After(*st.FinishedAt) {
+			tenantID, projectName := s.projectLabels(ctx, beforeSnap.ProjectID)
+			telemetry.Default().RecordApprovalWait(tenantID, string(beforeSnap.ProjectID), projectName, now.Sub(*st.FinishedAt))
+			break
+		}
 	}
 	s.reportPRStatus(ctx, r)
 	return s.apply(ctx, r, d)
@@ -357,6 +370,12 @@ func (s *Service) releaseIfTerminal(ctx context.Context, r *run.Run) error {
 	if !rs.Status.Terminal() {
 		return nil
 	}
+	tenantID, projectName := s.projectLabels(ctx, rs.ProjectID)
+	op := runOperation(rs)
+	telemetry.Default().RecordRunStatus(tenantID, string(rs.ProjectID), projectName, op, string(rs.Status))
+	if rs.FinishedAt != nil && !rs.CreatedAt.IsZero() && !rs.FinishedAt.Before(rs.CreatedAt) {
+		telemetry.Default().RecordRunDuration(tenantID, string(rs.ProjectID), projectName, op, string(rs.Status), "total", rs.FinishedAt.Sub(rs.CreatedAt))
+	}
 	if s.Projects != nil {
 		if p, err := s.Projects.Get(ctx, project.ID(rs.ProjectID)); err == nil && p != nil {
 			now := time.Now().UTC()
@@ -393,4 +412,26 @@ func (s *Service) releaseIfTerminal(ctx context.Context, r *run.Run) error {
 		}
 	}
 	return s.Projects.ReleaseActiveRun(ctx, project.ID(rs.ProjectID), string(rs.ID))
+}
+
+func (s *Service) projectLabels(ctx context.Context, pid run.ProjectID) (tenantID, projectName string) {
+	projectName = string(pid)
+	if s.Projects == nil {
+		return "", projectName
+	}
+	if p, err := s.Projects.Get(ctx, project.ID(pid)); err == nil && p != nil {
+		ps := p.Snapshot()
+		return ps.TenantID, ps.Name
+	}
+	return "", projectName
+}
+
+func runOperation(rs run.Snapshot) string {
+	if rs.IsDestroy {
+		return "destroy"
+	}
+	if rs.PlanOnly {
+		return "plan"
+	}
+	return "apply"
 }

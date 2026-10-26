@@ -42,6 +42,7 @@ import (
 	"infra-guy/internal/infrastructure/opa"
 	"infra-guy/internal/infrastructure/postgres"
 	"infra-guy/internal/infrastructure/s3"
+	"infra-guy/internal/infrastructure/telemetry"
 	"infra-guy/internal/infrastructure/terraform"
 	httpapi "infra-guy/internal/interfaces/http"
 
@@ -105,6 +106,14 @@ func main() {
 		log.Fatal(err)
 	}
 
+	tp := telemetry.NewProvider(telemetry.ConfigFromEnv(os.Getenv))
+	telemetry.SetDefault(tp)
+	defer func() {
+		shCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = tp.Shutdown(shCtx)
+	}()
+
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		log.Fatal(err)
@@ -116,26 +125,24 @@ func main() {
 		}
 	}
 
-	projects := postgres.NewProjectRepo(pool)
-	runs := postgres.NewRunRepo(pool)
-	states := postgres.NewStateRepo(pool)
-	queue := postgres.NewQueue(pool)
-	now := func() time.Time { return time.Now().UTC() }
-
-	var encryptionSecret []byte
-	if rawKey := os.Getenv("CONTEXT_ENCRYPTION_KEY"); rawKey != "" {
-		encryptionSecret = []byte(rawKey)
-	} else {
-		pemBytes, err := os.ReadFile(keyPath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		encryptionSecret = append([]byte("infra-guy-context-v1:"), pemBytes...)
-	}
-	sealer, err := crypto.NewSealer(encryptionSecret)
+	sealer, err := buildSealer(os.Getenv, keyPath)
 	if err != nil {
 		log.Fatal(err)
 	}
+	if jobID == 0 {
+		if stats, rerr := postgres.RotateAndSealAll(ctx, pool, sealer); rerr != nil {
+			log.Printf("warning: key rotation/sealing check failed: %v", rerr)
+		} else if stats.Total() > 0 {
+			log.Printf("sealed/rotated %d sensitive database records with active key %q", stats.Total(), sealer.ActiveKeyID())
+		}
+	}
+
+	projects := postgres.NewProjectRepo(pool).WithSealer(sealer)
+	runs := postgres.NewRunRepo(pool).WithSealer(sealer)
+	states := postgres.NewStateRepo(pool).WithSealer(sealer)
+	queue := postgres.NewQueue(pool)
+	now := func() time.Time { return time.Now().UTC() }
+	registerMetricsCollector(tp, pool)
 	contextRepo := postgres.NewContextRepo(pool)
 	contextSvc := &tfcontextapp.Service{Contexts: contextRepo, Sealer: sealer, Now: now, NewID: newID}
 
@@ -367,6 +374,8 @@ func buildWorkerPassThroughEnv(getenv func(string) string, internalURL string) m
 		env["CONTEXT_ENCRYPTION_KEY"] = key
 	}
 	for _, k := range []string{
+		"ENCRYPTION_KEYRING",
+		"ENCRYPTION_ACTIVE_KEY_ID",
 		"S3_ENDPOINT",
 		"S3_REGION",
 		"S3_BUCKET",
@@ -374,12 +383,105 @@ func buildWorkerPassThroughEnv(getenv func(string) string, internalURL string) m
 		"S3_SECRET_ACCESS_KEY",
 		"S3_USE_PATH_STYLE",
 		"S3_PREFIX",
+		"OTEL_SERVICE_NAME",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_TRACES_SAMPLER",
+		"OTEL_TRACES_SAMPLER_ARG",
 	} {
 		if v := getenv(k); v != "" {
 			env[k] = v
 		}
 	}
 	return env
+}
+
+func buildSealer(getenv func(string) string, keyPath string) (*crypto.Sealer, error) {
+	keyringRaw := strings.TrimSpace(getenv("ENCRYPTION_KEYRING"))
+	activeID := strings.TrimSpace(getenv("ENCRYPTION_ACTIVE_KEY_ID"))
+	var fallbackSecret []byte
+	if raw := getenv("CONTEXT_ENCRYPTION_KEY"); raw != "" {
+		fallbackSecret = []byte(raw)
+	} else if keyringRaw == "" {
+		pemBytes, err := os.ReadFile(keyPath)
+		if err != nil {
+			return nil, err
+		}
+		fallbackSecret = append([]byte("infra-guy-context-v1:"), pemBytes...)
+	}
+	return crypto.ParseKeyring(keyringRaw, activeID, fallbackSecret)
+}
+
+func registerMetricsCollector(tp *telemetry.Provider, pool *pgxpool.Pool) {
+	if tp == nil || pool == nil {
+		return
+	}
+	tp.AddScrapeCallback(func(ctx context.Context, p *telemetry.Provider) {
+		st := pool.Stat()
+		p.SetGauge("db_client_connections_usage", map[string]string{"state": "acquired"}, float64(st.AcquiredConns()))
+		p.SetGauge("db_client_connections_usage", map[string]string{"state": "idle"}, float64(st.IdleConns()))
+		p.SetGauge("db_client_connections_usage", map[string]string{"state": "constructing"}, float64(st.ConstructingConns()))
+		p.SetGauge("db_client_connections_max", nil, float64(st.MaxConns()))
+
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+
+		p.ResetGauge("infraguy_runs_in_flight")
+		rows, err := pool.Query(cctx, `
+			SELECT p.tenant_id, r.status, COUNT(*)
+			FROM runs r
+			JOIN projects p ON p.id = r.project_id
+			WHERE r.status IN ('queued', 'running', 'needs_approval')
+			GROUP BY p.tenant_id, r.status`)
+		if err == nil {
+			for rows.Next() {
+				var tenant, status string
+				var cnt int64
+				if err := rows.Scan(&tenant, &status, &cnt); err == nil {
+					p.SetGauge("infraguy_runs_in_flight", map[string]string{
+						"tenant_id": tenant,
+						"status":    status,
+					}, float64(cnt))
+				}
+			}
+			rows.Close()
+		}
+
+		p.ResetGauge("infraguy_workspace_drifted")
+		p.ResetGauge("infraguy_state_locks_active")
+		prows, err := pool.Query(cctx, `
+			SELECT p.tenant_id, p.id, p.name, p.drift_status, COALESCE(s.lock_id <> '', false)
+			FROM projects p
+			LEFT JOIN states s ON s.project_id = p.id`)
+		if err == nil {
+			for prows.Next() {
+				var tenant, pid, name, driftStatus string
+				var locked bool
+				if err := prows.Scan(&tenant, &pid, &name, &driftStatus, &locked); err == nil {
+					dval := 0.0
+					if driftStatus == "drifted" {
+						dval = 1.0
+					}
+					p.SetGauge("infraguy_workspace_drifted", map[string]string{
+						"tenant_id":    tenant,
+						"project_id":   pid,
+						"project_name": name,
+						"drift_status": driftStatus,
+					}, dval)
+					lval := 0.0
+					if locked {
+						lval = 1.0
+					}
+					p.SetGauge("infraguy_state_locks_active", map[string]string{
+						"tenant_id":    tenant,
+						"project_id":   pid,
+						"project_name": name,
+					}, lval)
+				}
+			}
+			prows.Close()
+		}
+	})
 }
 
 type tenantTokenSource struct {
