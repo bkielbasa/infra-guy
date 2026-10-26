@@ -4,22 +4,36 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"infra-guy/internal/domain/project"
+	"infra-guy/internal/infrastructure/crypto"
 )
 
 var _ project.Repository = (*ProjectRepo)(nil)
 
-type ProjectRepo struct{ pool *pgxpool.Pool }
+type ProjectRepo struct {
+	pool   *pgxpool.Pool
+	sealer *crypto.Sealer
+}
 
 func NewProjectRepo(pool *pgxpool.Pool) *ProjectRepo { return &ProjectRepo{pool: pool} }
 
+func (r *ProjectRepo) WithSealer(sealer *crypto.Sealer) *ProjectRepo {
+	r.sealer = sealer
+	return r
+}
+
+func ProjectStateTokenAAD(id project.ID) []byte {
+	return []byte("project:" + string(id) + ":state_token")
+}
+
 const projectColumns = `id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-	terraform_version, COALESCE(approval_policy_id, ''), auto_approve, tags, locked, state_token, active_run_id,
+	terraform_version, COALESCE(approval_policy_id, ''), auto_approve, tags, locked, state_token, state_token_hash, state_token_ciphertext, active_run_id,
 	drift_enabled, drift_interval_minutes, drift_status, last_drift_check_at,
 	ttl_hours, expires_at, auto_destroy, created_at, updated_at`
 
@@ -41,14 +55,29 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	if driftStatus == "" {
 		driftStatus = project.DriftStatusUnknown
 	}
+	stateTokenHash := s.StateTokenHash
+	if s.StateToken != "" {
+		stateTokenHash = crypto.HashToken(s.StateToken)
+		p.SetStateTokenHash(stateTokenHash)
+	}
+	plainStateToken := s.StateToken
+	var stateTokenCiphertext []byte
+	if r.sealer != nil && s.StateToken != "" {
+		ct, err := r.sealer.SealWithAAD([]byte(s.StateToken), ProjectStateTokenAAD(s.ID))
+		if err != nil {
+			return fmt.Errorf("seal project state token: %w", err)
+		}
+		stateTokenCiphertext = ct
+		plainStateToken = ""
+	}
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO projects (
 			id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-			terraform_version, approval_policy_id, auto_approve, tags, locked, state_token, active_run_id,
+			terraform_version, approval_policy_id, auto_approve, tags, locked, state_token, state_token_hash, state_token_ciphertext, active_run_id,
 			drift_enabled, drift_interval_minutes, drift_status, last_drift_check_at,
 			ttl_hours, expires_at, auto_destroy, created_at, updated_at
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''),$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''),$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
 		ON CONFLICT (id) DO UPDATE SET
 			tenant_id = EXCLUDED.tenant_id,
 			github_repo_id = EXCLUDED.github_repo_id,
@@ -62,6 +91,8 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			auto_approve = EXCLUDED.auto_approve,
 			tags = EXCLUDED.tags,
 			state_token = EXCLUDED.state_token,
+			state_token_hash = EXCLUDED.state_token_hash,
+			state_token_ciphertext = COALESCE(EXCLUDED.state_token_ciphertext, projects.state_token_ciphertext),
 			drift_enabled = EXCLUDED.drift_enabled,
 			drift_interval_minutes = EXCLUDED.drift_interval_minutes,
 			drift_status = EXCLUDED.drift_status,
@@ -72,7 +103,7 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
-		s.TerraformVersion, s.ApprovalPolicyID, s.AutoApprove, string(tagsJSON), s.Locked, s.StateToken, s.ActiveRunID,
+		s.TerraformVersion, s.ApprovalPolicyID, s.AutoApprove, string(tagsJSON), s.Locked, plainStateToken, stateTokenHash, stateTokenCiphertext, s.ActiveRunID,
 		s.DriftEnabled, driftInterval, driftStatus, s.LastDriftCheckAt,
 		s.TTLHours, s.ExpiresAt, s.AutoDestroy, s.CreatedAt, s.UpdatedAt,
 	)
@@ -98,7 +129,7 @@ func (r *ProjectRepo) ReleaseActiveRun(ctx context.Context, id project.ID, runID
 }
 
 func (r *ProjectRepo) Get(ctx context.Context, id project.ID) (*project.Project, error) {
-	p, err := scanProject(r.pool.QueryRow(ctx, `SELECT `+projectColumns+` FROM projects WHERE id = $1`, id))
+	p, err := r.scanProject(r.pool.QueryRow(ctx, `SELECT `+projectColumns+` FROM projects WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -124,7 +155,7 @@ func (r *ProjectRepo) query(ctx context.Context, sql string, args ...any) ([]*pr
 	defer rows.Close()
 	var out []*project.Project
 	for rows.Next() {
-		p, err := scanProject(rows)
+		p, err := r.scanProject(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -143,17 +174,31 @@ type projectScanner interface {
 }
 
 func scanProject(row projectScanner) (*project.Project, error) {
+	return (&ProjectRepo{}).scanProject(row)
+}
+
+func (r *ProjectRepo) scanProject(row projectScanner) (*project.Project, error) {
 	var s project.Snapshot
-	var tagsRaw []byte
+	var tagsRaw, stateTokenCiphertext []byte
 	var lastDrift, expiresAt *time.Time
 	var created, updated time.Time
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.GitHubRepoID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
-		&s.TerraformVersion, &s.ApprovalPolicyID, &s.AutoApprove, &tagsRaw, &s.Locked, &s.StateToken, &s.ActiveRunID,
+		&s.TerraformVersion, &s.ApprovalPolicyID, &s.AutoApprove, &tagsRaw, &s.Locked, &s.StateToken, &s.StateTokenHash, &stateTokenCiphertext, &s.ActiveRunID,
 		&s.DriftEnabled, &s.DriftIntervalMinutes, &s.DriftStatus, &lastDrift,
 		&s.TTLHours, &expiresAt, &s.AutoDestroy, &created, &updated,
 	); err != nil {
 		return nil, err
+	}
+	if s.StateToken == "" && len(stateTokenCiphertext) > 0 && r.sealer != nil {
+		pt, err := r.sealer.OpenWithAAD(stateTokenCiphertext, ProjectStateTokenAAD(s.ID))
+		if err != nil {
+			return nil, fmt.Errorf("decrypt project state token: %w", err)
+		}
+		s.StateToken = string(pt)
+	}
+	if s.StateTokenHash == "" && s.StateToken != "" {
+		s.StateTokenHash = crypto.HashToken(s.StateToken)
 	}
 	if len(tagsRaw) > 0 {
 		_ = json.Unmarshal(tagsRaw, &s.Tags)

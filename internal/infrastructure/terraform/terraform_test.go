@@ -59,6 +59,8 @@ func TestCommandEnvDropsPlatformSecrets(t *testing.T) {
 	t.Setenv("GITHUB_APP_CLIENT_ID", "Iv1.abc")
 	t.Setenv("GITHUB_APP_CLIENT_SECRET", "client-secret")
 	t.Setenv("CONTEXT_ENCRYPTION_KEY", "enc-secret")
+	t.Setenv("ENCRYPTION_KEYRING", "k1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	t.Setenv("ENCRYPTION_ACTIVE_KEY_ID", "k1")
 	t.Setenv("S3_ENDPOINT", "https://s3.internal")
 	t.Setenv("S3_REGION", "eu-central-1")
 	t.Setenv("S3_BUCKET", "cache-bucket")
@@ -70,28 +72,31 @@ func TestCommandEnvDropsPlatformSecrets(t *testing.T) {
 	t.Setenv("GIT_TRACE", "1")
 	t.Setenv("SOME_GH_COPY", "ghp_project_token")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
-	env := strings.Join(commandEnv("ghp_project_token", "/tmp/isolated-home", nil), "\n")
+	entries := commandEnv("ghp_project_token", "/tmp/isolated-home", nil)
+	env := "\n" + strings.Join(entries, "\n") + "\n"
 	for _, banned := range []string{
-		"DATABASE_URL=",
-		"POSTGRES_PASSWORD=",
-		"BASIC_AUTH_USER=",
-		"BASIC_AUTH_PASSWORD=",
-		"GITHUB_APP_ID=",
-		"GITHUB_APP_PRIVATE_KEY=",
-		"GITHUB_APP_PRIVATE_KEY_FILE=",
-		"GITHUB_APP_WEBHOOK_SECRET=",
-		"GITHUB_APP_CLIENT_ID=",
-		"GITHUB_APP_CLIENT_SECRET=",
-		"CONTEXT_ENCRYPTION_KEY=",
-		"S3_ENDPOINT=",
-		"S3_REGION=",
-		"S3_BUCKET=",
-		"S3_ACCESS_KEY_ID=",
-		"S3_SECRET_ACCESS_KEY=",
-		"S3_USE_PATH_STYLE=",
-		"S3_PREFIX=",
-		"TF_LOG=",
-		"GIT_TRACE=",
+		"\nDATABASE_URL=",
+		"\nPOSTGRES_PASSWORD=",
+		"\nBASIC_AUTH_USER=",
+		"\nBASIC_AUTH_PASSWORD=",
+		"\nGITHUB_APP_ID=",
+		"\nGITHUB_APP_PRIVATE_KEY=",
+		"\nGITHUB_APP_PRIVATE_KEY_FILE=",
+		"\nGITHUB_APP_WEBHOOK_SECRET=",
+		"\nGITHUB_APP_CLIENT_ID=",
+		"\nGITHUB_APP_CLIENT_SECRET=",
+		"\nCONTEXT_ENCRYPTION_KEY=",
+		"\nENCRYPTION_KEYRING=",
+		"\nENCRYPTION_ACTIVE_KEY_ID=",
+		"\nS3_ENDPOINT=",
+		"\nS3_REGION=",
+		"\nS3_BUCKET=",
+		"\nS3_ACCESS_KEY_ID=",
+		"\nS3_SECRET_ACCESS_KEY=",
+		"\nS3_USE_PATH_STYLE=",
+		"\nS3_PREFIX=",
+		"\nTF_LOG=",
+		"\nGIT_TRACE=",
 		"ghp_project_token",
 	} {
 		if strings.Contains(env, banned) {

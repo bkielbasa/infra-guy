@@ -42,6 +42,7 @@ type Snapshot struct {
 	Tags                 map[string]string
 	Locked               bool
 	StateToken           string
+	StateTokenHash       string
 	ActiveRunID          string
 	DriftEnabled         bool
 	DriftIntervalMinutes int
@@ -252,6 +253,7 @@ func cloneTags(in map[string]string) map[string]string {
 }
 
 func (p *Project) SetStateToken(token string)        { p.s.StateToken = token }
+func (p *Project) SetStateTokenHash(hash string)     { p.s.StateTokenHash = hash }
 func (p *Project) Lock()                             { p.s.Locked = true }
 func (p *Project) Unlock()                           { p.s.Locked = false }
 

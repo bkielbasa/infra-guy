@@ -65,8 +65,8 @@ func TestEmbeddedMigrationsIOFSSource(t *testing.T) {
 		}
 		cur = next
 	}
-	if count != 14 || cur != 14 {
-		t.Fatalf("expected 14 migrations ending at 14, got count=%d last=%d", count, cur)
+	if count != 15 || cur != 15 {
+		t.Fatalf("expected 15 migrations ending at 15, got count=%d last=%d", count, cur)
 	}
 }
 
@@ -96,7 +96,7 @@ func TestMigrateAndLegacyUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateVersion: %v", err)
 	}
-	if v != 14 || dirty {
-		t.Fatalf("expected version=14 dirty=false, got version=%d dirty=%v", v, dirty)
+	if v != 15 || dirty {
+		t.Fatalf("expected version=15 dirty=false, got version=%d dirty=%v", v, dirty)
 	}
 }

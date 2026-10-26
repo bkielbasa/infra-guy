@@ -801,3 +801,153 @@ func TestAuditRepoAppendListAndChainVerification(t *testing.T) {
 	}
 }
 
+func TestSecurityEnvelopeEncryptionTokenHashingAndKeyRotation(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	sealerK1, err := crypto.ParseKeyring("k1:secret-k1", "k1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	projects := NewProjectRepo(pool).WithSealer(sealerK1)
+	states := NewStateRepo(pool).WithSealer(sealerK1)
+	runs := NewRunRepo(pool).WithSealer(sealerK1)
+	identStore := NewIdentityStore(pool)
+
+	p := newTestProject(t, ctx, pool, projects, "proj-sec")
+	p.SetStateToken("tok-secret-123")
+	if err := projects.Save(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	pid := p.Snapshot().ID
+	origToken := p.Snapshot().StateToken
+
+	var rawToken, tokenHash string
+	var tokenCiphertext []byte
+	if err := pool.QueryRow(ctx, `SELECT state_token, state_token_hash, state_token_ciphertext FROM projects WHERE id = $1`, pid).Scan(&rawToken, &tokenHash, &tokenCiphertext); err != nil {
+		t.Fatal(err)
+	}
+	if rawToken != "" {
+		t.Fatalf("expected plaintext state_token column to be empty, got %q", rawToken)
+	}
+	if !crypto.VerifyTokenHash(origToken, tokenHash) {
+		t.Fatalf("expected state_token_hash %q to verify original token", tokenHash)
+	}
+	if kid, ok := crypto.EnvelopeKeyID(tokenCiphertext); !ok || kid != "k1" {
+		t.Fatalf("expected envelope ciphertext with k1, got %q", string(tokenCiphertext))
+	}
+	gotProj, err := projects.Get(ctx, pid)
+	if err != nil || gotProj == nil || gotProj.Snapshot().StateToken != origToken {
+		t.Fatalf("decrypted project StateToken mismatch: %v", err)
+	}
+
+	st := state.New(string(pid))
+	stateBytes := []byte(`{"serial":1,"outputs":{"secret_db_password":{"value":"hunter2","sensitive":true}}}`)
+	if err := st.Put(stateBytes, "", "run-sec", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := states.Save(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	var rawStateData []byte
+	if err := pool.QueryRow(ctx, `SELECT data FROM states WHERE project_id = $1`, pid).Scan(&rawStateData); err != nil {
+		t.Fatal(err)
+	}
+	if kid, ok := crypto.EnvelopeKeyID(rawStateData); !ok || kid != "k1" {
+		t.Fatalf("expected encrypted states.data with k1")
+	}
+	loadedState, err := states.Load(ctx, string(pid))
+	if err != nil || string(loadedState.Snapshot().Data) != string(stateBytes) {
+		t.Fatalf("loaded state mismatch: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	r, err := run.Open(run.OpenInput{
+		ID:        run.ID("run-sec-" + string(pid)),
+		ProjectID: run.ProjectID(pid),
+		Trigger:   run.TriggerPush,
+		SHA:       "1234567",
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := runs.InsertIfAbsent(ctx, r); err != nil || !ok {
+		t.Fatalf("InsertIfAbsent: %v %v", ok, err)
+	}
+	_ = r.BeginStep(run.StepInit, now)
+	_, _ = r.CompleteStep(run.StepInit, run.StepResult{ExitCode: 0}, now)
+	_ = r.BeginStep(run.StepPlan, now)
+	planFile := []byte("tfplan-binary-secret-contents")
+	planJSON := []byte(`{"format_version":"1.2","variables":{"db_pass":{"value":"supersecret"}}}`)
+	_, _ = r.CompleteStep(run.StepPlan, run.StepResult{
+		ExitCode: 0,
+		PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.",
+		PlanFile: planFile,
+		PlanJSON: planJSON,
+	}, now)
+	if err := runs.Save(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	var rawPlanFile, rawPlanJSON []byte
+	if err := pool.QueryRow(ctx, `SELECT plan_file, plan_json FROM runs WHERE id = $1`, r.Snapshot().ID).Scan(&rawPlanFile, &rawPlanJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !crypto.IsEnvelopeCiphertext(rawPlanFile) || !crypto.IsEnvelopeCiphertext(rawPlanJSON) {
+		t.Fatalf("expected encrypted plan_file and plan_json in DB")
+	}
+	loadedRun, err := runs.Get(ctx, r.Snapshot().ID)
+	if err != nil || string(loadedRun.Snapshot().PlanFile) != string(planFile) || string(loadedRun.Snapshot().PlanJSON) != string(planJSON) {
+		t.Fatalf("loaded run plan mismatch: %v", err)
+	}
+
+	// Verify session token hashing in IdentityStore
+	uid := "usr-sec-" + string(pid)
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id, login, display_name, created_at, updated_at) VALUES ($1, 'secuser', 'Sec User', now(), now())`, uid); err != nil {
+		t.Fatal(err)
+	}
+	rawSessID := "sess-raw-token-" + string(pid)
+	if err := identStore.SaveSession(ctx, Session{
+		ID:        rawSessID,
+		UserID:    uid,
+		TenantID:  p.Snapshot().TenantID,
+		ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var storedSessID string
+	if err := pool.QueryRow(ctx, `SELECT id FROM sessions WHERE user_id = $1`, uid).Scan(&storedSessID); err != nil {
+		t.Fatal(err)
+	}
+	if storedSessID != crypto.HashToken(rawSessID) {
+		t.Fatalf("expected session id in DB to be hashed %q, got %q", crypto.HashToken(rawSessID), storedSessID)
+	}
+	gotSess, err := identStore.GetSession(ctx, rawSessID)
+	if err != nil || gotSess == nil || gotSess.ID != rawSessID {
+		t.Fatalf("GetSession by raw token failed: %v %#v", err, gotSess)
+	}
+
+	// Verify RotateAndSealAll rotates from k1 to k2
+	sealerK2, err := crypto.ParseKeyring("k2:secret-k2,k1:secret-k1,default:test-encryption-key", "k2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := RotateAndSealAll(ctx, pool, sealerK2)
+	if err != nil {
+		t.Fatalf("RotateAndSealAll: %v", err)
+	}
+	if stats.ProjectTokens == 0 || stats.States == 0 || stats.RunPlanArtifacts == 0 {
+		t.Fatalf("expected non-zero rotation counts, got %+v", stats)
+	}
+	if err := pool.QueryRow(ctx, `SELECT data FROM states WHERE project_id = $1`, pid).Scan(&rawStateData); err != nil {
+		t.Fatal(err)
+	}
+	if kid, ok := crypto.EnvelopeKeyID(rawStateData); !ok || kid != "k2" {
+		t.Fatalf("expected rotated state key ID k2, got %q", kid)
+	}
+}
+

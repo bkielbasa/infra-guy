@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"infra-guy/internal/infrastructure/crypto"
 	"infra-guy/internal/infrastructure/postgres"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -83,7 +84,29 @@ func main() {
 		}
 		fmt.Printf("version=%d dirty=%v\n", v, dirty)
 
+	case "rotate-keys":
+		var fallbackSecret []byte
+		if rawKey := os.Getenv("CONTEXT_ENCRYPTION_KEY"); rawKey != "" {
+			fallbackSecret = []byte(rawKey)
+		} else if keyPath := os.Getenv("GITHUB_APP_PRIVATE_KEY_FILE"); keyPath != "" {
+			pemBytes, err := os.ReadFile(keyPath)
+			if err != nil {
+				log.Fatalf("read GITHUB_APP_PRIVATE_KEY_FILE: %v", err)
+			}
+			fallbackSecret = append([]byte("infra-guy-context-v1:"), pemBytes...)
+		}
+		sealer, err := crypto.ParseKeyring(os.Getenv("ENCRYPTION_KEYRING"), os.Getenv("ENCRYPTION_ACTIVE_KEY_ID"), fallbackSecret)
+		if err != nil {
+			log.Fatalf("initialize encryption keyring: %v", err)
+		}
+		sum, err := postgres.RotateAndSealAll(ctx, pool, sealer)
+		if err != nil {
+			log.Fatalf("rotate-keys failed: %v", err)
+		}
+		log.Printf("key rotation complete (activeKeyID=%s contextEntries=%d cloudIntegrations=%d projectTokens=%d states=%d runArtifacts=%d)",
+			sealer.ActiveKeyID(), sum.ContextEntries, sum.CloudIntegrations, sum.ProjectTokens, sum.States, sum.RunPlanArtifacts)
+
 	default:
-		log.Fatalf("unknown command %q (expected: up, down [steps|all], version)", cmd)
+		log.Fatalf("unknown command %q (expected: up, down [steps|all], version, rotate-keys)", cmd)
 	}
 }

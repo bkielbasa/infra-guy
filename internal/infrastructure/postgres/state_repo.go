@@ -4,19 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"infra-guy/internal/domain/state"
+	"infra-guy/internal/infrastructure/crypto"
 )
 
 var _ state.Repository = (*StateRepo)(nil)
 
-type StateRepo struct{ pool *pgxpool.Pool }
+type StateRepo struct {
+	pool   *pgxpool.Pool
+	sealer *crypto.Sealer
+}
 
 func NewStateRepo(pool *pgxpool.Pool) *StateRepo { return &StateRepo{pool: pool} }
+
+func (r *StateRepo) WithSealer(sealer *crypto.Sealer) *StateRepo {
+	r.sealer = sealer
+	return r
+}
+
+func StateDataAAD(projectID string) []byte {
+	return []byte("state:" + projectID + ":data")
+}
 
 func (r *StateRepo) Load(ctx context.Context, projectID string) (*state.State, error) {
 	var s state.Snapshot
@@ -32,6 +46,13 @@ func (r *StateRepo) Load(ctx context.Context, projectID string) (*state.State, e
 	}
 	if err != nil {
 		return nil, err
+	}
+	if r.sealer != nil && crypto.IsEnvelopeCiphertext(s.Data) {
+		pt, err := r.sealer.OpenWithAAD(s.Data, StateDataAAD(projectID))
+		if err != nil {
+			return nil, fmt.Errorf("decrypt state for project %s: %w", projectID, err)
+		}
+		s.Data = pt
 	}
 	s.ProjectID = projectID
 	if lockID != nil {
@@ -59,6 +80,14 @@ func (r *StateRepo) Save(ctx context.Context, st *state.State) error {
 		}
 		changedJSON = b
 	}
+	dataToStore := s.Data
+	if r.sealer != nil && len(dataToStore) > 0 && !crypto.IsEnvelopeCiphertext(dataToStore) {
+		ct, err := r.sealer.SealWithAAD(dataToStore, StateDataAAD(s.ProjectID))
+		if err != nil {
+			return fmt.Errorf("seal state for project %s: %w", s.ProjectID, err)
+		}
+		dataToStore = ct
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -75,7 +104,7 @@ func (r *StateRepo) Save(ctx context.Context, st *state.State) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE states SET data = $2, lock_id = $3, lock_info = $4, serial = $5, updated_at = $6, changed_outputs = $7
 		WHERE project_id = $1`,
-		s.ProjectID, s.Data, s.LockID, s.LockInfo, s.Serial, s.UpdatedAt, changedJSON,
+		s.ProjectID, dataToStore, s.LockID, s.LockInfo, s.Serial, s.UpdatedAt, changedJSON,
 	); err != nil {
 		return err
 	}

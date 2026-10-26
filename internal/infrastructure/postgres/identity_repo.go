@@ -10,6 +10,7 @@ import (
 
 	"infra-guy/internal/domain/tenant"
 	"infra-guy/internal/domain/user"
+	"infra-guy/internal/infrastructure/crypto"
 )
 
 // Session is a signed-in user's server-side session. TenantID is empty until a
@@ -251,12 +252,14 @@ func (s *IdentityStore) DeactivateInstallation(ctx context.Context, githubInstal
 	return err
 }
 
-// SaveSession inserts or replaces the session row. An empty TenantID is stored as NULL.
+// SaveSession inserts or replaces the session row using a SHA-256 hash of the session token.
+// An empty TenantID is stored as NULL.
 func (s *IdentityStore) SaveSession(ctx context.Context, sess Session) error {
 	var tenantID *string
 	if sess.TenantID != "" {
 		tenantID = &sess.TenantID
 	}
+	hashedID := crypto.HashToken(sess.ID)
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO sessions (id, user_id, tenant_id, role, login, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
@@ -266,18 +269,24 @@ func (s *IdentityStore) SaveSession(ctx context.Context, sess Session) error {
 			role = EXCLUDED.role,
 			login = EXCLUDED.login,
 			expires_at = EXCLUDED.expires_at`,
-		sess.ID, sess.UserID, tenantID, sess.Role, sess.Login, sess.ExpiresAt)
+		hashedID, sess.UserID, tenantID, sess.Role, sess.Login, sess.ExpiresAt)
 	return err
 }
 
 // GetSession returns nil when the session does not exist.
 func (s *IdentityStore) GetSession(ctx context.Context, id string) (*Session, error) {
+	if id == "" {
+		return nil, nil
+	}
+	hashedID := crypto.HashToken(id)
 	var sess Session
 	var tenantID *string
 	var expires time.Time
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, user_id, tenant_id, role, login, expires_at
-		FROM sessions WHERE id = $1`, id,
+		FROM sessions WHERE id = $1 OR id = $2
+		ORDER BY (id = $1) DESC
+		LIMIT 1`, hashedID, id,
 	).Scan(&sess.ID, &sess.UserID, &tenantID, &sess.Role, &sess.Login, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -285,6 +294,7 @@ func (s *IdentityStore) GetSession(ctx context.Context, id string) (*Session, er
 	if err != nil {
 		return nil, err
 	}
+	sess.ID = id
 	if tenantID != nil {
 		sess.TenantID = *tenantID
 	}

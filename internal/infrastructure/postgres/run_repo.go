@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"infra-guy/internal/domain/run"
+	"infra-guy/internal/infrastructure/crypto"
 )
 
 var (
@@ -17,9 +19,46 @@ var (
 	_ run.TenantSummaryRepository = (*RunRepo)(nil)
 )
 
-type RunRepo struct{ pool *pgxpool.Pool }
+type RunRepo struct {
+	pool   *pgxpool.Pool
+	sealer *crypto.Sealer
+}
 
 func NewRunRepo(pool *pgxpool.Pool) *RunRepo { return &RunRepo{pool: pool} }
+
+func (r *RunRepo) WithSealer(sealer *crypto.Sealer) *RunRepo {
+	r.sealer = sealer
+	return r
+}
+
+func RunPlanFileAAD(id run.ID) []byte {
+	return []byte("run:" + string(id) + ":plan_file")
+}
+
+func RunPlanJSONAAD(id run.ID) []byte {
+	return []byte("run:" + string(id) + ":plan_json")
+}
+
+func (r *RunRepo) sealPlanArtifacts(s run.Snapshot) (planFile, planJSON []byte, err error) {
+	planFile = s.PlanFile
+	planJSON = s.PlanJSON
+	if r.sealer == nil {
+		return planFile, planJSON, nil
+	}
+	if len(planFile) > 0 && !crypto.IsEnvelopeCiphertext(planFile) {
+		planFile, err = r.sealer.SealWithAAD(planFile, RunPlanFileAAD(s.ID))
+		if err != nil {
+			return nil, nil, fmt.Errorf("seal run %s plan_file: %w", s.ID, err)
+		}
+	}
+	if len(planJSON) > 0 && !crypto.IsEnvelopeCiphertext(planJSON) {
+		planJSON, err = r.sealer.SealWithAAD(planJSON, RunPlanJSONAAD(s.ID))
+		if err != nil {
+			return nil, nil, fmt.Errorf("seal run %s plan_json: %w", s.ID, err)
+		}
+	}
+	return planFile, planJSON, nil
+}
 
 const runColumns = `id, project_id, trigger, status, commit_sha, branch, commit_message, author,
 	triggered_by, pr_number, pr_title, plan_only, auto_approve, destroy, plan_text, plan_file, plan_json, add_count,
@@ -43,6 +82,10 @@ WHERE NOT EXISTS (
 
 func (r *RunRepo) InsertIfAbsent(ctx context.Context, in *run.Run) (bool, error) {
 	s := in.Snapshot()
+	planFile, planJSON, err := r.sealPlanArtifacts(s)
+	if err != nil {
+		return false, err
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -52,7 +95,7 @@ func (r *RunRepo) InsertIfAbsent(ctx context.Context, in *run.Run) (bool, error)
 	tag, err := tx.Exec(ctx, insertIfAbsentSQL,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
 		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.IsDestroy,
-		s.PlanText, s.PlanFile, s.PlanJSON, s.MonthlyCost, s.DiffMonthlyCost, s.CommittedAt, s.CreatedAt,
+		s.PlanText, planFile, planJSON, s.MonthlyCost, s.DiffMonthlyCost, s.CommittedAt, s.CreatedAt,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -78,6 +121,10 @@ func (r *RunRepo) InsertIfAbsent(ctx context.Context, in *run.Run) (bool, error)
 
 func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 	s := in.Snapshot()
+	planFile, planJSON, err := r.sealPlanArtifacts(s)
+	if err != nil {
+		return err
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -95,7 +142,7 @@ func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 			committed_at = $28, created_at = $29, started_at = $30, finished_at = $31
 		WHERE id = $1`,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
-		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.IsDestroy, s.PlanText, s.PlanFile, s.PlanJSON,
+		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.IsDestroy, s.PlanText, planFile, planJSON,
 		s.Add, s.Change, s.Destroy, s.SummaryPresent, s.MonthlyCost, s.DiffMonthlyCost,
 		s.TerraformVersion, s.Error, s.ApprovedBy, s.ApprovedAt, s.CommittedAt, s.CreatedAt, s.StartedAt, s.FinishedAt,
 	); err != nil {
@@ -115,7 +162,7 @@ func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 }
 
 func (r *RunRepo) Get(ctx context.Context, id run.ID) (*run.Run, error) {
-	s, err := scanRun(r.pool.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id = $1`, id))
+	s, err := r.scanRun(r.pool.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -144,7 +191,7 @@ func (r *RunRepo) ListByProject(ctx context.Context, projectID run.ProjectID) ([
 	var snaps []run.Snapshot
 	var runIDs []string
 	for rows.Next() {
-		s, err := scanRun(rows)
+		s, err := r.scanRun(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -356,7 +403,7 @@ type runScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanRun(row runScanner) (run.Snapshot, error) {
+func (r *RunRepo) scanRun(row runScanner) (run.Snapshot, error) {
 	var s run.Snapshot
 	var created time.Time
 	var started, finished, approved, committed *time.Time
@@ -368,6 +415,22 @@ func scanRun(row runScanner) (run.Snapshot, error) {
 	)
 	if err != nil {
 		return run.Snapshot{}, err
+	}
+	if r.sealer != nil {
+		if crypto.IsEnvelopeCiphertext(s.PlanFile) {
+			pt, err := r.sealer.OpenWithAAD(s.PlanFile, RunPlanFileAAD(s.ID))
+			if err != nil {
+				return run.Snapshot{}, fmt.Errorf("decrypt run %s plan_file: %w", s.ID, err)
+			}
+			s.PlanFile = pt
+		}
+		if crypto.IsEnvelopeCiphertext(s.PlanJSON) {
+			pt, err := r.sealer.OpenWithAAD(s.PlanJSON, RunPlanJSONAAD(s.ID))
+			if err != nil {
+				return run.Snapshot{}, fmt.Errorf("decrypt run %s plan_json: %w", s.ID, err)
+			}
+			s.PlanJSON = pt
+		}
 	}
 	s.ApprovedAt = utcTimePtr(approved)
 	s.CommittedAt = utcTimePtr(committed)

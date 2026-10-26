@@ -260,6 +260,8 @@ var blockedEnv = map[string]bool{
 	"GITHUB_APP_CLIENT_ID":        true,
 	"GITHUB_APP_CLIENT_SECRET":    true,
 	"CONTEXT_ENCRYPTION_KEY":      true,
+	"ENCRYPTION_KEYRING":          true,
+	"ENCRYPTION_ACTIVE_KEY_ID":    true,
 	"S3_ENDPOINT":                 true,
 	"S3_REGION":                   true,
 	"S3_BUCKET":                   true,
