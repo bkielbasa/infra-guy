@@ -3106,7 +3106,7 @@ func projectMeta(ps project.Snapshot, latest *run.Snapshot, meta state.Metadata)
 		Workdir:          ps.WorkingDirectory,
 		Branch:           ps.DefaultBranch,
 		Tags:             project.TagList(ps.Tags),
-		ShowManagedBy:    true,
+		ShowManagedBy:    ps.Engine == "" || ps.Engine == project.EngineTerraform,
 	}
 	if ps.Engine != "" && ps.Engine != project.EngineTerraform {
 		m.TerraformVersion = ""

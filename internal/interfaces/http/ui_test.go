@@ -744,6 +744,12 @@ func TestNewProjectPickerAndCreate(t *testing.T) {
 	if !strings.Contains(body, `<select name="repo_id" required>`) || !strings.Contains(body, `<option value="101">operator/my-infra</option>`) {
 		t.Fatalf("expected repo options in /projects/new, got %s", body)
 	}
+	engineAt := strings.Index(body, `id="project-engine"`)
+	folderAt := strings.Index(body, `id="project-workdir"`)
+	versionAt := strings.Index(body, `id="project-tf-version"`)
+	if folderAt < 0 || engineAt < folderAt || versionAt < engineAt {
+		t.Fatalf("new project field order name/folder then tool then terraform fields: folder=%d engine=%d version=%d", folderAt, engineAt, versionAt)
+	}
 
 	// 2. GET /projects/new when not installed shows Install GitHub App link without form
 	noInstStore := newUIIdentity("operator", "ten-no-inst")
@@ -2344,6 +2350,22 @@ func TestEngineSettingsAndStateRollback(t *testing.T) {
 	rr = getUI(t, h, "/projects/p1")
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "/tabs/releases") {
 		t.Fatalf("helm workspace missing releases tab: %s", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "/tabs/state") {
+		t.Fatalf("helm workspace should not offer the Terraform state tab: %s", rr.Body.String())
+	}
+	rr = getUI(t, h, "/projects/p1/settings")
+	settings := rr.Body.String()
+	engineAt := strings.Index(settings, `id="project-engine"`)
+	versionAt := strings.Index(settings, `id="project-tf-version"`)
+	if rr.Code != http.StatusOK || engineAt < 0 || versionAt < engineAt {
+		t.Fatalf("engine select should come before terraform version: %d engine=%d version=%d", rr.Code, engineAt, versionAt)
+	}
+	if !strings.Contains(settings, `data-when-engine="terraform" hidden`) || !strings.Contains(settings, `name="terraform_version" disabled`) {
+		t.Fatalf("terraform fields still active on a helm workspace: %s", settings)
+	}
+	if strings.Contains(settings, "where Terraform files live") {
+		t.Fatalf("working directory still described as Terraform-only: %s", settings)
 	}
 	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=charts/app&engine=helm&release_name=payments&chart=./chart&tool_version=1.2"))
 	if rr.Code != http.StatusBadRequest {

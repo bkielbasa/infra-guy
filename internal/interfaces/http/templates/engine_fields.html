@@ -9,7 +9,7 @@
       <option value="ansible"{{if eq .Engine "ansible"}} selected{{end}}>Ansible</option>
       <option value="helm"{{if eq .Engine "helm"}} selected{{end}}>Helm</option>
     </select>
-    <span class="field-hint">Terraform uses the version above. Kubernetes, Ansible, and Helm use a pinned tool version when one is set, and the runner PATH otherwise.</span>
+    <span class="field-hint">This choice controls the fields below. Terraform pins a Terraform release. Kubernetes, Ansible, and Helm pin kubectl, Helm, or ansible-core, or use the runner PATH when the version is empty.</span>
   </div>
   <div class="field" id="tool-version-field"{{if or (eq .Engine "terraform") (eq .Engine "")}} hidden{{end}}>
     <label for="tool-version">Tool version</label>
@@ -97,18 +97,34 @@
   var sel = document.getElementById("project-engine");
   if (!sel) return;
   function sync() {
-    var v = sel.value;
+    var v = sel.value || "terraform";
     document.querySelectorAll("[data-engine]").forEach(function (el) {
       el.hidden = el.getAttribute("data-engine") !== v;
     });
+    document.querySelectorAll("[data-when-engine]").forEach(function (el) {
+      var allow = el.getAttribute("data-when-engine").split(/\s+/);
+      var show = allow.indexOf(v) !== -1;
+      el.hidden = !show;
+      if (el.matches("input, select, textarea, button")) {
+        el.disabled = !show;
+      }
+      el.querySelectorAll("input, select, textarea, button").forEach(function (input) {
+        input.disabled = !show;
+      });
+    });
     var toolField = document.getElementById("tool-version-field");
     var toolInput = document.getElementById("tool-version");
-    var showTool = v && v !== "terraform";
+    var showTool = v !== "terraform";
     if (toolField) toolField.hidden = !showTool;
     if (toolInput) toolInput.disabled = !showTool;
   }
+  function start() { sync(); }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
+  }
   sel.addEventListener("change", sync);
-  sync();
 })();
 </script>
 {{end}}

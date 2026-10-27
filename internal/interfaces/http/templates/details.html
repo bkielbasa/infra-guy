@@ -8,7 +8,7 @@
 
   <form method="post" action="/projects/{{.ID}}" class="project-form">
     <section class="form-section">
-      <h2>Git &amp; Terraform</h2>
+      <h2>Source</h2>
       <div class="form-grid">
         <div class="field">
           <label for="project-branch">Default branch</label>
@@ -17,29 +17,8 @@
         </div>
         <div class="field">
           <label for="project-workdir">Working directory</label>
-          <input type="text" id="project-workdir" name="workdir" value="{{.Workdir}}" placeholder="e.g. terraform/prod (optional)">
-          <span class="field-hint">Relative subdirectory where Terraform files live.</span>
-        </div>
-        <div class="field">
-          <label for="project-tf-version">Terraform version</label>
-          <select id="project-tf-version" name="terraform_version">
-            {{range .Versions}}<option value="{{.}}"{{if eq . $.TerraformVersion}} selected{{end}}>{{.}}</option>{{end}}
-          </select>
-        </div>
-        <div class="field">
-          <label for="project-policy">Approval policy</label>
-          <select id="project-policy" name="approval_policy_id">
-            <option value="">None</option>
-            {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
-          </select>
-          {{if .TagBoundPolicies}}
-          <div class="field-hint" style="margin-top: 6px;">
-            <strong>Tag-bound &amp; global policies automatically enforced:</strong>
-            {{range .TagBoundPolicies}}
-            <a href="/policies/{{.ID}}" class="tag-pill" style="text-decoration: none;">{{.Name}} ({{.Badge}})</a>
-            {{end}}
-          </div>
-          {{end}}
+          <input type="text" id="project-workdir" name="workdir" value="{{.Workdir}}" placeholder="e.g. providers/aws (optional)">
+          <span class="field-hint">Relative subdirectory the run executes in. Leave empty to use the repository root.</span>
         </div>
       </div>
 
@@ -59,13 +38,41 @@
 
     {{template "engine_fields" .EngineForm}}
 
+    <section class="form-section" data-when-engine="terraform"{{if ne .EngineForm.Engine "terraform"}} hidden{{end}}>
+      <h2>Terraform</h2>
+      <div class="field">
+        <label for="project-tf-version">Terraform version</label>
+        <select id="project-tf-version" name="terraform_version"{{if ne .EngineForm.Engine "terraform"}} disabled{{end}}>
+          {{range .Versions}}<option value="{{.}}"{{if eq . $.TerraformVersion}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </div>
+    </section>
+
     <section class="form-section">
-      <h2>Automation, Contexts &amp; Cloud Integrations</h2>
+      <h2>Runs, contexts, and credentials</h2>
+      <div class="field">
+        <label for="project-policy">Approval policy</label>
+        <select id="project-policy" name="approval_policy_id">
+          <option value="">None</option>
+          {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
+        </select>
+        {{if .TagBoundPolicies}}
+        <div class="field-hint" style="margin-top: 6px;">
+          <strong>Tag-bound &amp; global policies automatically enforced:</strong>
+          {{range .TagBoundPolicies}}
+          <a href="/policies/{{.ID}}" class="tag-pill" style="text-decoration: none;">{{.Name}} ({{.Badge}})</a>
+          {{end}}
+        </div>
+        {{end}}
+      </div>
       <label class="check-card">
         <input type="checkbox" name="auto_approve"{{if .AutoApprove}} checked{{end}}>
         <div>
           <strong>Auto-approve tracked runs</strong>
-          <div class="field-hint">Automatically run <code>terraform apply</code> when a plan succeeds on the default branch.</div>
+          <div class="field-hint">
+            <span data-when-engine="terraform"{{if ne .EngineForm.Engine "terraform"}} hidden{{end}}>Automatically run <code>terraform apply</code> when a plan succeeds on the default branch.</span>
+            <span data-when-engine="kubernetes ansible helm"{{if or (eq .EngineForm.Engine "terraform") (eq .EngineForm.Engine "")}} hidden{{end}}>Automatically apply when a plan succeeds on the default branch.</span>
+          </div>
         </div>
       </label>
       {{if .Contexts}}
@@ -78,19 +85,19 @@
         </div>
       </div>
       {{end}}
-      <input type="hidden" name="cloud_integrations_present" value="1">
+      <input type="hidden" name="cloud_integrations_present" value="1" data-when-engine="terraform"{{if ne .EngineForm.Engine "terraform"}} disabled{{end}}>
       {{if .CloudIntegrations}}
-      <div class="field" style="margin-top: 14px;">
+      <div class="field" data-when-engine="terraform" style="margin-top: 14px;"{{if ne .EngineForm.Engine "terraform"}} hidden{{end}}>
         <label>Attached cloud integrations (OIDC / STS)</label>
         <div class="context-grid">
           {{range .CloudIntegrations}}
-          <label class="check"><input type="checkbox" name="cloud_integration_ids" value="{{.ID}}"{{if .Attached}} checked{{end}}> {{.Name}} <span class="muted">({{.ProviderLabel}})</span></label>
+          <label class="check"><input type="checkbox" name="cloud_integration_ids" value="{{.ID}}"{{if .Attached}} checked{{end}}{{if ne $.EngineForm.Engine "terraform"}} disabled{{end}}> {{.Name}} <span class="muted">({{.ProviderLabel}})</span></label>
           {{end}}
         </div>
       </div>
       {{end}}
       {{if .TagBoundCloudIntegrations}}
-      <div class="field-hint" style="margin-top: 6px;">
+      <div class="field-hint" data-when-engine="terraform" style="margin-top: 6px;"{{if ne .EngineForm.Engine "terraform"}} hidden{{end}}>
         <strong>Tag-bound cloud integrations automatically applied:</strong>
         {{range .TagBoundCloudIntegrations}}
         <a href="/cloud-integrations/{{.ID}}" class="tag-pill" style="text-decoration: none;">{{.Name}} ({{.ProviderLabel}})</a>
@@ -100,7 +107,7 @@
     </section>
 
     <section class="form-section">
-      <h2>Drift Detection &amp; Ephemeral Lifecycle (TTL)</h2>
+      <h2>Drift detection and ephemeral lifetime</h2>
       <div class="form-grid">
         <div class="field">
           <label class="check-card">
@@ -123,12 +130,15 @@
           <input type="number" id="ttl-hours" name="ttl_hours" value="{{.TTLHours}}" min="0">
           <span class="field-hint">{{if .ExpiresAt}}Expires at: <strong>{{.ExpiresAt}} UTC</strong>{{else}}Leave at 0 for permanent production workspaces.{{end}}</span>
         </div>
-        <div class="field">
+        <div class="field" data-when-engine="terraform kubernetes helm"{{if eq .EngineForm.Engine "ansible"}} hidden{{end}}>
           <label class="check-card">
-            <input type="checkbox" name="auto_destroy"{{if .AutoDestroy}} checked{{end}}>
+            <input type="checkbox" name="auto_destroy"{{if .AutoDestroy}} checked{{end}}{{if eq .EngineForm.Engine "ansible"}} disabled{{end}}>
             <div>
               <strong>Auto-destroy on TTL expiration</strong>
-              <div class="field-hint">Automatically queue a <code>terraform destroy</code> run when the workspace TTL expires.</div>
+              <div class="field-hint">
+                <span data-when-engine="terraform"{{if ne .EngineForm.Engine "terraform"}} hidden{{end}}>Automatically queue a <code>terraform destroy</code> run when the workspace TTL expires.</span>
+                <span data-when-engine="kubernetes helm"{{if or (eq .EngineForm.Engine "terraform") (eq .EngineForm.Engine "")}} hidden{{end}}>Automatically destroy the release when the workspace TTL expires.</span>
+              </div>
             </div>
           </label>
         </div>
@@ -155,22 +165,23 @@
       </form>
     </div>
     {{end}}
-    <div class="danger-row">
+    <div class="danger-row" data-when-engine="terraform kubernetes helm"{{if eq .EngineForm.Engine "ansible"}} hidden{{end}}>
       <div>
-        <strong>Destroy infrastructure</strong>
-        <span class="field-hint">Queue a <code>terraform destroy</code> run to tear down all managed cloud resources in this workspace.</span>
+        <strong>Destroy</strong>
+        <span class="field-hint" data-when-engine="terraform"{{if ne .EngineForm.Engine "terraform"}} hidden{{end}}>Queue a <code>terraform destroy</code> run for everything this workspace manages.</span>
+        <span class="field-hint" data-when-engine="kubernetes helm"{{if or (eq .EngineForm.Engine "terraform") (eq .EngineForm.Engine "")}} hidden{{end}}>Queue a destroy run for this release.</span>
       </div>
       <form method="post" action="/projects/{{.ID}}/destroy" class="inline">
-        <button type="submit" class="btn-danger">Queue destroy run</button>
+        <button type="submit" class="btn-danger"{{if eq .EngineForm.Engine "ansible"}} disabled{{end}}>Queue destroy run</button>
       </form>
     </div>
-    <div class="danger-row">
+    <div class="danger-row" data-when-engine="terraform"{{if ne .EngineForm.Engine "terraform"}} hidden{{end}}>
       <div>
         <strong>Force-unlock state</strong>
         <span class="field-hint">Clear a stuck Terraform state lock if a previous run crashed or was interrupted.</span>
       </div>
       <form method="post" action="/projects/{{.ID}}/force-unlock" class="inline">
-        <button type="submit">Force-unlock state</button>
+        <button type="submit"{{if ne .EngineForm.Engine "terraform"}} disabled{{end}}>Force-unlock state</button>
       </form>
     </div>
     <div class="danger-row">

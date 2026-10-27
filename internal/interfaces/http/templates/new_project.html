@@ -47,7 +47,7 @@
     </section>
 
     <section class="form-section">
-      <h2>Git &amp; Terraform</h2>
+      <h2>Source</h2>
       <div class="form-grid">
         <div class="field">
           <label for="project-branch">Default branch</label>
@@ -56,38 +56,45 @@
         </div>
         <div class="field">
           <label for="project-workdir">Working directory</label>
-          <input type="text" id="project-workdir" name="workdir" placeholder="e.g. terraform/prod (optional)">
-          <span class="field-hint">Relative subdirectory where Terraform files live.</span>
+          <input type="text" id="project-workdir" name="workdir" placeholder="e.g. providers/aws (optional)">
+          <span class="field-hint">Relative subdirectory the run executes in. Leave empty to use the repository root.</span>
         </div>
-        {{if .Versions}}
-        <div class="field">
-          <label for="project-tf-version">Terraform version</label>
-          <select id="project-tf-version" name="terraform_version">
-            {{range .Versions}}<option value="{{.}}"{{if eq . $.DefaultVersion}} selected{{end}}>{{.}}</option>{{end}}
-          </select>
-        </div>
-        {{end}}
-        {{if .Policies}}
-        <div class="field">
-          <label for="project-policy">Approval policy</label>
-          <select id="project-policy" name="approval_policy_id">
-            <option value="">None</option>
-            {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
-          </select>
-        </div>
-        {{end}}
       </div>
     </section>
 
     {{template "engine_fields" .EngineForm}}
 
+    {{if .Versions}}
+    <section class="form-section" data-when-engine="terraform">
+      <h2>Terraform</h2>
+      <div class="field">
+        <label for="project-tf-version">Terraform version</label>
+        <select id="project-tf-version" name="terraform_version">
+          {{range .Versions}}<option value="{{.}}"{{if eq . $.DefaultVersion}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
+      </div>
+    </section>
+    {{end}}
+
     <section class="form-section">
-      <h2>Automation, Contexts &amp; Cloud Integrations</h2>
+      <h2>Runs, contexts, and credentials</h2>
+      {{if .Policies}}
+      <div class="field">
+        <label for="project-policy">Approval policy</label>
+        <select id="project-policy" name="approval_policy_id">
+          <option value="">None</option>
+          {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
+        </select>
+      </div>
+      {{end}}
       <label class="check-card">
         <input type="checkbox" name="auto_approve">
         <div>
           <strong>Auto-approve tracked runs</strong>
-          <div class="field-hint">Automatically run <code>terraform apply</code> when a plan succeeds on the default branch.</div>
+          <div class="field-hint">
+            <span data-when-engine="terraform">Automatically run <code>terraform apply</code> when a plan succeeds on the default branch.</span>
+            <span data-when-engine="kubernetes ansible helm" hidden>Automatically apply when a plan succeeds on the default branch.</span>
+          </div>
         </div>
       </label>
       {{if .Contexts}}
@@ -101,7 +108,7 @@
       </div>
       {{end}}
       {{if .CloudIntegrations}}
-      <div class="field" style="margin-top: 12px;">
+      <div class="field" data-when-engine="terraform" style="margin-top: 12px;">
         <label>Attached cloud integrations (OIDC / STS)</label>
         <div class="context-grid">
           {{range .CloudIntegrations}}
@@ -113,7 +120,7 @@
     </section>
 
     <section class="form-section">
-      <h2>Drift Detection &amp; Ephemeral Environment (TTL)</h2>
+      <h2>Drift detection and ephemeral lifetime</h2>
       <div class="form-grid">
         <div class="field">
           <label class="check-card">
@@ -135,12 +142,15 @@
           <input type="number" id="ttl-hours" name="ttl_hours" value="0" min="0" placeholder="e.g. 24 for sandbox preview">
           <span class="field-hint">Self-service blueprint TTL: set e.g. <code>24</code> or <code>72</code> hours for ephemeral sandbox workspaces.</span>
         </div>
-        <div class="field">
+        <div class="field" data-when-engine="terraform kubernetes helm">
           <label class="check-card">
             <input type="checkbox" name="auto_destroy">
             <div>
               <strong>Auto-destroy when TTL expires</strong>
-              <div class="field-hint">Automatically run <code>terraform destroy</code> upon TTL expiration.</div>
+              <div class="field-hint">
+                <span data-when-engine="terraform">Automatically run <code>terraform destroy</code> when the TTL expires.</span>
+                <span data-when-engine="kubernetes helm" hidden>Automatically destroy the release when the TTL expires.</span>
+              </div>
             </div>
           </label>
         </div>
