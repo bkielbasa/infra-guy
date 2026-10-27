@@ -1,0 +1,104 @@
+{{define "engine_fields"}}
+<section class="form-section">
+  <h2>Execution engine</h2>
+  <div class="field">
+    <label for="project-engine">Engine</label>
+    <select id="project-engine" name="engine">
+      <option value="terraform"{{if eq .Engine "terraform"}} selected{{end}}>Terraform</option>
+      <option value="kubernetes"{{if eq .Engine "kubernetes"}} selected{{end}}>Kubernetes</option>
+      <option value="ansible"{{if eq .Engine "ansible"}} selected{{end}}>Ansible</option>
+      <option value="helm"{{if eq .Engine "helm"}} selected{{end}}>Helm</option>
+    </select>
+    <span class="field-hint">Terraform uses the version above. Kubernetes, Ansible, and Helm use the tools on the runner and the settings for that engine.</span>
+  </div>
+
+  <div data-engine="kubernetes"{{if not .IsKubernetes}} hidden{{end}}>
+    <div class="form-grid">
+      <div class="field">
+        <label for="manifest-path">Manifest path</label>
+        <input id="manifest-path" type="text" name="manifest_path" value="{{.ManifestPath}}" placeholder="deploy/ or kustomize/">
+        <span class="field-hint">Relative path passed to <code>kubectl -f</code>. Leave empty to use the working directory.</span>
+      </div>
+      <div class="field">
+        <label for="k8s-namespace">Namespace</label>
+        <input id="k8s-namespace" type="text" name="k8s_namespace" value="{{.K8sNamespace}}" placeholder="optional">
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="kustomize"{{if .Kustomize}} checked{{end}}> Kustomize (<code>kubectl -k</code>)</label>
+    <label class="check"><input type="checkbox" name="k8s_prune"{{if .K8sPrune}} checked{{end}}> Prune resources labeled <code>app.kubernetes.io/managed-by=infra-guy</code></label>
+  </div>
+
+  <div data-engine="ansible"{{if not .IsAnsible}} hidden{{end}}>
+    <div class="form-grid">
+      <div class="field">
+        <label for="playbook">Playbook</label>
+        <input id="playbook" type="text" name="playbook" value="{{.Playbook}}" placeholder="site.yml">
+      </div>
+      <div class="field">
+        <label for="inventory">Inventory</label>
+        <input id="inventory" type="text" name="inventory" value="{{.Inventory}}" placeholder="inventories/prod">
+      </div>
+      <div class="field">
+        <label for="requirements-file">Requirements file</label>
+        <input id="requirements-file" type="text" name="requirements_file" value="{{.RequirementsFile}}" placeholder="requirements.yml">
+      </div>
+      <div class="field">
+        <label for="extra-vars">Extra vars</label>
+        <input id="extra-vars" type="text" name="extra_vars" value="{{.ExtraVars}}" placeholder="env=prod, region=eu">
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="become"{{if .Become}} checked{{end}}> Become (privilege escalation)</label>
+    <span class="field-hint">Plan runs <code>ansible-playbook --check --diff</code>. SSH keys and vault passwords come from attached contexts.</span>
+  </div>
+
+  <div data-engine="helm"{{if not .IsHelm}} hidden{{end}}>
+    <div class="form-grid">
+      <div class="field">
+        <label for="release-name">Release name</label>
+        <input id="release-name" type="text" name="release_name" value="{{.ReleaseName}}" placeholder="payments">
+      </div>
+      <div class="field">
+        <label for="helm-namespace">Namespace</label>
+        <input id="helm-namespace" type="text" name="helm_namespace" value="{{.HelmNamespace}}" placeholder="prod">
+      </div>
+      <div class="field">
+        <label for="chart">Chart</label>
+        <input id="chart" type="text" name="chart" value="{{.Chart}}" placeholder="./chart, nginx, or oci://...">
+      </div>
+      <div class="field">
+        <label for="repo-url">Chart repository</label>
+        <input id="repo-url" type="text" name="repo_url" value="{{.RepoURL}}" placeholder="https://charts.example.com">
+      </div>
+      <div class="field">
+        <label for="chart-version">Chart version</label>
+        <input id="chart-version" type="text" name="chart_version" value="{{.ChartVersion}}" placeholder="1.2.3">
+      </div>
+      <div class="field">
+        <label for="values-files">Values files</label>
+        <input id="values-files" type="text" name="values_files" value="{{.ValuesFiles}}" placeholder="values.yaml, values/prod.yaml">
+      </div>
+      <div class="field">
+        <label for="set-values">Set values</label>
+        <input id="set-values" type="text" name="set_values" value="{{.SetValues}}" placeholder="replicaCount=2">
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="atomic"{{if .Atomic}} checked{{end}}> Atomic upgrade</label>
+    <label class="check"><input type="checkbox" name="wait"{{if .Wait}} checked{{end}}> Wait until ready</label>
+    <label class="check"><input type="checkbox" name="create_namespace"{{if .CreateNamespace}} checked{{end}}> Create namespace</label>
+  </div>
+</section>
+<script>
+(function () {
+  var sel = document.getElementById("project-engine");
+  if (!sel) return;
+  function sync() {
+    var v = sel.value;
+    document.querySelectorAll("[data-engine]").forEach(function (el) {
+      el.hidden = el.getAttribute("data-engine") !== v;
+    });
+  }
+  sel.addEventListener("change", sync);
+  sync();
+})();
+</script>
+{{end}}

@@ -187,3 +187,24 @@ func TestTags(t *testing.T) {
 	}
 }
 
+func TestSetEngineValidatesConfig(t *testing.T) {
+	p := sample(t)
+	if err := p.SetEngine("helm", EngineConfig{ReleaseName: "payments", Chart: "./chart", HelmNamespace: "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	if p.Snapshot().Engine != EngineHelm || p.Snapshot().EngineConfig.Chart != "./chart" {
+		t.Fatalf("%#v", p.Snapshot())
+	}
+	if err := p.SetEngine("helm", EngineConfig{ReleaseName: "Bad_Name", Chart: "nginx"}); err == nil {
+		t.Fatal("expected invalid release name")
+	}
+	if err := p.SetEngine("kubernetes", EngineConfig{ManifestPath: "../secret"}); err == nil {
+		t.Fatal("expected path escape to fail")
+	}
+	if err := p.SetEngine("nope", EngineConfig{}); err == nil {
+		t.Fatal("expected invalid engine")
+	}
+	if p.Snapshot().Engine != EngineHelm {
+		t.Fatal("failed set should leave the previous engine")
+	}
+}

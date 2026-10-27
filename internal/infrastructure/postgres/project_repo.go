@@ -33,7 +33,7 @@ func ProjectStateTokenAAD(id project.ID) []byte {
 }
 
 const projectColumns = `id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-	terraform_version, COALESCE(approval_policy_id, ''), auto_approve, tags, locked, state_token, state_token_hash, state_token_ciphertext, active_run_id,
+	engine, engine_config, terraform_version, COALESCE(approval_policy_id, ''), auto_approve, tags, locked, state_token, state_token_hash, state_token_ciphertext, active_run_id,
 	drift_enabled, drift_interval_minutes, drift_status, last_drift_check_at,
 	ttl_hours, expires_at, auto_destroy, created_at, updated_at`
 
@@ -44,6 +44,14 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 		tagsMap = map[string]string{}
 	}
 	tagsJSON, err := json.Marshal(tagsMap)
+	if err != nil {
+		return err
+	}
+	engine := s.Engine
+	if engine == "" {
+		engine = project.DefaultEngine
+	}
+	engineConfigJSON, err := json.Marshal(s.EngineConfig)
 	if err != nil {
 		return err
 	}
@@ -73,11 +81,11 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 	_, err = r.pool.Exec(ctx, `
 		INSERT INTO projects (
 			id, tenant_id, github_repo_id, name, repo_owner, repo_name, default_branch, working_directory,
-			terraform_version, approval_policy_id, auto_approve, tags, locked, state_token, state_token_hash, state_token_ciphertext, active_run_id,
+			engine, engine_config, terraform_version, approval_policy_id, auto_approve, tags, locked, state_token, state_token_hash, state_token_ciphertext, active_run_id,
 			drift_enabled, drift_interval_minutes, drift_status, last_drift_check_at,
 			ttl_hours, expires_at, auto_destroy, created_at, updated_at
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10, ''),$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,NULLIF($12, ''),$13,$14::jsonb,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
 		ON CONFLICT (id) DO UPDATE SET
 			tenant_id = EXCLUDED.tenant_id,
 			github_repo_id = EXCLUDED.github_repo_id,
@@ -86,6 +94,8 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			repo_name = EXCLUDED.repo_name,
 			default_branch = EXCLUDED.default_branch,
 			working_directory = EXCLUDED.working_directory,
+			engine = EXCLUDED.engine,
+			engine_config = EXCLUDED.engine_config,
 			terraform_version = EXCLUDED.terraform_version,
 			approval_policy_id = EXCLUDED.approval_policy_id,
 			auto_approve = EXCLUDED.auto_approve,
@@ -103,7 +113,7 @@ func (r *ProjectRepo) Save(ctx context.Context, p *project.Project) error {
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at`,
 		s.ID, s.TenantID, s.GitHubRepoID, s.Name, s.Repo.Owner, s.Repo.Name, s.DefaultBranch, s.WorkingDirectory,
-		s.TerraformVersion, s.ApprovalPolicyID, s.AutoApprove, string(tagsJSON), s.Locked, plainStateToken, stateTokenHash, stateTokenCiphertext, s.ActiveRunID,
+		engine, string(engineConfigJSON), s.TerraformVersion, s.ApprovalPolicyID, s.AutoApprove, string(tagsJSON), s.Locked, plainStateToken, stateTokenHash, stateTokenCiphertext, s.ActiveRunID,
 		s.DriftEnabled, driftInterval, driftStatus, s.LastDriftCheckAt,
 		s.TTLHours, s.ExpiresAt, s.AutoDestroy, s.CreatedAt, s.UpdatedAt,
 	)
@@ -179,16 +189,19 @@ func scanProject(row projectScanner) (*project.Project, error) {
 
 func (r *ProjectRepo) scanProject(row projectScanner) (*project.Project, error) {
 	var s project.Snapshot
-	var tagsRaw, stateTokenCiphertext []byte
+	var engineConfigRaw, tagsRaw, stateTokenCiphertext []byte
 	var lastDrift, expiresAt *time.Time
 	var created, updated time.Time
 	if err := row.Scan(
 		&s.ID, &s.TenantID, &s.GitHubRepoID, &s.Name, &s.Repo.Owner, &s.Repo.Name, &s.DefaultBranch, &s.WorkingDirectory,
-		&s.TerraformVersion, &s.ApprovalPolicyID, &s.AutoApprove, &tagsRaw, &s.Locked, &s.StateToken, &s.StateTokenHash, &stateTokenCiphertext, &s.ActiveRunID,
+		&s.Engine, &engineConfigRaw, &s.TerraformVersion, &s.ApprovalPolicyID, &s.AutoApprove, &tagsRaw, &s.Locked, &s.StateToken, &s.StateTokenHash, &stateTokenCiphertext, &s.ActiveRunID,
 		&s.DriftEnabled, &s.DriftIntervalMinutes, &s.DriftStatus, &lastDrift,
 		&s.TTLHours, &expiresAt, &s.AutoDestroy, &created, &updated,
 	); err != nil {
 		return nil, err
+	}
+	if len(engineConfigRaw) > 0 {
+		_ = json.Unmarshal(engineConfigRaw, &s.EngineConfig)
 	}
 	if s.StateToken == "" && len(stateTokenCiphertext) > 0 && r.sealer != nil {
 		pt, err := r.sealer.OpenWithAAD(stateTokenCiphertext, ProjectStateTokenAAD(s.ID))

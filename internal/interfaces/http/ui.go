@@ -51,9 +51,9 @@ type layoutData struct {
 }
 
 type metaView struct {
-	TerraformVersion, Repo, Workdir, Branch, SHA, SHAURL, PRNumber, PRURL, StateUpdated string
-	Tags                                                                                []string
-	ShowManagedBy                                                                       bool
+	Engine, TerraformVersion, Repo, Workdir, Branch, SHA, SHAURL, PRNumber, PRURL, StateUpdated string
+	Tags                                                                                        []string
+	ShowManagedBy                                                                               bool
 }
 
 type projectRow struct {
@@ -86,10 +86,32 @@ type runGroup struct {
 }
 
 type tabView struct {
-	ProjectID string
-	Poll      bool
-	Groups    []runGroup
-	State     *stateSummaryView
+	ProjectID   string
+	Poll        bool
+	Groups      []runGroup
+	State       *stateSummaryView
+	Versions    []stateVersionView
+	Diff        *stateDiffView
+	CanRollback bool
+	CompareFrom string
+	CompareTo   string
+}
+
+type stateVersionView struct {
+	Serial, Size, Resources, Actor, RunID, RunURL, When, Changed string
+	Current                                                      bool
+}
+
+type stateChangeView struct {
+	Name, Action, Before, After string
+}
+
+type stateDiffView struct {
+	From, To                string
+	Added, Changed, Removed int
+	Unified                 string
+	Resources               []stateChangeView
+	Outputs                 []stateChangeView
 }
 
 type stateSummaryView struct {
@@ -162,6 +184,7 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /projects/{id}/tabs/pulls", u.tabPulls)
 	mux.HandleFunc("GET /projects/{id}/tabs/state", u.tabState)
 	mux.HandleFunc("POST /projects/{id}/state/import", u.importState)
+	mux.HandleFunc("POST /projects/{id}/state/rollback", u.rollbackState)
 	mux.HandleFunc("GET /projects/{id}/tabs/dependencies", u.tabDependencies)
 	mux.HandleFunc("POST /projects/{id}/dependencies", u.createDependency)
 	mux.HandleFunc("POST /projects/{id}/dependencies/{depID}/trigger-mode", u.updateDependencyTriggerMode)
@@ -302,14 +325,14 @@ type dashboardRunRow struct {
 }
 
 type dashboardAttentionItem struct {
-	Kind                    string
-	BadgeLabel, BadgeClass  string
-	ProjectID, ProjectName  string
-	RunID, Title, Branch    string
-	Delta                   template.HTML
-	Date                    string
-	ActionURL, ActionLabel  string
-	sortAt                  time.Time
+	Kind                   string
+	BadgeLabel, BadgeClass string
+	ProjectID, ProjectName string
+	RunID, Title, Branch   string
+	Delta                  template.HTML
+	Date                   string
+	ActionURL, ActionLabel string
+	sortAt                 time.Time
 }
 
 type dashboardCountItem struct {
@@ -1762,7 +1785,6 @@ func pluralize(n int, singular, plural string) string {
 	return plural
 }
 
-
 func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 	_, tenantID, _, ok := SessionFrom(r.Context())
 	if !ok {
@@ -1993,6 +2015,7 @@ func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
 		"Contexts":          u.contextChoices(r.Context(), tenantID, ""),
 		"Policies":          u.policyChoices(r.Context(), tenantID, ""),
 		"CloudIntegrations": u.cloudIntegrationChoices(r.Context(), tenantID, ""),
+		"EngineForm":        engineFormFrom(nil),
 	})
 }
 
@@ -2061,6 +2084,10 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := u.cfg.Projects.SetTerraformVersion(r.Context(), p.Snapshot().ID, r.FormValue("terraform_version")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := u.cfg.Projects.SetEngine(r.Context(), p.Snapshot().ID, r.FormValue("engine"), engineConfigFromRequest(r)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -2151,7 +2178,32 @@ func (u *ui) tabState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	u.fragment(w, "state_history", stateTab(ps.ID, meta, anyNonTerminal(runs)))
+	versions, err := u.cfg.States.ListVersions(r.Context(), string(ps.ID))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var diff *state.StateDiff
+	fromQ, toQ := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+	if fromQ != "" || toQ != "" {
+		fromSerial, err1 := strconv.ParseInt(fromQ, 10, 64)
+		toSerial, err2 := strconv.ParseInt(toQ, 10, 64)
+		if err1 != nil || err2 != nil || fromSerial == toSerial {
+			http.Error(w, "choose two different state serials", http.StatusBadRequest)
+			return
+		}
+		d, err := u.cfg.States.Diff(r.Context(), string(ps.ID), fromSerial, toSerial)
+		if err != nil {
+			if errors.Is(err, state.ErrVersionNotFound) {
+				http.Error(w, "state version not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		diff = &d
+	}
+	u.fragment(w, "state_history", stateHistoryTab(ps.ID, meta, versions, diff, anyNonTerminal(runs)))
 }
 
 func (u *ui) importState(w http.ResponseWriter, r *http.Request) {
@@ -2179,7 +2231,11 @@ func (u *ui) importState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := u.cfg.States.Import(r.Context(), string(ps.ID), data); err != nil {
+	actor := u.actor(r)
+	if actor == "" {
+		actor = "import"
+	}
+	if err := u.cfg.States.ImportWithActor(r.Context(), string(ps.ID), data, actor); err != nil {
 		if errors.Is(err, state.ErrLocked) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -2194,6 +2250,56 @@ func (u *ui) importState(w http.ResponseWriter, r *http.Request) {
 	u.recordAudit(r, ps.TenantID, "state.imported", "state", string(ps.ID), ps.Name,
 		fmt.Sprintf("Imported Terraform state (%d B) into workspace %s", len(data), ps.Name),
 		map[string]any{"size_bytes": len(data)})
+	if r.Header.Get("HX-Request") == "true" {
+		u.tabState(w, r)
+		return
+	}
+	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/state", http.StatusSeeOther)
+}
+
+func (u *ui) rollbackState(w http.ResponseWriter, r *http.Request) {
+	p, runs, err := u.loadProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if ps.Locked || anyNonTerminal(runs) {
+		http.Error(w, "cannot restore state while project is locked or a run is active", http.StatusConflict)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	serial, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("serial")), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid serial", http.StatusBadRequest)
+		return
+	}
+	actor := u.actor(r)
+	if actor == "" {
+		actor = "rollback"
+	}
+	newSerial, err := u.cfg.States.Rollback(r.Context(), string(ps.ID), serial, actor)
+	if err != nil {
+		if errors.Is(err, state.ErrVersionNotFound) {
+			http.Error(w, "state version not found", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, state.ErrLocked) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if errors.Is(err, state.ErrInvalidState) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	u.recordAudit(r, ps.TenantID, "state.restored", "state", string(ps.ID), ps.Name,
+		fmt.Sprintf("Restored state serial %d as serial %d on workspace %s", serial, newSerial, ps.Name),
+		map[string]any{"from_serial": serial, "serial": newSerial})
 	if r.Header.Get("HX-Request") == "true" {
 		u.tabState(w, r)
 		return
@@ -2234,6 +2340,7 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 		"TagBoundPolicies":          u.tagBoundPolicies(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags),
 		"CloudIntegrations":         u.cloudIntegrationChoices(r.Context(), ps.TenantID, ps.ID),
 		"TagBoundCloudIntegrations": u.tagBoundCloudIntegrations(r.Context(), ps.TenantID, ps.ID, ps.Tags),
+		"EngineForm":                engineFormFrom(&ps),
 	})
 }
 
@@ -2267,8 +2374,12 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 	driftInterval, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("drift_interval_minutes")))
 	ttlHours, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("ttl_hours")))
 	autoDestroy := r.FormValue("auto_destroy") == "on"
+	updateEngine := r.Form.Has("engine")
 	if _, err := u.cfg.Projects.Update(r.Context(), projectapp.UpdateInput{
 		ID: id, Name: ps.Name, Branch: r.FormValue("branch"), Workdir: r.FormValue("workdir"),
+		UpdateEngine:         updateEngine,
+		Engine:               r.FormValue("engine"),
+		EngineConfig:         engineConfigFromRequest(r),
 		TerraformVersion:     r.FormValue("terraform_version"),
 		AutoApprove:          r.FormValue("auto_approve") == "on",
 		ApprovalPolicyID:     policyID,
@@ -2830,16 +2941,18 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 		"ID": string(ps.ID), "Name": ps.Name, "Locked": ps.Locked,
 		"LatestLabel": latestLabel(latest), "LatestClass": latestClass(latest),
 		"Meta": projectMeta(ps, latest, meta), "Empty": len(runs) == 0,
-		"Panel":            panel,
-		"Poll":             anyNonTerminal(runs),
-		"DriftEnabled":     ps.DriftEnabled,
-		"DriftStatus":      ps.DriftStatus,
-		"DriftStatusLabel": driftStatusLabel(ps.DriftStatus),
-		"LastDriftCheckAt": fmtTimePtr(ps.LastDriftCheckAt),
-		"TTLHours":         ps.TTLHours,
-		"AutoDestroy":      ps.AutoDestroy,
-		"ExpiresAt":        fmtTimePtr(ps.ExpiresAt),
-		"EstMonthlyCost":   estCost,
+		"Panel":             panel,
+		"Poll":              anyNonTerminal(runs),
+		"EngineLabel":       project.EngineLabel(ps.Engine),
+		"EngineIsTerraform": ps.Engine == "" || ps.Engine == project.EngineTerraform,
+		"DriftEnabled":      ps.DriftEnabled,
+		"DriftStatus":       ps.DriftStatus,
+		"DriftStatusLabel":  driftStatusLabel(ps.DriftStatus),
+		"LastDriftCheckAt":  fmtTimePtr(ps.LastDriftCheckAt),
+		"TTLHours":          ps.TTLHours,
+		"AutoDestroy":       ps.AutoDestroy,
+		"ExpiresAt":         fmtTimePtr(ps.ExpiresAt),
+		"EstMonthlyCost":    estCost,
 	}
 }
 
@@ -2855,6 +2968,7 @@ func (u *ui) runView(_ *http.Request, ps project.Snapshot, rs run.Snapshot, eval
 
 func projectMeta(ps project.Snapshot, latest *run.Snapshot, meta state.Metadata) metaView {
 	m := metaView{
+		Engine:           project.EngineLabel(ps.Engine),
 		TerraformVersion: ps.TerraformVersion,
 		Repo:             ps.Repo.String(),
 		Workdir:          ps.WorkingDirectory,
@@ -2862,14 +2976,16 @@ func projectMeta(ps project.Snapshot, latest *run.Snapshot, meta state.Metadata)
 		Tags:             project.TagList(ps.Tags),
 		ShowManagedBy:    true,
 	}
+	if ps.Engine != "" && ps.Engine != project.EngineTerraform {
+		m.TerraformVersion = ""
+	} else if latest != nil && latest.TerraformVersion != "" {
+		m.TerraformVersion = latest.TerraformVersion
+	}
+	if latest != nil && latest.Branch != "" {
+		m.Branch = latest.Branch
+	}
 	if latest != nil {
-		if latest.TerraformVersion != "" {
-			m.TerraformVersion = latest.TerraformVersion
-		}
 		m.SHA = shortSHA(latest.SHA)
-		if latest.Branch != "" {
-			m.Branch = latest.Branch
-		}
 	}
 	if meta.Exists && !meta.UpdatedAt.IsZero() {
 		m.StateUpdated = fmtTime(meta.UpdatedAt)
@@ -2907,6 +3023,67 @@ func pullsTab(id project.ID, runs []*run.Run) tabView {
 		ProjectID: string(id), Poll: anyNonTerminal(runs),
 		Groups: groupRuns(runs, prKey, func(s run.Snapshot) string { return s.PRTitle }),
 	}
+}
+
+func stateHistoryTab(id project.ID, meta state.Metadata, versions []state.VersionSummary, diff *state.StateDiff, poll bool) tabView {
+	view := stateTab(id, meta, poll)
+	current := ""
+	if meta.Serial != nil {
+		current = strconv.FormatInt(*meta.Serial, 10)
+	}
+	for _, v := range versions {
+		serial := strconv.FormatInt(v.Serial, 10)
+		changed := strings.Join(v.ChangedOutputs, ", ")
+		runURL := ""
+		if v.RunID != "" {
+			runURL = "/projects/" + string(id) + "/runs/" + v.RunID
+		}
+		view.Versions = append(view.Versions, stateVersionView{
+			Serial:    serial,
+			Size:      fmt.Sprintf("%d B", v.Size),
+			Resources: strconv.Itoa(v.ResourceCount),
+			Actor:     v.Actor,
+			RunID:     v.RunID,
+			RunURL:    runURL,
+			When:      fmtTime(v.CreatedAt),
+			Changed:   changed,
+			Current:   serial == current,
+		})
+	}
+	view.CanRollback = meta.Exists && !meta.Locked && !poll
+	if len(view.Versions) >= 2 {
+		view.CompareFrom = view.Versions[len(view.Versions)-1].Serial
+		view.CompareTo = view.Versions[0].Serial
+	}
+	if diff != nil {
+		view.CompareFrom = strconv.FormatInt(diff.FromSerial, 10)
+		view.CompareTo = strconv.FormatInt(diff.ToSerial, 10)
+		dv := &stateDiffView{
+			From:    view.CompareFrom,
+			To:      view.CompareTo,
+			Added:   diff.AddedCount,
+			Changed: diff.ChangedCount,
+			Removed: diff.RemovedCount,
+			Unified: clipText(diff.UnifiedDiff, 20000),
+		}
+		for _, rc := range diff.ResourceChanges {
+			dv.Resources = append(dv.Resources, stateChangeView{Name: rc.Address, Action: rc.Action})
+		}
+		for _, oc := range diff.OutputChanges {
+			dv.Outputs = append(dv.Outputs, stateChangeView{
+				Name: oc.Name, Action: oc.Action, Before: oc.Before, After: oc.After,
+			})
+		}
+		view.Diff = dv
+	}
+	return view
+}
+
+func clipText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n… truncated"
 }
 
 func stateTab(id project.ID, meta state.Metadata, poll bool) tabView {
@@ -4900,7 +5077,3 @@ func (u *ui) deleteCloudIntegration(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("Deleted cloud integration %s", name), nil)
 	http.Redirect(w, r, "/cloud-integrations", http.StatusSeeOther)
 }
-
-
-
-

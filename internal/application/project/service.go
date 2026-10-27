@@ -31,6 +31,8 @@ type CreateInput struct {
 	GitHubRepoID     int64
 	Branch           string
 	Workdir          string
+	Engine           string
+	EngineConfig     project.EngineConfig
 	TerraformVersion string
 	ApprovalPolicyID string
 	AutoApprove      bool
@@ -41,6 +43,9 @@ type UpdateInput struct {
 	Name                 string
 	Branch               string
 	Workdir              string
+	UpdateEngine         bool
+	Engine               string
+	EngineConfig         project.EngineConfig
 	TerraformVersion     string
 	ApprovalPolicyID     string
 	AutoApprove          bool
@@ -112,6 +117,11 @@ func (s *Service) Update(ctx context.Context, in UpdateInput) (*project.Project,
 	}
 	if err := p.SetWorkingDirectory(in.Workdir); err != nil {
 		return nil, err
+	}
+	if in.UpdateEngine || in.Engine != "" {
+		if err := p.SetEngine(in.Engine, in.EngineConfig); err != nil {
+			return nil, err
+		}
 	}
 	if in.TerraformVersion != "" {
 		if err := p.SetTerraformVersion(in.TerraformVersion); err != nil {
@@ -233,6 +243,20 @@ func (s *Service) SetTerraformVersion(ctx context.Context, id project.ID, versio
 		return fmt.Errorf("project %s not found", id)
 	}
 	if err := p.SetTerraformVersion(version); err != nil {
+		return err
+	}
+	return s.Projects.Save(ctx, p)
+}
+
+func (s *Service) SetEngine(ctx context.Context, id project.ID, engine string, cfg project.EngineConfig) error {
+	p, err := s.Projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %s not found", id)
+	}
+	if err := p.SetEngine(engine, cfg); err != nil {
 		return err
 	}
 	return s.Projects.Save(ctx, p)

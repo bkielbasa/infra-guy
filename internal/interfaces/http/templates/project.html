@@ -23,7 +23,11 @@
   {{if .Empty}}
   <section class="empty">
     <p>GitHub push and pull request events for this repository start runs.</p>
+    {{if .EngineIsTerraform}}
     <p>A backend or cloud block in this repository is overridden. infra-guy stores the state.</p>
+    {{else}}
+    <p>Runs execute with {{.EngineLabel}} using the tools installed on the runner.</p>
+    {{end}}
   </section>
   {{end}}
   <nav class="tabs">

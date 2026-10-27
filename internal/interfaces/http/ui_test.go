@@ -159,15 +159,15 @@ func uiHandler(t *testing.T, projects *memProjects, runs *memRuns, states *memSt
 		Tokens:        uiTokenSource{store: store},
 		PublicBaseURL: "http://localhost:8080",
 		Auth: &authapp.Service{
-			Store: store,
+			Store:  store,
 			GitHub: gh,
-			Now: time.Now, NewID: func() string { return "id-1" },
+			Now:    time.Now, NewID: func() string { return "id-1" },
 			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
 		},
 		Installations: &installation.Service{
-			Store: store,
+			Store:  store,
 			GitHub: gh,
-			Now: time.Now, NewID: func() string { return "inst-1" },
+			Now:    time.Now, NewID: func() string { return "inst-1" },
 		},
 	})
 }
@@ -2303,6 +2303,61 @@ func TestStateTabAndImport(t *testing.T) {
 	}
 }
 
+func TestEngineSettingsAndStateRollback(t *testing.T) {
+	p := listProject(t)
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	states := &memStates{items: map[string]*state.State{}}
+	h := uiHandler(t, projects, &memRuns{items: map[run.ID]*run.Run{}}, states, "")
+
+	rr := getUI(t, h, "/projects/p1/settings")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `id="project-engine"`) {
+		t.Fatalf("settings missing engine select: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=charts/app&engine=helm&release_name=Bad_Name&chart=nginx"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid helm release = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+
+	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=charts/app&engine=helm&release_name=payments&helm_namespace=prod&chart=./chart&atomic=on&wait=on"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("update engine = %d: %s", rr.Code, rr.Body.String())
+	}
+	ps := projects.items["p1"].Snapshot()
+	if ps.Engine != project.EngineHelm || ps.EngineConfig.ReleaseName != "payments" || ps.EngineConfig.HelmNamespace != "prod" || !ps.EngineConfig.Atomic || !ps.EngineConfig.Wait {
+		t.Fatalf("engine config = %#v", ps.EngineConfig)
+	}
+	if ps.WorkingDirectory != "charts/app" {
+		t.Fatalf("workdir = %q", ps.WorkingDirectory)
+	}
+
+	first := []byte(`{"version":4,"serial":1,"outputs":{},"resources":[]}`)
+	second := []byte(`{"version":4,"serial":2,"outputs":{},"resources":[{"mode":"managed","type":"null_resource","name":"x","provider":"null","instances":[{"attributes":{"id":"a"}}]}]}`)
+	if rr = postMultipartState(t, h, "/projects/p1/state/import", "a.tfstate", first); rr.Code != http.StatusSeeOther {
+		t.Fatalf("import 1 = %d %s", rr.Code, rr.Body.String())
+	}
+	if rr = postMultipartState(t, h, "/projects/p1/state/import", "b.tfstate", second); rr.Code != http.StatusSeeOther {
+		t.Fatalf("import 2 = %d %s", rr.Code, rr.Body.String())
+	}
+	rr = getUI(t, h, "/projects/p1/tabs/state")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || !strings.Contains(body, "Version history") || !strings.Contains(body, "#1") || !strings.Contains(body, "#2") {
+		t.Fatalf("history: %d %s", rr.Code, body)
+	}
+	rr = getUI(t, h, "/projects/p1/tabs/state?from=1&to=2")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "null_resource.x") {
+		t.Fatalf("diff: %d %s", rr.Code, rr.Body.String())
+	}
+	rr = postUI(t, h, "/projects/p1/state/rollback", strings.NewReader("serial=1"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	meta, err := states.Load(context.Background(), "p1")
+	if err != nil || meta == nil || meta.Snapshot().Serial == nil || *meta.Snapshot().Serial != 3 {
+		t.Fatalf("restored serial = %#v err=%v", meta, err)
+	}
+}
+
 func TestProjectTagsAndFilters(t *testing.T) {
 	p1 := listProject(t)
 	_ = p1.SetTags(map[string]string{"env": "prod", "team": "payments"})
@@ -3026,7 +3081,7 @@ func TestAnalyticsDORAAndMetricsWithData(t *testing.T) {
 		Status: run.StatusSucceeded, Branch: "main", SHA: "2222222abcdef",
 		Message: "fix migration", Author: "alice", TriggeredBy: "alice",
 		ApprovedBy: "bob", ApprovedAt: &tApproved,
-		Approvals: []run.Approval{{UserID: "u-bob", Login: "bob", Role: "admin", ApprovedAt: tApproved}},
+		Approvals:      []run.Approval{{UserID: "u-bob", Login: "bob", Role: "admin", ApprovedAt: tApproved}},
 		SummaryPresent: true, Add: 6, Change: 3, Destroy: 1,
 		CreatedAt: tRecCreated, StartedAt: &tRecStart, FinishedAt: &tRecEnd,
 		Steps: []run.Step{
@@ -3784,14 +3839,3 @@ func TestMilestone3DriftDetectionTTLAndFinOps(t *testing.T) {
 		t.Fatalf("expected destroy run to have IsDestroy=true, got %+v", destroyRun)
 	}
 }
-
-
-
-
-
-
-
-
-
-
-

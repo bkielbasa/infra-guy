@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/tfcontext"
 )
@@ -29,6 +30,8 @@ type Executor struct {
 
 type Request struct {
 	WorkDir, InternalBaseURL, ProjectID, RunID, StateToken, WorkingDirectory, GitHubToken string
+	Engine                                                                                string
+	EngineConfig                                                                          project.EngineConfig
 	TerraformVersion                                                                      string
 	Step                                                                                  run.StepName
 	Destroy                                                                               bool
@@ -72,6 +75,10 @@ func commands(step run.StepName, destroy ...bool) [][]string {
 }
 
 func (e Executor) Run(ctx context.Context, req Request) (Result, error) {
+	switch strings.ToLower(strings.TrimSpace(req.Engine)) {
+	case project.EngineKubernetes, project.EngineAnsible, project.EngineHelm:
+		return e.runEngine(ctx, req)
+	}
 	if req.Step == run.StepApply && len(req.PlanFile) == 0 {
 		return Result{ExitCode: 1, Logs: "apply requires a stored plan file"}, nil
 	}

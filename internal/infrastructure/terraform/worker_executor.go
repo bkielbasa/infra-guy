@@ -14,6 +14,7 @@ func (e WorkerExecutor) Run(ctx context.Context, req worker.Request) (worker.Res
 	res, err := e.Executor.Run(ctx, Request{
 		WorkDir: req.WorkDir, InternalBaseURL: req.InternalBaseURL, ProjectID: req.ProjectID, RunID: req.RunID,
 		StateToken: req.StateToken, WorkingDirectory: req.WorkingDirectory, GitHubToken: req.GitHubToken,
+		Engine: req.Engine, EngineConfig: req.EngineConfig,
 		TerraformVersion: req.TerraformVersion,
 		Step:             req.Step, Destroy: req.Destroy, PlanFile: req.PlanFile,
 		Env:           req.Env,

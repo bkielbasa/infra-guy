@@ -2,6 +2,8 @@ package state
 
 import (
 	"bytes"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -215,5 +217,38 @@ func TestExtractOutputsAndChangedOutputs(t *testing.T) {
 	}
 	if !changed2["db_password"] {
 		t.Fatalf("expected removed output db_password marked changed, got %+v", changed2)
+	}
+}
+
+func TestRollbackIncrementsSerialAndDiffRedactsSecrets(t *testing.T) {
+	s := New("p1")
+	now := time.Unix(10, 0).UTC()
+	first := []byte(`{"version":4,"serial":1,"outputs":{},"resources":[]}`)
+	if err := s.Import(first, now); err != nil {
+		t.Fatal(err)
+	}
+	second := []byte(`{"version":4,"serial":2,"outputs":{"secret_key":{"sensitive":true,"value":"top-secret-value","type":"string"}},"resources":[{"mode":"managed","type":"null_resource","name":"x","provider":"null","instances":[{"attributes":{"id":"a"}}]}]}`)
+	if err := s.Put(second, "", "run-2", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	diff := DiffStates(1, first, 2, second)
+	if diff.AddedCount != 1 || len(diff.OutputChanges) != 1 || diff.OutputChanges[0].After != "(sensitive)" {
+		t.Fatalf("%#v", diff)
+	}
+	if strings.Contains(diff.UnifiedDiff, "top-secret-value") {
+		t.Fatalf("unified diff leaked secret: %s", diff.UnifiedDiff)
+	}
+	serial, err := s.Rollback(first, "alice", now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if serial != 3 || s.Snapshot().Serial == nil || *s.Snapshot().Serial != 3 {
+		t.Fatalf("serial=%d snap=%v", serial, s.Snapshot().Serial)
+	}
+	if _, err := s.Lock([]byte(`{"ID":"lock-1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Rollback(first, "alice", now); !errors.Is(err, ErrLocked) {
+		t.Fatalf("locked rollback: %v", err)
 	}
 }

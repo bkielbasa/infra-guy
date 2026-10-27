@@ -22,12 +22,88 @@
   </section>
 
   <section class="form-section">
+    <h2>Version history</h2>
+    {{if .Versions}}
+    <table>
+      <thead>
+        <tr><th>Serial</th><th>When</th><th>Actor</th><th>Resources</th><th>Size</th><th>Changed outputs</th><th></th></tr>
+      </thead>
+      <tbody>
+        {{range .Versions}}
+        <tr>
+          <td>{{if .Current}}<strong>#{{.Serial}}</strong>{{else}}#{{.Serial}}{{end}}</td>
+          <td>{{.When}}</td>
+          <td>{{if .RunURL}}<a href="{{.RunURL}}">{{if .Actor}}{{.Actor}}{{else}}run{{end}}</a>{{else}}{{if .Actor}}{{.Actor}}{{else}}—{{end}}{{end}}</td>
+          <td>{{.Resources}}</td>
+          <td>{{.Size}}</td>
+          <td>{{if .Changed}}{{.Changed}}{{else}}—{{end}}</td>
+          <td>
+            {{if and $.CanRollback (not .Current)}}
+            <form method="post" action="/projects/{{$.ProjectID}}/state/rollback" class="inline" hx-post="/projects/{{$.ProjectID}}/state/rollback" hx-target="#tab-panel" hx-swap="outerHTML">
+              <input type="hidden" name="serial" value="{{.Serial}}">
+              <button type="submit">Restore</button>
+            </form>
+            {{else if .Current}}<span class="pill pill-finished">Current</span>{{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    <p class="field-hint">Restore writes the chosen serial back as a new serial, so Terraform will not reject the state for going backwards.</p>
+    {{else}}
+    <p class="empty">No stored versions yet.</p>
+    {{end}}
+
+    {{if gt (len .Versions) 1}}
+    <form method="get" action="/projects/{{.ProjectID}}/tabs/state" class="form-grid" hx-get="/projects/{{.ProjectID}}/tabs/state" hx-target="#tab-panel" hx-swap="outerHTML">
+      <div class="field">
+        <label for="state-from">Compare from</label>
+        <select id="state-from" name="from">
+          {{range .Versions}}<option value="{{.Serial}}"{{if eq .Serial $.CompareFrom}} selected{{end}}>#{{.Serial}}</option>{{end}}
+        </select>
+      </div>
+      <div class="field">
+        <label for="state-to">Compare to</label>
+        <select id="state-to" name="to">
+          {{range .Versions}}<option value="{{.Serial}}"{{if eq .Serial $.CompareTo}} selected{{end}}>#{{.Serial}}</option>{{end}}
+        </select>
+      </div>
+      <div class="actions">
+        <button type="submit">Show diff</button>
+      </div>
+    </form>
+    {{end}}
+
+    {{if .Diff}}
+    <h3>Serial #{{.Diff.From}} → #{{.Diff.To}}</h3>
+    <p>{{.Diff.Added}} added, {{.Diff.Changed}} changed, {{.Diff.Removed}} removed.</p>
+    {{if .Diff.Resources}}
+    <table>
+      <thead><tr><th>Action</th><th>Resource</th></tr></thead>
+      <tbody>
+        {{range .Diff.Resources}}<tr><td>{{.Action}}</td><td><code>{{.Name}}</code></td></tr>{{end}}
+      </tbody>
+    </table>
+    {{end}}
+    {{if .Diff.Outputs}}
+    <table>
+      <thead><tr><th>Output</th><th>Action</th><th>Before</th><th>After</th></tr></thead>
+      <tbody>
+        {{range .Diff.Outputs}}<tr><td><code>{{.Name}}</code></td><td>{{.Action}}</td><td>{{.Before}}</td><td>{{.After}}</td></tr>{{end}}
+      </tbody>
+    </table>
+    {{end}}
+    {{if .Diff.Unified}}<pre class="log">{{.Diff.Unified}}</pre>{{end}}
+    {{end}}
+  </section>
+
+  <section class="form-section">
     <h2>Import State</h2>
     <form method="post" action="/projects/{{.ProjectID}}/state/import" enctype="multipart/form-data" hx-post="/projects/{{.ProjectID}}/state/import" hx-encoding="multipart/form-data" hx-target="#tab-panel" hx-swap="outerHTML">
       <div class="field">
         <label for="state-file-input">Import state file (.tfstate / .json)</label>
         <input id="state-file-input" type="file" name="state_file" accept=".tfstate,.json,application/json" required>
-        <span class="field-hint">Replaces the current project state with the uploaded Terraform state file.</span>
+        <span class="field-hint">Replaces the current project state with the uploaded Terraform state file and records a new version.</span>
       </div>
       <div class="actions">
         <button type="submit" class="btn-trigger">Import state</button>

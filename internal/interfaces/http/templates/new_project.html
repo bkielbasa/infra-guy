@@ -3,7 +3,7 @@
 <div class="panel form-panel">
   <div class="form-header">
     <h1>New project</h1>
-    <p class="sub">Connect a GitHub repository and configure how Terraform runs are planned and applied.</p>
+    <p class="sub">Connect a GitHub repository and configure how runs are planned and applied.</p>
   </div>
   {{if .InstallURL}}
   <div class="empty-card">
@@ -78,6 +78,8 @@
         {{end}}
       </div>
     </section>
+
+    {{template "engine_fields" .EngineForm}}
 
     <section class="form-section">
       <h2>Automation, Contexts &amp; Cloud Integrations</h2>

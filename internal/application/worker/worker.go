@@ -57,6 +57,8 @@ func ReapPolicy(job run.Job) run.ReapDecision {
 
 type Request struct {
 	WorkDir, InternalBaseURL, ProjectID, RunID, StateToken, WorkingDirectory, GitHubToken string
+	Engine                                                                                string
+	EngineConfig                                                                          project.EngineConfig
 	TerraformVersion                                                                      string
 	Step                                                                                  run.StepName
 	Destroy                                                                               bool
@@ -424,6 +426,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 	res, err := w.Executor.Run(tfCtx, Request{
 		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID), RunID: string(job.RunID),
 		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: token,
+		Engine: ps.Engine, EngineConfig: ps.EngineConfig,
 		TerraformVersion: ps.TerraformVersion, Step: job.Step, Destroy: rs.IsDestroy, PlanFile: rs.PlanFile,
 		Env: ctxEnv, Files: ctxFiles, RedactSecrets: redactSecrets,
 		OnLog: func(logs string) {
@@ -589,8 +592,13 @@ func hasInitializedTerraform(dest, workingDir string) bool {
 	if workingDir != "" {
 		dir = filepath.Join(dest, workingDir)
 	}
-	info, err := os.Stat(filepath.Join(dir, ".terraform"))
-	return err == nil && info.IsDir()
+	if info, err := os.Stat(filepath.Join(dir, ".terraform")); err == nil && info.IsDir() {
+		return true
+	}
+	if info, err := os.Stat(filepath.Join(dir, ".infraguy-initialized")); err == nil && !info.IsDir() {
+		return true
+	}
+	return false
 }
 
 func (w *Worker) completeAndCleanup(ctx context.Context, job Job) error {

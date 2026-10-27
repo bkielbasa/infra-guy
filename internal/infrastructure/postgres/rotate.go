@@ -284,6 +284,58 @@ func rotateStates(ctx context.Context, pool *pgxpool.Pool, sealer *crypto.Sealer
 		}
 		rotated++
 	}
+
+	vRows, err := pool.Query(ctx, `
+		SELECT id, project_id, serial, data
+		FROM state_versions
+		WHERE length(data) > 0`)
+	if err == nil {
+		type vItem struct {
+			id        int64
+			projectID string
+			serial    int64
+			data      []byte
+		}
+		var vItems []vItem
+		for vRows.Next() {
+			var vi vItem
+			if err := vRows.Scan(&vi.id, &vi.projectID, &vi.serial, &vi.data); err != nil {
+				vRows.Close()
+				return rotated, err
+			}
+			if sealer.NeedsRotation(vi.data) {
+				vItems = append(vItems, vi)
+			}
+		}
+		vRows.Close()
+		if err := vRows.Err(); err != nil {
+			return rotated, err
+		}
+		for _, vi := range vItems {
+			aad := StateVersionDataAAD(vi.projectID, vi.serial)
+			pt := vi.data
+			if crypto.IsEnvelopeCiphertext(vi.data) {
+				opened, err := sealer.OpenWithAAD(vi.data, aad)
+				if err != nil {
+					openedFallback, errFallback := sealer.OpenWithAAD(vi.data, StateDataAAD(vi.projectID))
+					if errFallback != nil {
+						return rotated, fmt.Errorf("open state_version %d for project %s: %w", vi.serial, vi.projectID, err)
+					}
+					opened = openedFallback
+				}
+				pt = opened
+			}
+			newCT, err := sealer.SealWithAAD(pt, aad)
+			if err != nil {
+				return rotated, fmt.Errorf("seal state_version %d for project %s: %w", vi.serial, vi.projectID, err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE state_versions SET data = $2, size_bytes = $3 WHERE id = $1`, vi.id, newCT, len(pt)); err != nil {
+				return rotated, err
+			}
+			rotated++
+		}
+	}
+
 	return rotated, nil
 }
 

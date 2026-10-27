@@ -3,6 +3,9 @@ package project
 import (
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -10,6 +13,14 @@ import (
 
 const DefaultTerraformVersion = "1.9.8"
 const DefaultDriftIntervalMinutes = 360
+
+const (
+	EngineTerraform  = "terraform"
+	EngineKubernetes = "kubernetes"
+	EngineAnsible    = "ansible"
+	EngineHelm       = "helm"
+	DefaultEngine    = EngineTerraform
+)
 
 const (
 	DriftStatusUnknown = "unknown"
@@ -23,8 +34,36 @@ var (
 	ErrLocked                  = errors.New("project is locked")
 	ErrActiveRunMismatch       = errors.New("active run does not match")
 	ErrInvalidTerraformVersion = errors.New("invalid terraform version")
+	ErrInvalidEngine           = errors.New("invalid engine")
 	ErrInvalidTag              = errors.New("invalid tag: expected key:value")
 )
+
+type EngineConfig struct {
+	// Kubernetes / Kustomize (#17)
+	K8sNamespace string `json:"k8s_namespace,omitempty"`
+	Kustomize    bool   `json:"kustomize,omitempty"`
+	K8sPrune     bool   `json:"k8s_prune,omitempty"`
+	ManifestPath string `json:"manifest_path,omitempty"`
+
+	// Ansible (#18)
+	Playbook         string `json:"playbook,omitempty"`
+	Inventory        string `json:"inventory,omitempty"`
+	ExtraVars        string `json:"extra_vars,omitempty"`
+	RequirementsFile string `json:"requirements_file,omitempty"`
+	Become           bool   `json:"become,omitempty"`
+
+	// Helm (#19)
+	ReleaseName     string `json:"release_name,omitempty"`
+	HelmNamespace   string `json:"helm_namespace,omitempty"`
+	Chart           string `json:"chart,omitempty"`
+	RepoURL         string `json:"repo_url,omitempty"`
+	ChartVersion    string `json:"chart_version,omitempty"`
+	ValuesFiles     string `json:"values_files,omitempty"`
+	SetValues       string `json:"set_values,omitempty"`
+	Atomic          bool   `json:"atomic,omitempty"`
+	Wait            bool   `json:"wait,omitempty"`
+	CreateNamespace bool   `json:"create_namespace,omitempty"`
+}
 
 type ID string
 
@@ -36,6 +75,8 @@ type Snapshot struct {
 	Repo                 SourceRepo
 	DefaultBranch        string
 	WorkingDirectory     string
+	Engine               string
+	EngineConfig         EngineConfig
 	TerraformVersion     string
 	ApprovalPolicyID     string
 	AutoApprove          bool
@@ -63,6 +104,8 @@ type NewInput struct {
 	Repo                 SourceRepo
 	DefaultBranch        string
 	WorkingDirectory     string
+	Engine               string
+	EngineConfig         EngineConfig
 	TerraformVersion     string
 	ApprovalPolicyID     string
 	AutoApprove          bool
@@ -82,7 +125,7 @@ func New(id ID, name string, repo SourceRepo, now time.Time) (*Project, error) {
 	}
 	return &Project{s: Snapshot{
 		ID: id, Name: strings.TrimSpace(name), Repo: repo,
-		DefaultBranch: "main", TerraformVersion: DefaultTerraformVersion,
+		DefaultBranch: "main", Engine: DefaultEngine, TerraformVersion: DefaultTerraformVersion,
 		DriftIntervalMinutes: DefaultDriftIntervalMinutes,
 		DriftStatus:          DriftStatusUnknown,
 		CreatedAt:            now, UpdatedAt: now,
@@ -92,6 +135,9 @@ func New(id ID, name string, repo SourceRepo, now time.Time) (*Project, error) {
 func Restore(s Snapshot) *Project {
 	s.ApprovalPolicyID = strings.TrimSpace(s.ApprovalPolicyID)
 	s.Tags = cloneTags(s.Tags)
+	if s.Engine == "" {
+		s.Engine = DefaultEngine
+	}
 	if s.DriftIntervalMinutes <= 0 {
 		s.DriftIntervalMinutes = DefaultDriftIntervalMinutes
 	}
@@ -165,6 +211,199 @@ func (p *Project) SetTerraformVersion(raw string) error {
 		return err
 	}
 	p.s.TerraformVersion = v
+	return nil
+}
+
+func ValidateEngine(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return DefaultEngine, nil
+	}
+	switch v {
+	case EngineTerraform, EngineKubernetes, EngineAnsible, EngineHelm:
+		return v, nil
+	default:
+		return "", fmt.Errorf("%w: %q", ErrInvalidEngine, raw)
+	}
+}
+
+func EngineLabel(engine string) string {
+	switch strings.ToLower(strings.TrimSpace(engine)) {
+	case EngineKubernetes:
+		return "Kubernetes"
+	case EngineAnsible:
+		return "Ansible"
+	case EngineHelm:
+		return "Helm"
+	default:
+		return "Terraform"
+	}
+}
+
+func CleanEngineConfig(cfg EngineConfig) EngineConfig {
+	return EngineConfig{
+		K8sNamespace:     strings.TrimSpace(cfg.K8sNamespace),
+		Kustomize:        cfg.Kustomize,
+		K8sPrune:         cfg.K8sPrune,
+		ManifestPath:     strings.TrimSpace(cfg.ManifestPath),
+		Playbook:         strings.TrimSpace(cfg.Playbook),
+		Inventory:        strings.TrimSpace(cfg.Inventory),
+		ExtraVars:        strings.TrimSpace(cfg.ExtraVars),
+		RequirementsFile: strings.TrimSpace(cfg.RequirementsFile),
+		Become:           cfg.Become,
+		ReleaseName:      strings.TrimSpace(cfg.ReleaseName),
+		HelmNamespace:    strings.TrimSpace(cfg.HelmNamespace),
+		Chart:            strings.TrimSpace(cfg.Chart),
+		RepoURL:          strings.TrimSpace(cfg.RepoURL),
+		ChartVersion:     strings.TrimSpace(cfg.ChartVersion),
+		ValuesFiles:      strings.TrimSpace(cfg.ValuesFiles),
+		SetValues:        strings.TrimSpace(cfg.SetValues),
+		Atomic:           cfg.Atomic,
+		Wait:             cfg.Wait,
+		CreateNamespace:  cfg.CreateNamespace,
+	}
+}
+
+var dns1123Label = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+func validDNSLabel(raw string, max int) error {
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > max || !dns1123Label.MatchString(raw) {
+		return fmt.Errorf("%w: %q is not a DNS label", ErrInvalidEngine, raw)
+	}
+	return nil
+}
+
+func validRelativePath(raw string) error {
+	v := strings.TrimSpace(raw)
+	if v == "" || v == "." {
+		return nil
+	}
+	if strings.HasPrefix(v, "-") || strings.Contains(v, "\x00") || filepath.IsAbs(v) {
+		return fmt.Errorf("%w: path must be relative to the working directory", ErrInvalidEngine)
+	}
+	clean := filepath.Clean(v)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: path escapes the workspace", ErrInvalidEngine)
+	}
+	return nil
+}
+
+func splitCSV(raw string) []string {
+	raw = strings.ReplaceAll(raw, "\n", ",")
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func validChartRef(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("%w: chart is required", ErrInvalidEngine)
+	}
+	if strings.Contains(raw, "..") || strings.ContainsAny(raw, " \t\n") || strings.HasPrefix(raw, "-") {
+		return fmt.Errorf("%w: invalid chart %q", ErrInvalidEngine, raw)
+	}
+	if strings.HasPrefix(raw, "oci://") {
+		return validRepoURL(raw)
+	}
+	if strings.Contains(raw, "://") || strings.HasPrefix(raw, "/") {
+		return fmt.Errorf("%w: chart must be a name, relative path, or oci:// reference", ErrInvalidEngine)
+	}
+	if strings.HasPrefix(raw, "./") || strings.HasPrefix(raw, "../") {
+		return validRelativePath(raw)
+	}
+	return nil
+}
+
+func validRepoURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "oci") {
+		return fmt.Errorf("%w: chart repository must be an http(s) or oci URL", ErrInvalidEngine)
+	}
+	return nil
+}
+
+func validChartVersion(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if strings.HasPrefix(raw, "-") || strings.ContainsAny(raw, " \t\n") || len(raw) > 64 {
+		return fmt.Errorf("%w: invalid chart version", ErrInvalidEngine)
+	}
+	return nil
+}
+
+// ValidateEngineConfig checks the fields used by the selected engine.
+func ValidateEngineConfig(engine string, cfg EngineConfig) error {
+	switch engine {
+	case EngineKubernetes:
+		if err := validDNSLabel(cfg.K8sNamespace, 63); err != nil {
+			return err
+		}
+		return validRelativePath(cfg.ManifestPath)
+	case EngineAnsible:
+		if err := validRelativePath(cfg.Playbook); err != nil {
+			return err
+		}
+		if err := validRelativePath(cfg.Inventory); err != nil {
+			return err
+		}
+		return validRelativePath(cfg.RequirementsFile)
+	case EngineHelm:
+		if err := validDNSLabel(cfg.ReleaseName, 53); err != nil {
+			return err
+		}
+		if cfg.ReleaseName == "" {
+			return fmt.Errorf("%w: release name is required", ErrInvalidEngine)
+		}
+		if err := validChartRef(cfg.Chart); err != nil {
+			return err
+		}
+		if err := validDNSLabel(cfg.HelmNamespace, 63); err != nil {
+			return err
+		}
+		if err := validRepoURL(cfg.RepoURL); err != nil {
+			return err
+		}
+		if err := validChartVersion(cfg.ChartVersion); err != nil {
+			return err
+		}
+		for _, f := range splitCSV(cfg.ValuesFiles) {
+			if err := validRelativePath(f); err != nil {
+				return err
+			}
+		}
+		for _, s := range splitCSV(cfg.SetValues) {
+			if strings.HasPrefix(s, "-") || strings.ContainsAny(s, "\n") {
+				return fmt.Errorf("%w: invalid --set value", ErrInvalidEngine)
+			}
+		}
+	}
+	return nil
+}
+
+func (p *Project) SetEngine(raw string, cfg EngineConfig) error {
+	eng, err := ValidateEngine(raw)
+	if err != nil {
+		return err
+	}
+	cleaned := CleanEngineConfig(cfg)
+	if err := ValidateEngineConfig(eng, cleaned); err != nil {
+		return err
+	}
+	p.s.Engine = eng
+	p.s.EngineConfig = cleaned
 	return nil
 }
 
@@ -252,10 +491,10 @@ func cloneTags(in map[string]string) map[string]string {
 	return out
 }
 
-func (p *Project) SetStateToken(token string)        { p.s.StateToken = token }
-func (p *Project) SetStateTokenHash(hash string)     { p.s.StateTokenHash = hash }
-func (p *Project) Lock()                             { p.s.Locked = true }
-func (p *Project) Unlock()                           { p.s.Locked = false }
+func (p *Project) SetStateToken(token string)    { p.s.StateToken = token }
+func (p *Project) SetStateTokenHash(hash string) { p.s.StateTokenHash = hash }
+func (p *Project) Lock()                         { p.s.Locked = true }
+func (p *Project) Unlock()                       { p.s.Locked = false }
 
 func (p *Project) ClaimActiveRun(runID string) error {
 	if runID == "" {
@@ -391,4 +630,3 @@ func (p *Project) ClearExpiration(now time.Time) {
 		p.s.UpdatedAt = now
 	}
 }
-

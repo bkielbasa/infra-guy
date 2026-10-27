@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"time"
 
 	"infra-guy/internal/domain/project"
@@ -79,14 +80,134 @@ func (s *Service) Metadata(ctx context.Context, projectID string) (state.Metadat
 }
 
 func (s *Service) Import(ctx context.Context, projectID string, data []byte) error {
+	return s.ImportWithActor(ctx, projectID, data, "import")
+}
+
+func (s *Service) ImportWithActor(ctx context.Context, projectID string, data []byte, actor string) error {
 	st, err := s.loadState(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	if err := st.Import(data, s.Now()); err != nil {
+	if err := st.ImportWithActor(data, actor, s.Now()); err != nil {
 		return err
 	}
 	return s.States.Save(ctx, st)
+}
+
+func (s *Service) ListVersions(ctx context.Context, projectID string) ([]state.VersionSummary, error) {
+	if vr, ok := s.States.(state.VersionRepository); ok {
+		return vr.ListVersions(ctx, projectID)
+	}
+	st, err := s.States.Load(ctx, projectID)
+	if err != nil || st == nil {
+		return nil, err
+	}
+	snap := st.Snapshot()
+	if len(snap.Versions) > 0 {
+		out := make([]state.VersionSummary, len(snap.Versions))
+		for i, v := range snap.Versions {
+			out[i] = v.VersionSummary
+		}
+		return out, nil
+	}
+	if len(snap.Data) > 0 && snap.Serial != nil {
+		return []state.VersionSummary{
+			{
+				Serial:        *snap.Serial,
+				Size:          len(snap.Data),
+				RunID:         snap.LastRunID,
+				Actor:         snap.LastActor,
+				ResourceCount: state.CountResources(snap.Data),
+				CreatedAt:     snap.UpdatedAt,
+			},
+		}, nil
+	}
+	return nil, nil
+}
+
+func (s *Service) GetVersion(ctx context.Context, projectID string, serial int64) (*state.Version, error) {
+	if vr, ok := s.States.(state.VersionRepository); ok {
+		v, err := vr.GetVersion(ctx, projectID, serial)
+		if err != nil {
+			return nil, err
+		}
+		if v != nil {
+			return v, nil
+		}
+	}
+	st, err := s.States.Load(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, state.ErrVersionNotFound
+	}
+	snap := st.Snapshot()
+	for _, v := range snap.Versions {
+		if v.Serial == serial {
+			cp := v
+			return &cp, nil
+		}
+	}
+	if snap.Serial != nil && *snap.Serial == serial && len(snap.Data) > 0 {
+		return &state.Version{
+			VersionSummary: state.VersionSummary{
+				Serial:        serial,
+				Size:          len(snap.Data),
+				RunID:         snap.LastRunID,
+				Actor:         snap.LastActor,
+				ResourceCount: state.CountResources(snap.Data),
+				CreatedAt:     snap.UpdatedAt,
+			},
+			Data: snap.Data,
+		}, nil
+	}
+	return nil, state.ErrVersionNotFound
+}
+
+func (s *Service) Diff(ctx context.Context, projectID string, fromSerial, toSerial int64) (state.StateDiff, error) {
+	fromVer, err := s.GetVersion(ctx, projectID, fromSerial)
+	if err != nil {
+		return state.StateDiff{}, err
+	}
+	toVer, err := s.GetVersion(ctx, projectID, toSerial)
+	if err != nil {
+		return state.StateDiff{}, err
+	}
+	return state.DiffStates(fromSerial, fromVer.Data, toSerial, toVer.Data), nil
+}
+
+func (s *Service) Rollback(ctx context.Context, projectID string, targetSerial int64, actor string) (int64, error) {
+	st, err := s.loadState(ctx, projectID)
+	if err != nil {
+		return 0, err
+	}
+	targetVer, err := s.GetVersion(ctx, projectID, targetSerial)
+	if err != nil {
+		return 0, err
+	}
+	if vr, ok := s.States.(state.VersionRepository); ok {
+		if list, err := vr.ListVersions(ctx, projectID); err == nil && len(list) > 0 {
+			snap := st.Snapshot()
+			if snap.Serial == nil || list[0].Serial > *snap.Serial {
+				maxS := list[0].Serial
+				snap.Serial = &maxS
+				st = state.Restore(snap)
+			}
+		}
+	}
+	actorLabel := actor
+	if actorLabel == "" {
+		actorLabel = fmt.Sprintf("rollback:#%d", targetSerial)
+	}
+	newSerial, err := st.Rollback(targetVer.Data, actorLabel, s.Now())
+	if err != nil {
+		return 0, err
+	}
+	if err := s.States.Save(ctx, st); err != nil {
+		return 0, err
+	}
+	return newSerial, nil
 }
 
 func (s *Service) Outputs(ctx context.Context, projectID string) (map[string]state.OutputValue, error) {

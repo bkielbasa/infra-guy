@@ -60,6 +60,7 @@
 
 {{define "meta"}}
 <div class="meta">
+  {{if .Engine}}<span>{{.Engine}}</span>{{end}}
   {{if .TerraformVersion}}<span>{{.TerraformVersion}}</span>{{end}}
   <span>{{.Repo}}</span>
   {{if .Workdir}}<span>{{.Workdir}}</span>{{end}}
