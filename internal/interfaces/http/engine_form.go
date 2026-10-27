@@ -17,6 +17,7 @@ type engineFormView struct {
 	Chart, RepoURL, ChartVersion                     string
 	ValuesFiles, SetValues                           string
 	Atomic, Wait, CreateNamespace                    bool
+	ToolVersion                                      string
 }
 
 func engineFormFrom(ps *project.Snapshot) engineFormView {
@@ -52,6 +53,7 @@ func engineFormFrom(ps *project.Snapshot) engineFormView {
 		Atomic:           cfg.Atomic,
 		Wait:             cfg.Wait,
 		CreateNamespace:  cfg.CreateNamespace,
+		ToolVersion:      cfg.ToolVersion,
 	}
 }
 
@@ -80,5 +82,6 @@ func engineConfigFromRequest(r *http.Request) project.EngineConfig {
 		Atomic:           on("atomic"),
 		Wait:             on("wait"),
 		CreateNamespace:  on("create_namespace"),
+		ToolVersion:      r.FormValue("tool_version"),
 	}
 }

@@ -77,6 +77,9 @@
             <option value="plain_env">Environment variable (plain)</option>
             <option value="secret_env">Environment variable (secret)</option>
             <option value="secret_file">Mounted file in $HOME (secret)</option>
+            <option value="kubeconfig">Kubeconfig</option>
+            <option value="ssh_private_key">SSH private key</option>
+            <option value="ansible_vault_password">Ansible vault password</option>
           </select>
         </div>
         <div class="field">
@@ -92,6 +95,22 @@
         <button type="submit" class="btn-trigger">Save entry</button>
       </div>
     </form>
+    <script>
+    (function () {
+      var kind = document.getElementById("entry-kind");
+      var key = document.getElementById("entry-key");
+      if (!kind || !key) return;
+      var fixed = { kubeconfig: true, ssh_private_key: true, ansible_vault_password: true };
+      function sync() {
+        var hide = !!fixed[kind.value];
+        key.disabled = hide;
+        key.required = !hide;
+        if (key.parentElement) key.parentElement.hidden = hide;
+      }
+      kind.addEventListener("change", sync);
+      sync();
+    })();
+    </script>
   </section>
 
   <section class="form-section danger-zone">

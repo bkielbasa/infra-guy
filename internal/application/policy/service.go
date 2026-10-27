@@ -287,8 +287,12 @@ func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo, approva
 		"resources":         costResources,
 	}
 
+	k8sObjects := kubernetesObjectsFromPlan(planObj)
+	k8sMap := map[string]any{"objects": k8sObjects}
+
 	displayPayload := map[string]any{
 		"plan":         planObj,
+		"kubernetes":   k8sMap,
 		"cost":         costMap,
 		"approvals":    approvalMaps,
 		"current_user": userMap,
@@ -301,15 +305,17 @@ func (s *Service) BuildInput(planJSON []byte, u UserInfo, p ProjectInfo, approva
 
 	evalInput := map[string]any{
 		"plan":         planObj,
+		"kubernetes":   k8sMap,
 		"cost":         costMap,
 		"approvals":    approvalMaps,
 		"reviews":      map[string]any{"approvals": approvalMaps},
 		"current_user": userMap,
 		"project":      projectMap,
 		"input": map[string]any{
-			"plan":      planObj,
-			"cost":      costMap,
-			"approvals": approvalMaps,
+			"plan":       planObj,
+			"kubernetes": k8sMap,
+			"cost":       costMap,
+			"approvals":  approvalMaps,
 		},
 	}
 	return evalInput, string(prettyBytes), nil
@@ -363,9 +369,9 @@ func (s *Service) EvaluateForRun(ctx context.Context, tenantID string, policyID 
 }
 
 // ResolveForProject returns all policies that apply to a workspace:
-// 1. The explicit ApprovalPolicyID assigned to the workspace (if any)
-// 2. Any tenant policies whose tags match the workspace tags (tag-bound or global scope),
-//    deduplicated by policy ID and ordered deterministically.
+//  1. The explicit ApprovalPolicyID assigned to the workspace (if any)
+//  2. Any tenant policies whose tags match the workspace tags (tag-bound or global scope),
+//     deduplicated by policy ID and ordered deterministically.
 func (s *Service) ResolveForProject(ctx context.Context, tenantID string, explicitPolicyID policy.ID, projectTags map[string]string) ([]ResolvedPolicy, error) {
 	seen := make(map[policy.ID]bool)
 	var out []ResolvedPolicy

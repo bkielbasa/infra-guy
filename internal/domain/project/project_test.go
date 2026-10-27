@@ -201,10 +201,19 @@ func TestSetEngineValidatesConfig(t *testing.T) {
 	if err := p.SetEngine("kubernetes", EngineConfig{ManifestPath: "../secret"}); err == nil {
 		t.Fatal("expected path escape to fail")
 	}
+	if err := p.SetEngine("kubernetes", EngineConfig{ToolVersion: "1.2"}); err == nil {
+		t.Fatal("expected invalid tool version")
+	}
+	if err := p.SetEngine("kubernetes", EngineConfig{ToolVersion: "v1.31.2"}); err != nil {
+		t.Fatal(err)
+	}
+	if p.Snapshot().EngineConfig.ToolVersion != "1.31.2" {
+		t.Fatalf("tool version = %q", p.Snapshot().EngineConfig.ToolVersion)
+	}
 	if err := p.SetEngine("nope", EngineConfig{}); err == nil {
 		t.Fatal("expected invalid engine")
 	}
-	if p.Snapshot().Engine != EngineHelm {
+	if p.Snapshot().Engine != EngineKubernetes {
 		t.Fatal("failed set should leave the previous engine")
 	}
 }

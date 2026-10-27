@@ -34,19 +34,20 @@ type MergeabilityChecker interface {
 }
 
 type OpenRequest struct {
-	ProjectID   project.ID
-	Trigger     run.Trigger
-	SHA         string
-	Branch      string
-	Message     string
-	Author      string
-	TriggeredBy string
-	PRTitle     string
-	PRNumber    *int
-	CommittedAt *time.Time
-	PlanOnly    bool
-	IsDestroy   bool
-	AutoApprove *bool
+	ProjectID            project.ID
+	Trigger              run.Trigger
+	SHA                  string
+	Branch               string
+	Message              string
+	Author               string
+	TriggeredBy          string
+	PRTitle              string
+	PRNumber             *int
+	CommittedAt          *time.Time
+	PlanOnly             bool
+	IsDestroy            bool
+	HelmRollbackRevision int
+	AutoApprove          *bool
 }
 
 type Service struct {
@@ -137,7 +138,8 @@ func (s *Service) Open(ctx context.Context, in OpenRequest) (*run.Run, error) {
 	}
 	opened, err := run.Open(run.OpenInput{
 		ID: run.ID(s.NewID()), ProjectID: run.ProjectID(in.ProjectID),
-		AutoApprove: autoApprove, PlanOnly: in.PlanOnly, IsDestroy: in.IsDestroy, Trigger: in.Trigger,
+		AutoApprove: autoApprove, PlanOnly: in.PlanOnly, IsDestroy: in.IsDestroy,
+		HelmRollbackRevision: in.HelmRollbackRevision, Trigger: in.Trigger,
 		SHA: in.SHA, Branch: in.Branch, Message: in.Message, Author: in.Author,
 		TriggeredBy: in.TriggeredBy, PRNumber: in.PRNumber, PRTitle: in.PRTitle,
 		CommittedAt: in.CommittedAt, Now: s.Now(),

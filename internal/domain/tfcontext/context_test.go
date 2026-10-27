@@ -71,3 +71,31 @@ func TestResolvePrecedence(t *testing.T) {
 		t.Fatalf(".kube/config = %q, want cluster-b", string(files[".kube/config"]))
 	}
 }
+
+func TestCredentialKinds(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	kube, err := NewEntry("e1", KindKubeconfig, "", "apiVersion: v1\n", now)
+	if err != nil || !kube.Secret || kube.Key != ".kube/config" {
+		t.Fatalf("kubeconfig: %#v %v", kube, err)
+	}
+	ssh, err := NewEntry("e2", KindSSHPrivateKey, "ignored", "-----BEGIN-----", now)
+	if err != nil || !ssh.Secret || ssh.Key != ".ssh/id_rsa" {
+		t.Fatalf("ssh: %#v %v", ssh, err)
+	}
+	vault, err := NewEntry("e3", KindAnsibleVaultPassword, "", "s3cret", now)
+	if err != nil || !vault.Secret || vault.Key != ".ansible/vault-password" {
+		t.Fatalf("vault: %#v %v", vault, err)
+	}
+	c, err := New("c1", "ten-1", "creds", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEntries([]Entry{kube, ssh, vault})
+	env, files := Resolve([]*Context{c})
+	if env["KUBECONFIG"] != ".kube/config" || env["ANSIBLE_PRIVATE_KEY_FILE"] != ".ssh/id_rsa" || env["ANSIBLE_VAULT_PASSWORD_FILE"] != ".ansible/vault-password" {
+		t.Fatalf("env = %#v", env)
+	}
+	if string(files[".kube/config"]) == "" || string(files[".ssh/id_rsa"]) == "" || string(files[".ansible/vault-password"]) != "s3cret" {
+		t.Fatalf("files = %#v", files)
+	}
+}

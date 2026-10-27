@@ -183,6 +183,8 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /projects/{id}/tabs/tracked", u.tabTracked)
 	mux.HandleFunc("GET /projects/{id}/tabs/pulls", u.tabPulls)
 	mux.HandleFunc("GET /projects/{id}/tabs/state", u.tabState)
+	mux.HandleFunc("GET /projects/{id}/tabs/releases", u.tabReleases)
+	mux.HandleFunc("POST /projects/{id}/helm/rollback", u.rollbackHelm)
 	mux.HandleFunc("POST /projects/{id}/state/import", u.importState)
 	mux.HandleFunc("POST /projects/{id}/state/rollback", u.rollbackState)
 	mux.HandleFunc("GET /projects/{id}/tabs/dependencies", u.tabDependencies)
@@ -2307,6 +2309,135 @@ func (u *ui) rollbackState(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/projects/"+string(ps.ID)+"/tabs/state", http.StatusSeeOther)
 }
 
+type helmRevisionRow struct {
+	Revision    int
+	Updated     string
+	Status      string
+	Chart       string
+	AppVersion  string
+	Description string
+	Current     bool
+}
+
+func (u *ui) tabReleases(w http.ResponseWriter, r *http.Request) {
+	p, runs, err := u.loadProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	view := map[string]any{
+		"ProjectID": string(ps.ID),
+		"IsHelm":    ps.Engine == project.EngineHelm,
+		"Release":   ps.EngineConfig.ReleaseName,
+		"Namespace": ps.EngineConfig.HelmNamespace,
+		"Busy":      ps.Locked || anyNonTerminal(runs),
+		"Poll":      anyNonTerminal(runs),
+	}
+	if ps.Engine == project.EngineHelm && u.cfg.HelmReleases != nil {
+		release, namespace, revisions, err := u.cfg.HelmReleases.List(r.Context(), string(ps.ID))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if release != "" {
+			view["Release"] = release
+		}
+		if namespace != "" {
+			view["Namespace"] = namespace
+		}
+		rows := make([]helmRevisionRow, 0, len(revisions))
+		for i, rev := range revisions {
+			rows = append(rows, helmRevisionRow{
+				Revision: rev.Revision, Updated: rev.Updated, Status: rev.Status,
+				Chart: rev.Chart, AppVersion: rev.AppVersion, Description: rev.Description,
+				Current: i == 0,
+			})
+		}
+		view["Revisions"] = rows
+	}
+	u.fragment(w, "helm_releases", view)
+}
+
+func (u *ui) rollbackHelm(w http.ResponseWriter, r *http.Request) {
+	p, runs, err := u.loadProject(w, r)
+	if err != nil {
+		return
+	}
+	ps := p.Snapshot()
+	if ps.Engine != project.EngineHelm {
+		http.Error(w, "workspace engine is not Helm", http.StatusBadRequest)
+		return
+	}
+	if ps.Locked || anyNonTerminal(runs) {
+		http.Error(w, "cannot roll back a Helm release while the project is locked or a run is active", http.StatusConflict)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	revision, err := strconv.Atoi(strings.TrimSpace(r.FormValue("revision")))
+	if err != nil || revision <= 0 {
+		http.Error(w, "invalid revision", http.StatusBadRequest)
+		return
+	}
+	if u.cfg.HelmReleases == nil {
+		http.Error(w, "Helm release history is not configured", http.StatusInternalServerError)
+		return
+	}
+	_, _, revisions, err := u.cfg.HelmReleases.List(r.Context(), string(ps.ID))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	found := false
+	for _, rev := range revisions {
+		if rev.Revision == revision {
+			found = true
+			break
+		}
+	}
+	if !found {
+		http.Error(w, "revision is not in the stored Helm history", http.StatusBadRequest)
+		return
+	}
+	if u.cfg.Tokens == nil || u.cfg.Checkout == nil {
+		http.Error(w, "GitHub App is not installed", http.StatusBadGateway)
+		return
+	}
+	token, err := u.cfg.Tokens.InstallationToken(r.Context(), ps.TenantID)
+	if err != nil {
+		http.Error(w, "GitHub App is not installed", http.StatusBadGateway)
+		return
+	}
+	sha, err := u.cfg.Checkout.BranchTip(r.Context(), ps.Repo.CloneURL(), token, ps.DefaultBranch)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	release := ps.EngineConfig.ReleaseName
+	auto := true
+	opened, err := u.cfg.Runs.Open(r.Context(), runapp.OpenRequest{
+		ProjectID: ps.ID, Trigger: run.TriggerManual, SHA: sha, Branch: ps.DefaultBranch,
+		Message: fmt.Sprintf("Rollback Helm release %s to revision %d", release, revision),
+		Author:  u.actor(r), TriggeredBy: u.actor(r),
+		AutoApprove: &auto, HelmRollbackRevision: revision,
+	})
+	if err != nil {
+		if errors.Is(err, runapp.ErrDuplicate) {
+			http.Redirect(w, r, "/projects/"+string(ps.ID), http.StatusSeeOther)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rs := opened.Snapshot()
+	u.recordAudit(r, ps.TenantID, "helm.rollback", "run", string(rs.ID), ps.Name,
+		fmt.Sprintf("Queued Helm rollback of %s to revision %d on workspace %s", release, revision, ps.Name),
+		map[string]any{"project_id": string(ps.ID), "release": release, "revision": revision})
+	http.Redirect(w, r, "/runs/"+string(rs.ID), http.StatusSeeOther)
+}
+
 func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 	p, err := u.getProject(w, r)
 	if err != nil {
@@ -2945,6 +3076,7 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 		"Poll":              anyNonTerminal(runs),
 		"EngineLabel":       project.EngineLabel(ps.Engine),
 		"EngineIsTerraform": ps.Engine == "" || ps.Engine == project.EngineTerraform,
+		"EngineIsHelm":      ps.Engine == project.EngineHelm,
 		"DriftEnabled":      ps.DriftEnabled,
 		"DriftStatus":       ps.DriftStatus,
 		"DriftStatusLabel":  driftStatusLabel(ps.DriftStatus),
@@ -3530,7 +3662,7 @@ func (u *ui) contextDetails(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, contextEntryRow{
 			ID:        e.ID,
-			Kind:      string(e.Kind),
+			Kind:      tfcontext.KindLabel(e.Kind),
 			Key:       e.Key,
 			Value:     val,
 			Secret:    e.Secret,

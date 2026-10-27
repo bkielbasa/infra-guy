@@ -14,6 +14,7 @@ import (
 
 	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	runapp "infra-guy/internal/application/run"
+	"infra-guy/internal/domain/helmrelease"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/infrastructure/telemetry"
@@ -60,6 +61,7 @@ type Request struct {
 	Engine                                                                                string
 	EngineConfig                                                                          project.EngineConfig
 	TerraformVersion                                                                      string
+	HelmRollback                                                                          int
 	Step                                                                                  run.StepName
 	Destroy                                                                               bool
 	PlanFile                                                                              []byte
@@ -74,6 +76,9 @@ type Result struct {
 	Logs, PlanText, Version string
 	PlanFile                []byte
 	PlanJSON                []byte
+	HelmRelease             string
+	HelmNamespace           string
+	HelmRevisions           []helmrelease.Revision
 }
 
 type Queue interface {
@@ -144,6 +149,7 @@ type Worker struct {
 	Dispatcher        Dispatcher
 	Tokens            TokenSource
 	Contexts          ContextResolver
+	HelmReleases      helmrelease.Repository
 	Dependencies      DependencyResolver
 	CloudIntegrations CloudCredentialResolver
 	Cache             WorkspaceCache
@@ -427,12 +433,17 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 		WorkDir: dest, InternalBaseURL: w.InternalBaseURL, ProjectID: string(ps.ID), RunID: string(job.RunID),
 		StateToken: ps.StateToken, WorkingDirectory: ps.WorkingDirectory, GitHubToken: token,
 		Engine: ps.Engine, EngineConfig: ps.EngineConfig,
-		TerraformVersion: ps.TerraformVersion, Step: job.Step, Destroy: rs.IsDestroy, PlanFile: rs.PlanFile,
+		TerraformVersion: ps.TerraformVersion, HelmRollback: rs.HelmRollbackRevision, Step: job.Step, Destroy: rs.IsDestroy, PlanFile: rs.PlanFile,
 		Env: ctxEnv, Files: ctxFiles, RedactSecrets: redactSecrets,
 		OnLog: func(logs string) {
 			logger.SetExec(logs)
 		},
 	})
+	if w.HelmReleases != nil && len(res.HelmRevisions) > 0 {
+		if herr := w.HelmReleases.Replace(ctx, string(ps.ID), res.HelmRelease, res.HelmNamespace, res.HelmRevisions); herr != nil {
+			logger.LogAfterf("Saving Helm release history failed: %s", herr.Error())
+		}
+	}
 	execDur := time.Since(execStart)
 	if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
 		tfSpan.RecordError(stepCtx.Err())

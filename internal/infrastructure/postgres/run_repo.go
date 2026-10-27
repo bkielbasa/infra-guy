@@ -63,7 +63,7 @@ func (r *RunRepo) sealPlanArtifacts(s run.Snapshot) (planFile, planJSON []byte, 
 const runColumns = `id, project_id, trigger, status, commit_sha, branch, commit_message, author,
 	triggered_by, pr_number, pr_title, plan_only, auto_approve, destroy, plan_text, plan_file, plan_json, add_count,
 	change_count, destroy_count, summary_present, monthly_cost, diff_monthly_cost, terraform_version, error, approved_by, approved_at,
-	committed_at, created_at, started_at, finished_at`
+	committed_at, created_at, started_at, finished_at, helm_rollback_revision`
 
 const runSummaryColumns = `r.id, r.project_id, r.trigger, r.status, r.commit_sha, r.branch, r.commit_message, r.author,
 	r.triggered_by, r.pr_number, r.pr_title, r.plan_only, r.auto_approve, r.destroy, r.add_count,
@@ -71,8 +71,8 @@ const runSummaryColumns = `r.id, r.project_id, r.trigger, r.status, r.commit_sha
 	r.committed_at, r.created_at, r.started_at, r.finished_at`
 
 const insertIfAbsentSQL = `
-INSERT INTO runs (id, project_id, trigger, status, commit_sha, branch, commit_message, author, triggered_by, pr_number, pr_title, plan_only, auto_approve, destroy, plan_text, plan_file, plan_json, monthly_cost, diff_monthly_cost, committed_at, created_at)
-SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
+INSERT INTO runs (id, project_id, trigger, status, commit_sha, branch, commit_message, author, triggered_by, pr_number, pr_title, plan_only, auto_approve, destroy, plan_text, plan_file, plan_json, monthly_cost, diff_monthly_cost, committed_at, created_at, helm_rollback_revision)
+SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22
 WHERE NOT EXISTS (
   SELECT 1 FROM runs
   WHERE project_id = $2 AND commit_sha = $5 AND trigger = $3
@@ -95,7 +95,7 @@ func (r *RunRepo) InsertIfAbsent(ctx context.Context, in *run.Run) (bool, error)
 	tag, err := tx.Exec(ctx, insertIfAbsentSQL,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
 		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.IsDestroy,
-		s.PlanText, planFile, planJSON, s.MonthlyCost, s.DiffMonthlyCost, s.CommittedAt, s.CreatedAt,
+		s.PlanText, planFile, planJSON, s.MonthlyCost, s.DiffMonthlyCost, s.CommittedAt, s.CreatedAt, s.HelmRollbackRevision,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -411,7 +411,7 @@ func (r *RunRepo) scanRun(row runScanner) (run.Snapshot, error) {
 		&s.ID, &s.ProjectID, &s.Trigger, &s.Status, &s.SHA, &s.Branch, &s.Message, &s.Author,
 		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.IsDestroy, &s.PlanText, &s.PlanFile, &s.PlanJSON,
 		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.MonthlyCost, &s.DiffMonthlyCost, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
-		&approved, &committed, &created, &started, &finished,
+		&approved, &committed, &created, &started, &finished, &s.HelmRollbackRevision,
 	)
 	if err != nil {
 		return run.Snapshot{}, err

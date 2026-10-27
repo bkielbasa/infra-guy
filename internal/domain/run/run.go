@@ -108,21 +108,22 @@ type Step struct {
 }
 
 type OpenInput struct {
-	ID          ID
-	ProjectID   ProjectID
-	AutoApprove bool
-	PlanOnly    bool
-	IsDestroy   bool
-	Trigger     Trigger
-	SHA         string
-	Branch      string
-	Message     string
-	Author      string
-	TriggeredBy string
-	PRNumber    *int
-	PRTitle     string
-	CommittedAt *time.Time
-	Now         time.Time
+	ID                   ID
+	ProjectID            ProjectID
+	AutoApprove          bool
+	PlanOnly             bool
+	IsDestroy            bool
+	HelmRollbackRevision int
+	Trigger              Trigger
+	SHA                  string
+	Branch               string
+	Message              string
+	Author               string
+	TriggeredBy          string
+	PRNumber             *int
+	PRTitle              string
+	CommittedAt          *time.Time
+	Now                  time.Time
 }
 
 type Approval struct {
@@ -133,39 +134,40 @@ type Approval struct {
 }
 
 type Snapshot struct {
-	ID               ID
-	ProjectID        ProjectID
-	Trigger          Trigger
-	Status           Status
-	SHA              string
-	Branch           string
-	Message          string
-	Author           string
-	TriggeredBy      string
-	PRNumber         *int
-	PRTitle          string
-	PlanOnly         bool
-	AutoApprove      bool
-	IsDestroy        bool
-	PlanText         string
-	PlanFile         []byte
-	PlanJSON         []byte
-	Add              int
-	Change           int
-	Destroy          int
-	SummaryPresent   bool
-	MonthlyCost      float64
-	DiffMonthlyCost  float64
-	TerraformVersion string
-	Error            string
-	ApprovedBy       string
-	ApprovedAt       *time.Time
-	Approvals        []Approval
-	CommittedAt      *time.Time
-	CreatedAt        time.Time
-	StartedAt        *time.Time
-	FinishedAt       *time.Time
-	Steps            []Step
+	ID                   ID
+	ProjectID            ProjectID
+	Trigger              Trigger
+	Status               Status
+	SHA                  string
+	Branch               string
+	Message              string
+	Author               string
+	TriggeredBy          string
+	PRNumber             *int
+	PRTitle              string
+	PlanOnly             bool
+	AutoApprove          bool
+	IsDestroy            bool
+	HelmRollbackRevision int
+	PlanText             string
+	PlanFile             []byte
+	PlanJSON             []byte
+	Add                  int
+	Change               int
+	Destroy              int
+	SummaryPresent       bool
+	MonthlyCost          float64
+	DiffMonthlyCost      float64
+	TerraformVersion     string
+	Error                string
+	ApprovedBy           string
+	ApprovedAt           *time.Time
+	Approvals            []Approval
+	CommittedAt          *time.Time
+	CreatedAt            time.Time
+	StartedAt            *time.Time
+	FinishedAt           *time.Time
+	Steps                []Step
 }
 
 type Run struct{ s Snapshot }
@@ -191,7 +193,8 @@ func Open(in OpenInput) (*Run, error) {
 		SHA: in.SHA, Branch: in.Branch, Message: in.Message, Author: in.Author,
 		TriggeredBy: in.TriggeredBy, PRNumber: in.PRNumber, PRTitle: in.PRTitle,
 		PlanOnly: in.PlanOnly, AutoApprove: in.AutoApprove, IsDestroy: in.IsDestroy,
-		CommittedAt: committedAt, CreatedAt: in.Now, Steps: steps,
+		HelmRollbackRevision: in.HelmRollbackRevision,
+		CommittedAt:          committedAt, CreatedAt: in.Now, Steps: steps,
 	}}, nil
 }
 

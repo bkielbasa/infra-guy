@@ -1,0 +1,44 @@
+{{define "helm_releases"}}
+<div id="tab-panel"{{if .Poll}} hx-get="/projects/{{.ProjectID}}/tabs/releases" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+  {{if not .IsHelm}}
+  <p class="empty">This workspace does not use the Helm engine.</p>
+  {{else}}
+  <section class="form-section">
+    <h2>Helm release</h2>
+    <p>{{if .Release}}<code>{{.Release}}</code>{{else}}No release name configured.{{end}}{{if .Namespace}} in <code>{{.Namespace}}</code>{{end}}</p>
+  </section>
+  <section class="form-section">
+    <h2>Revision history</h2>
+    {{if .Revisions}}
+    <table>
+      <thead>
+        <tr><th>Revision</th><th>Updated</th><th>Status</th><th>Chart</th><th>App</th><th>Description</th><th></th></tr>
+      </thead>
+      <tbody>
+        {{range .Revisions}}
+        <tr>
+          <td>{{if .Current}}<strong>#{{.Revision}}</strong>{{else}}#{{.Revision}}{{end}}</td>
+          <td>{{if .Updated}}{{.Updated}}{{else}}—{{end}}</td>
+          <td>{{if .Status}}{{.Status}}{{else}}—{{end}}</td>
+          <td>{{if .Chart}}{{.Chart}}{{else}}—{{end}}</td>
+          <td>{{if .AppVersion}}{{.AppVersion}}{{else}}—{{end}}</td>
+          <td>{{if .Description}}{{.Description}}{{else}}—{{end}}</td>
+          <td>
+            {{if and (not $.Busy) (not .Current)}}
+            <form method="post" action="/projects/{{$.ProjectID}}/helm/rollback" class="inline">
+              <input type="hidden" name="revision" value="{{.Revision}}">
+              <button type="submit">Roll back</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="empty">No Helm revisions recorded yet. A plan or apply records <code>helm history</code>.</p>
+    {{end}}
+  </section>
+  {{end}}
+</div>
+{{end}}

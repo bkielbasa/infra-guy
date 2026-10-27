@@ -63,6 +63,9 @@ type EngineConfig struct {
 	Atomic          bool   `json:"atomic,omitempty"`
 	Wait            bool   `json:"wait,omitempty"`
 	CreateNamespace bool   `json:"create_namespace,omitempty"`
+
+	// kubectl, Helm, or ansible-core version. Empty uses the runner PATH.
+	ToolVersion string `json:"tool_version,omitempty"`
 }
 
 type ID string
@@ -261,7 +264,21 @@ func CleanEngineConfig(cfg EngineConfig) EngineConfig {
 		Atomic:           cfg.Atomic,
 		Wait:             cfg.Wait,
 		CreateNamespace:  cfg.CreateNamespace,
+		ToolVersion:      strings.TrimPrefix(strings.TrimSpace(cfg.ToolVersion), "v"),
 	}
+}
+
+var toolVersionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+func validToolVersion(raw string) error {
+	v := strings.TrimPrefix(strings.TrimSpace(raw), "v")
+	if v == "" {
+		return nil
+	}
+	if !toolVersionPattern.MatchString(v) {
+		return fmt.Errorf("%w: tool version must look like 1.2.3", ErrInvalidEngine)
+	}
+	return nil
 }
 
 var dns1123Label = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
@@ -346,6 +363,9 @@ func validChartVersion(raw string) error {
 
 // ValidateEngineConfig checks the fields used by the selected engine.
 func ValidateEngineConfig(engine string, cfg EngineConfig) error {
+	if err := validToolVersion(cfg.ToolVersion); err != nil {
+		return err
+	}
 	switch engine {
 	case EngineKubernetes:
 		if err := validDNSLabel(cfg.K8sNamespace, 63); err != nil {

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	authapp "infra-guy/internal/application/auth"
 	auditapp "infra-guy/internal/application/audit"
+	authapp "infra-guy/internal/application/auth"
 	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
@@ -18,6 +18,7 @@ import (
 	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/application/worker"
 	"infra-guy/internal/domain/audit"
+	"infra-guy/internal/domain/helmrelease"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/infrastructure/telemetry"
 )
@@ -38,6 +39,7 @@ type ServerConfig struct {
 	Projects          *projectapp.Service
 	Runs              *runapp.Service
 	States            *stateapp.Service
+	HelmReleases      helmrelease.Repository
 	Contexts          *tfcontextapp.Service
 	Policies          *policyapp.Service
 	Dependencies      *dependencyapp.Service

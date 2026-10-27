@@ -206,7 +206,7 @@ func (r *ContextRepo) loadEntries(ctx context.Context, contextID tfcontext.ID) (
 		}
 		e.CreatedAt = utcTime(created)
 		e.UpdatedAt = utcTime(updated)
-		e.Secret = e.Kind == tfcontext.KindSecretEnv || e.Kind == tfcontext.KindSecretFile
+		e.Secret = e.Kind.IsSecret()
 		out = append(out, e)
 	}
 	return out, rows.Err()

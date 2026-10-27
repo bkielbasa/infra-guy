@@ -140,6 +140,59 @@ exit 3
 	}
 }
 
+func TestRunEngineHelmHistoryAndRollback(t *testing.T) {
+	bin := t.TempDir()
+	script := `#!/bin/sh
+if [ "$1" = "diff" ]; then
+  echo 'Error: unknown command "diff" for "helm"' >&2
+  exit 1
+fi
+if [ "$1" = "template" ]; then
+  printf '%s\n' "apiVersion: v1" "kind: ConfigMap" "metadata:" "  name: app" "  namespace: prod"
+  exit 0
+fi
+if [ "$1" = "get" ]; then
+  echo "release: not found" >&2
+  exit 1
+fi
+if [ "$1" = "history" ]; then
+  echo '[{"revision":1,"updated":"2026-01-01","status":"superseded","chart":"app-1.0.0","app_version":"1.0.0","description":"install"},{"revision":2,"updated":"2026-01-02","status":"deployed","chart":"app-1.1.0","app_version":"1.1.0","description":"upgrade"}]'
+  exit 0
+fi
+if [ "$1" = "rollback" ]; then
+  exit 0
+fi
+echo "unexpected: $*" >&2
+exit 3
+`
+	if err := os.WriteFile(filepath.Join(bin, "helm"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	work := t.TempDir()
+	ctx := context.Background()
+	cfg := project.EngineConfig{ReleaseName: "payments", HelmNamespace: "prod", Chart: "./chart"}
+	plan, err := Executor{}.Run(ctx, Request{WorkDir: work, Engine: project.EngineHelm, Step: run.StepPlan, EngineConfig: cfg})
+	if err != nil || plan.ExitCode != 0 || !strings.Contains(plan.PlanText, "Plan: 1 to add, 0 to change, 0 to destroy.") {
+		t.Fatalf("plan err=%v %#v", err, plan)
+	}
+	if len(plan.HelmRevisions) != 2 || plan.HelmRevisions[0].Revision != 2 || plan.HelmRelease != "payments" || plan.HelmNamespace != "prod" {
+		t.Fatalf("history = %#v", plan.HelmRevisions)
+	}
+	rollback, err := Executor{}.Run(ctx, Request{
+		WorkDir: work, Engine: project.EngineHelm, Step: run.StepPlan, EngineConfig: cfg, HelmRollback: 1,
+	})
+	if err != nil || rollback.ExitCode != 0 || !strings.Contains(rollback.PlanText, "Plan: 0 to add, 1 to change, 0 to destroy.") {
+		t.Fatalf("rollback plan err=%v text=%s", err, rollback.PlanText)
+	}
+	apply, err := Executor{}.Run(ctx, Request{
+		WorkDir: work, Engine: project.EngineHelm, Step: run.StepApply, EngineConfig: cfg, HelmRollback: 1,
+	})
+	if err != nil || apply.ExitCode != 0 || !strings.Contains(apply.Logs, "helm rollback payments 1") {
+		t.Fatalf("apply err=%v logs=%s", err, apply.Logs)
+	}
+}
+
 func TestRunEngineAnsibleDestroyRejected(t *testing.T) {
 	work := t.TempDir()
 	res, err := Executor{}.Run(context.Background(), Request{

@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	authapp "infra-guy/internal/application/auth"
 	auditapp "infra-guy/internal/application/audit"
+	authapp "infra-guy/internal/application/auth"
 	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	dependencyapp "infra-guy/internal/application/dependency"
 	"infra-guy/internal/application/installation"
@@ -172,6 +172,7 @@ func main() {
 	}
 
 	tfInstaller := &terraform.Installer{CacheDir: filepath.Join(workDir, "bin")}
+	toolInstaller := &terraform.ToolInstaller{CacheDir: filepath.Join(workDir, "bin")}
 	tfCatalog := &terraform.VersionCatalog{}
 
 	gh := &github.Client{
@@ -196,6 +197,7 @@ func main() {
 	stateSvc := &stateapp.Service{Projects: projects, States: states, Now: now}
 	projectSvc := &projectapp.Service{Projects: projects, States: stateSvc, Now: now, NewID: newID}
 
+	helmReleases := postgres.NewHelmReleaseRepo(pool)
 	dependencyRepo := postgres.NewDependencyRepo(pool)
 	dependencySvc := &dependencyapp.Service{
 		Dependencies: dependencyRepo,
@@ -231,9 +233,10 @@ func main() {
 	w := &worker.Worker{
 		WorkerID: workerID(), Queue: queue,
 		Projects: projectSvc, Service: runSvc,
-		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{Binary: tfInstaller}},
+		Checkout: git.Checkout{}, Executor: terraform.WorkerExecutor{Executor: terraform.Executor{Binary: tfInstaller, Tools: toolInstaller}},
 		Tokens:            tokenSource,
 		Contexts:          contextSvc,
+		HelmReleases:      helmReleases,
 		CloudIntegrations: cloudIntegrationSvc,
 		Dependencies:      dependencySvc,
 		Cache:             wsCache,
@@ -281,16 +284,17 @@ func main() {
 		Projects:          projectSvc,
 		Runs:              runSvc,
 		States:            stateSvc,
+		HelmReleases:      helmReleases,
 		Contexts:          contextSvc,
 		CloudIntegrations: cloudIntegrationSvc,
 		Policies:          policySvc,
 		Dependencies:      dependencySvc,
 		Audits:            auditSvc,
-		Versions:      tfCatalog,
-		Checkout:      git.Checkout{},
-		Lookup:        git.CommitLookup{},
-		Tokens:        tokenSource,
-		PublicBaseURL: public,
+		Versions:          tfCatalog,
+		Checkout:          git.Checkout{},
+		Lookup:            git.CommitLookup{},
+		Tokens:            tokenSource,
+		PublicBaseURL:     public,
 		Auth: &authapp.Service{
 			Store: identStore, GitHub: gh,
 			Now: now, NewID: newID, PublicBaseURL: public, ClientID: gh.ClientID,
@@ -633,4 +637,3 @@ func (c policyMergeabilityChecker) IsMergeable(ctx context.Context, ps project.S
 	res, err := c.policySvc.EvaluateForProject(ctx, ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags, rs.PlanJSON, userInfo, projInfo, approvals)
 	return err == nil && res.Allowed
 }
-

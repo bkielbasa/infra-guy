@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
+	"infra-guy/internal/domain/helmrelease"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 )
@@ -52,6 +54,13 @@ func (e Executor) runEngine(ctx context.Context, req Request) (Result, error) {
 	}
 	env := commandEnv(req.GitHubToken, homeDir, req.Env)
 	eng := strings.ToLower(strings.TrimSpace(req.Engine))
+	bins, berr := e.resolveToolBins(ctx, eng, req.EngineConfig.ToolVersion, streamer)
+	if berr != nil {
+		streamer.Logf("%s", berr.Error())
+		streamer.Close()
+		return Result{ExitCode: 1, Logs: redactText(streamer.String(), req.RedactSecrets)}, nil
+	}
+	ctx = withBins(ctx, bins)
 
 	var res Result
 	var err error
@@ -68,6 +77,9 @@ func (e Executor) runEngine(ctx context.Context, req Request) (Result, error) {
 	}
 	if err != nil {
 		return Result{}, err
+	}
+	if eng == project.EngineHelm && (req.Step == run.StepPlan || req.Step == run.StepApply) {
+		res = attachHelmHistory(ctx, streamer, dir, env, req.EngineConfig, res)
 	}
 	streamer.Close()
 	res.Logs = redactText(streamer.String(), req.RedactSecrets)
@@ -121,6 +133,9 @@ func installGalaxy(ctx context.Context, cfg project.EngineConfig, dir string, en
 }
 
 func runEnginePlan(ctx context.Context, eng string, req Request, dir string, env []string, streamer *logStreamer) (Result, error) {
+	if eng == project.EngineHelm && req.HelmRollback > 0 {
+		return planHelmRollback(req, streamer)
+	}
 	switch eng {
 	case project.EngineKubernetes:
 		return planKubernetes(ctx, req, dir, env, streamer)
@@ -322,6 +337,25 @@ func planHelmTemplate(ctx context.Context, cfg project.EngineConfig, dir string,
 
 func applyHelm(ctx context.Context, req Request, dir string, env []string, streamer *logStreamer) (Result, error) {
 	cfg := req.EngineConfig
+	if req.HelmRollback > 0 {
+		if strings.TrimSpace(cfg.ReleaseName) == "" {
+			streamer.Logf("release name is required")
+			return Result{ExitCode: 1}, nil
+		}
+		args := []string{"rollback", cfg.ReleaseName, strconv.Itoa(req.HelmRollback)}
+		if ns := strings.TrimSpace(cfg.HelmNamespace); ns != "" {
+			args = append(args, "--namespace", ns)
+		}
+		if cfg.Wait || cfg.Atomic {
+			args = append(args, "--wait")
+		}
+		args = append(args, "--timeout", "10m0s")
+		ran, err := runCmd(ctx, streamer, dir, env, "helm", args...)
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{ExitCode: ran.ExitCode}, nil
+	}
 	if strings.TrimSpace(cfg.ReleaseName) == "" {
 		streamer.Logf("release name is required")
 		return Result{ExitCode: 1}, nil
@@ -344,6 +378,74 @@ func applyHelm(ctx context.Context, req Request, dir string, env []string, strea
 		return Result{}, err
 	}
 	return Result{ExitCode: ran.ExitCode}, nil
+}
+
+func planHelmRollback(req Request, streamer *logStreamer) (Result, error) {
+	release := strings.TrimSpace(req.EngineConfig.ReleaseName)
+	if release == "" {
+		streamer.Logf("release name is required")
+		return Result{ExitCode: 1}, nil
+	}
+	detail := fmt.Sprintf("Helm rollback %s to revision %d", release, req.HelmRollback)
+	streamer.Logf("%s", detail)
+	resources := []engineResource{{
+		Address: "helm." + release, Kind: "HelmRelease", Name: release, Provider: "helm",
+		Action: "update", Manifest: detail,
+	}}
+	text, raw := formatEnginePlan(resources, detail)
+	return Result{ExitCode: 0, PlanText: text, PlanJSON: raw, PlanFile: raw}, nil
+}
+
+func attachHelmHistory(ctx context.Context, streamer *logStreamer, dir string, env []string, cfg project.EngineConfig, res Result) Result {
+	release := strings.TrimSpace(cfg.ReleaseName)
+	if release == "" {
+		return res
+	}
+	ns := strings.TrimSpace(cfg.HelmNamespace)
+	args := []string{"history", release, "-o", "json"}
+	if ns != "" {
+		args = append(args, "--namespace", ns)
+	}
+	ran, err := runCmd(ctx, streamer, dir, env, "helm", args...)
+	if err != nil || ran.ExitCode != 0 {
+		streamer.Logf("helm history is not available yet")
+		return res
+	}
+	res.HelmRelease = release
+	res.HelmNamespace = ns
+	res.HelmRevisions = parseHelmHistory(ran.Output)
+	return res
+}
+
+func parseHelmHistory(output string) []helmrelease.Revision {
+	start := strings.Index(output, "[")
+	end := strings.LastIndex(output, "]")
+	if start < 0 || end < start {
+		return nil
+	}
+	var raw []struct {
+		Revision    int    `json:"revision"`
+		Updated     string `json:"updated"`
+		Status      string `json:"status"`
+		Chart       string `json:"chart"`
+		AppVersion  string `json:"app_version"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal([]byte(output[start:end+1]), &raw); err != nil {
+		return nil
+	}
+	out := make([]helmrelease.Revision, 0, len(raw))
+	for _, item := range raw {
+		if item.Revision <= 0 {
+			continue
+		}
+		out = append(out, helmrelease.Revision{
+			Revision: item.Revision, Updated: item.Updated, Status: item.Status,
+			Chart: item.Chart, AppVersion: item.AppVersion, Description: item.Description,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Revision > out[j].Revision })
+	return out
 }
 
 func kubectlArgs(verb string, cfg project.EngineConfig) []string {
@@ -485,12 +587,18 @@ type cmdResult struct {
 	Output   string
 }
 
-func runCmd(ctx context.Context, streamer *logStreamer, dir string, env []string, bin string, args ...string) (cmdResult, error) {
-	if _, err := exec.LookPath(bin); err != nil {
-		streamer.Logf("%s not found on PATH", bin)
-		return cmdResult{ExitCode: 127, Output: bin + " not found on PATH"}, nil
+func runCmd(ctx context.Context, streamer *logStreamer, dir string, env []string, name string, args ...string) (cmdResult, error) {
+	bin := binsFrom(ctx).resolve(name)
+	if filepath.IsAbs(bin) {
+		if _, err := os.Stat(bin); err != nil {
+			streamer.Logf("%s not found at %s", name, bin)
+			return cmdResult{ExitCode: 127, Output: name + " not found"}, nil
+		}
+	} else if _, err := exec.LookPath(bin); err != nil {
+		streamer.Logf("%s not found on PATH", name)
+		return cmdResult{ExitCode: 127, Output: name + " not found on PATH"}, nil
 	}
-	streamer.Logf("Running: %s %s", bin, strings.Join(args, " "))
+	streamer.Logf("Running: %s %s", name, strings.Join(args, " "))
 	cmd := commandBin(ctx, bin, dir, env, args...)
 	var buf bytes.Buffer
 	w := io.MultiWriter(&buf, streamer)

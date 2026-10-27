@@ -110,6 +110,32 @@ func TestCommandEnvDropsPlatformSecrets(t *testing.T) {
 	}
 }
 
+func TestCommandEnvExpandsCredentialPaths(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	entries := commandEnv("", home, map[string]string{
+		"KUBECONFIG":                  ".kube/config",
+		"ANSIBLE_PRIVATE_KEY_FILE":    ".ssh/id_rsa",
+		"ANSIBLE_VAULT_PASSWORD_FILE": ".ansible/vault-password",
+		"KEEP_ABS":                    "/already/absolute",
+	})
+	got := map[string]string{}
+	for _, kv := range entries {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok {
+			got[k] = v
+		}
+	}
+	if got["KUBECONFIG"] != filepath.Join(home, ".kube/config") {
+		t.Fatalf("KUBECONFIG = %q", got["KUBECONFIG"])
+	}
+	if got["ANSIBLE_PRIVATE_KEY_FILE"] != filepath.Join(home, ".ssh/id_rsa") {
+		t.Fatalf("ANSIBLE_PRIVATE_KEY_FILE = %q", got["ANSIBLE_PRIVATE_KEY_FILE"])
+	}
+	if got["ANSIBLE_VAULT_PASSWORD_FILE"] != filepath.Join(home, ".ansible/vault-password") {
+		t.Fatalf("ANSIBLE_VAULT_PASSWORD_FILE = %q", got["ANSIBLE_VAULT_PASSWORD_FILE"])
+	}
+}
+
 func TestCommandInterruptsBeforeKill(t *testing.T) {
 	cmd := command(context.Background(), t.TempDir(), nil, "version")
 	if cmd.Cancel == nil || cmd.WaitDelay != 15*time.Second {
@@ -425,4 +451,3 @@ func TestExecutorStreamsLogsViaOnLog(t *testing.T) {
 		}
 	}
 }
-

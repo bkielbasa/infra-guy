@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"infra-guy/internal/domain/helmrelease"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/tfcontext"
@@ -26,6 +27,7 @@ const logFlushInterval = 200 * time.Millisecond
 
 type Executor struct {
 	Binary BinaryLocator
+	Tools  *ToolInstaller
 }
 
 type Request struct {
@@ -33,6 +35,7 @@ type Request struct {
 	Engine                                                                                string
 	EngineConfig                                                                          project.EngineConfig
 	TerraformVersion                                                                      string
+	HelmRollback                                                                          int
 	Step                                                                                  run.StepName
 	Destroy                                                                               bool
 	PlanFile                                                                              []byte
@@ -47,6 +50,9 @@ type Result struct {
 	Logs, PlanText, Version string
 	PlanFile                []byte
 	PlanJSON                []byte
+	HelmRelease             string
+	HelmNamespace           string
+	HelmRevisions           []helmrelease.Revision
 }
 
 var initArgs = []string{"init", "-input=false", "-no-color"}
@@ -304,8 +310,25 @@ func commandEnv(githubToken, homeDir string, extra map[string]string) []string {
 	}
 	if homeDir != "" {
 		env = append(env, "HOME="+homeDir)
+		env = expandCredentialPaths(homeDir, env)
 	}
 	return append(env, "TF_IN_AUTOMATION=1", "TF_INPUT=0")
+}
+
+func expandCredentialPaths(home string, env []string) []string {
+	keys := map[string]bool{
+		"KUBECONFIG":                  true,
+		"ANSIBLE_PRIVATE_KEY_FILE":    true,
+		"ANSIBLE_VAULT_PASSWORD_FILE": true,
+	}
+	for i, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || !keys[k] || v == "" || filepath.IsAbs(v) || strings.Contains(v, "..") {
+			continue
+		}
+		env[i] = k + "=" + filepath.Join(home, v)
+	}
+	return env
 }
 
 func backendFile(baseURL, projectID, runID, token string) []byte {
@@ -504,4 +527,3 @@ func (s *logStreamer) String() string {
 	defer s.mu.Unlock()
 	return s.buf.String()
 }
-

@@ -16,10 +16,41 @@ type ID string
 type EntryKind string
 
 const (
-	KindPlainEnv   EntryKind = "plain_env"
-	KindSecretEnv  EntryKind = "secret_env"
-	KindSecretFile EntryKind = "secret_file"
+	KindPlainEnv             EntryKind = "plain_env"
+	KindSecretEnv            EntryKind = "secret_env"
+	KindSecretFile           EntryKind = "secret_file"
+	KindKubeconfig           EntryKind = "kubeconfig"
+	KindSSHPrivateKey        EntryKind = "ssh_private_key"
+	KindAnsibleVaultPassword EntryKind = "ansible_vault_password"
 )
+
+func (k EntryKind) IsSecret() bool {
+	switch k {
+	case KindSecretEnv, KindSecretFile, KindKubeconfig, KindSSHPrivateKey, KindAnsibleVaultPassword:
+		return true
+	default:
+		return false
+	}
+}
+
+func KindLabel(k EntryKind) string {
+	switch k {
+	case KindPlainEnv:
+		return "Environment variable"
+	case KindSecretEnv:
+		return "Secret environment variable"
+	case KindSecretFile:
+		return "Secret file"
+	case KindKubeconfig:
+		return "Kubeconfig"
+	case KindSSHPrivateKey:
+		return "SSH private key"
+	case KindAnsibleVaultPassword:
+		return "Ansible vault password"
+	default:
+		return string(k)
+	}
+}
 
 var (
 	ErrInvalidEnvKey   = errors.New("invalid or reserved environment variable name")
@@ -185,6 +216,12 @@ func NewEntry(id string, kind EntryKind, key, value string, now time.Time) (Entr
 	case KindSecretFile:
 		normKey, err = ValidateFilePath(key)
 		secret = true
+	case KindKubeconfig:
+		normKey, secret = ".kube/config", true
+	case KindSSHPrivateKey:
+		normKey, secret = ".ssh/id_rsa", true
+	case KindAnsibleVaultPassword:
+		normKey, secret = ".ansible/vault-password", true
 	default:
 		return Entry{}, ErrInvalidKind
 	}
@@ -210,6 +247,15 @@ func Resolve(contexts []*Context) (map[string]string, map[string][]byte) {
 				env[e.Key] = e.Value
 			case KindSecretFile:
 				files[e.Key] = []byte(e.Value)
+			case KindKubeconfig:
+				files[e.Key] = []byte(e.Value)
+				env["KUBECONFIG"] = e.Key
+			case KindSSHPrivateKey:
+				files[e.Key] = []byte(e.Value)
+				env["ANSIBLE_PRIVATE_KEY_FILE"] = e.Key
+			case KindAnsibleVaultPassword:
+				files[e.Key] = []byte(e.Value)
+				env["ANSIBLE_VAULT_PASSWORD_FILE"] = e.Key
 			}
 		}
 	}

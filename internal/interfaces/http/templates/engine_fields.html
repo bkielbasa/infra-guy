@@ -9,7 +9,12 @@
       <option value="ansible"{{if eq .Engine "ansible"}} selected{{end}}>Ansible</option>
       <option value="helm"{{if eq .Engine "helm"}} selected{{end}}>Helm</option>
     </select>
-    <span class="field-hint">Terraform uses the version above. Kubernetes, Ansible, and Helm use the tools on the runner and the settings for that engine.</span>
+    <span class="field-hint">Terraform uses the version above. Kubernetes, Ansible, and Helm use a pinned tool version when one is set, and the runner PATH otherwise.</span>
+  </div>
+  <div class="field" id="tool-version-field"{{if or (eq .Engine "terraform") (eq .Engine "")}} hidden{{end}}>
+    <label for="tool-version">Tool version</label>
+    <input id="tool-version" type="text" name="tool_version" value="{{.ToolVersion}}" placeholder="1.31.2">
+    <span class="field-hint">kubectl, Helm, or ansible-core. Example: <code>1.31.2</code>. Leave empty to use whatever is on the runner PATH.</span>
   </div>
 
   <div data-engine="kubernetes"{{if not .IsKubernetes}} hidden{{end}}>
@@ -96,6 +101,11 @@
     document.querySelectorAll("[data-engine]").forEach(function (el) {
       el.hidden = el.getAttribute("data-engine") !== v;
     });
+    var toolField = document.getElementById("tool-version-field");
+    var toolInput = document.getElementById("tool-version");
+    var showTool = v && v !== "terraform";
+    if (toolField) toolField.hidden = !showTool;
+    if (toolInput) toolInput.disabled = !showTool;
   }
   sel.addEventListener("change", sync);
   sync();

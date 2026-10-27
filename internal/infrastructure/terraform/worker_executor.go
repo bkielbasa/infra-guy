@@ -15,8 +15,8 @@ func (e WorkerExecutor) Run(ctx context.Context, req worker.Request) (worker.Res
 		WorkDir: req.WorkDir, InternalBaseURL: req.InternalBaseURL, ProjectID: req.ProjectID, RunID: req.RunID,
 		StateToken: req.StateToken, WorkingDirectory: req.WorkingDirectory, GitHubToken: req.GitHubToken,
 		Engine: req.Engine, EngineConfig: req.EngineConfig,
-		TerraformVersion: req.TerraformVersion,
-		Step:             req.Step, Destroy: req.Destroy, PlanFile: req.PlanFile,
+		TerraformVersion: req.TerraformVersion, HelmRollback: req.HelmRollback,
+		Step: req.Step, Destroy: req.Destroy, PlanFile: req.PlanFile,
 		Env:           req.Env,
 		Files:         req.Files,
 		RedactSecrets: req.RedactSecrets,
@@ -25,5 +25,6 @@ func (e WorkerExecutor) Run(ctx context.Context, req worker.Request) (worker.Res
 	return worker.Result{
 		ExitCode: res.ExitCode, Logs: res.Logs, PlanText: res.PlanText,
 		Version: res.Version, PlanFile: res.PlanFile, PlanJSON: res.PlanJSON,
+		HelmRelease: res.HelmRelease, HelmNamespace: res.HelmNamespace, HelmRevisions: res.HelmRevisions,
 	}, err
 }

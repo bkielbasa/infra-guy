@@ -26,6 +26,7 @@ import (
 	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/domain/cloudintegration"
 	"infra-guy/internal/domain/dependency"
+	"infra-guy/internal/domain/helmrelease"
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
@@ -143,6 +144,10 @@ func (s uiTokenSource) InstallationToken(ctx context.Context, tenantID string) (
 }
 
 func uiHandler(t *testing.T, projects *memProjects, runs *memRuns, states *memStates, login string) http.Handler {
+	return uiServer(t, projects, runs, states, login, nil)
+}
+
+func uiServer(t *testing.T, projects *memProjects, runs *memRuns, states *memStates, login string, helm helmrelease.Repository) http.Handler {
 	t.Helper()
 	if login == "" {
 		login = "operator"
@@ -154,7 +159,7 @@ func uiHandler(t *testing.T, projects *memProjects, runs *memRuns, states *memSt
 		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
 	}
 	return NewServer(ServerConfig{
-		Projects: proj, Runs: runsSvc, States: st,
+		Projects: proj, Runs: runsSvc, States: st, HelmReleases: helm,
 		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
 		Tokens:        uiTokenSource{store: store},
 		PublicBaseURL: "http://localhost:8080",
@@ -1207,6 +1212,9 @@ func TestProjectTerraformVersionAndContextsUI(t *testing.T) {
 	}
 	if strings.Contains(body, "super-secret-value") || strings.Contains(body, "kube-secret-content") {
 		t.Fatalf("context page leaked secret plaintext: %s", body)
+	}
+	if !strings.Contains(body, `value="kubeconfig"`) || !strings.Contains(body, `value="ssh_private_key"`) || !strings.Contains(body, `value="ansible_vault_password"`) {
+		t.Fatalf("context page missing credential kinds: %s", body)
 	}
 
 	// 4. Create project with terraform_version=1.10.5 and context_ids=ctx-1
@@ -2319,7 +2327,7 @@ func TestEngineSettingsAndStateRollback(t *testing.T) {
 		t.Fatalf("invalid helm release = %d, want 400: %s", rr.Code, rr.Body.String())
 	}
 
-	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=charts/app&engine=helm&release_name=payments&helm_namespace=prod&chart=./chart&atomic=on&wait=on"))
+	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=charts/app&engine=helm&release_name=payments&helm_namespace=prod&chart=./chart&atomic=on&wait=on&tool_version=v3.14.2"))
 	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("update engine = %d: %s", rr.Code, rr.Body.String())
 	}
@@ -2327,8 +2335,19 @@ func TestEngineSettingsAndStateRollback(t *testing.T) {
 	if ps.Engine != project.EngineHelm || ps.EngineConfig.ReleaseName != "payments" || ps.EngineConfig.HelmNamespace != "prod" || !ps.EngineConfig.Atomic || !ps.EngineConfig.Wait {
 		t.Fatalf("engine config = %#v", ps.EngineConfig)
 	}
+	if ps.EngineConfig.ToolVersion != "3.14.2" {
+		t.Fatalf("tool version = %q", ps.EngineConfig.ToolVersion)
+	}
 	if ps.WorkingDirectory != "charts/app" {
 		t.Fatalf("workdir = %q", ps.WorkingDirectory)
+	}
+	rr = getUI(t, h, "/projects/p1")
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "/tabs/releases") {
+		t.Fatalf("helm workspace missing releases tab: %s", rr.Body.String())
+	}
+	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=charts/app&engine=helm&release_name=payments&chart=./chart&tool_version=1.2"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad tool version = %d, want 400: %s", rr.Code, rr.Body.String())
 	}
 
 	first := []byte(`{"version":4,"serial":1,"outputs":{},"resources":[]}`)
@@ -2355,6 +2374,61 @@ func TestEngineSettingsAndStateRollback(t *testing.T) {
 	meta, err := states.Load(context.Background(), "p1")
 	if err != nil || meta == nil || meta.Snapshot().Serial == nil || *meta.Snapshot().Serial != 3 {
 		t.Fatalf("restored serial = %#v err=%v", meta, err)
+	}
+}
+
+type memHelm struct {
+	release   string
+	namespace string
+	revisions []helmrelease.Revision
+}
+
+func (m *memHelm) Replace(ctx context.Context, projectID, release, namespace string, revisions []helmrelease.Revision) error {
+	m.release, m.namespace, m.revisions = release, namespace, revisions
+	return nil
+}
+
+func (m *memHelm) List(ctx context.Context, projectID string) (string, string, []helmrelease.Revision, error) {
+	return m.release, m.namespace, m.revisions, nil
+}
+
+func TestHelmReleaseRollbackUI(t *testing.T) {
+	p := listProject(t)
+	if err := p.SetEngine(project.EngineHelm, project.EngineConfig{ReleaseName: "payments", HelmNamespace: "prod", Chart: "./chart"}); err != nil {
+		t.Fatal(err)
+	}
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+	history := &memHelm{
+		release: "payments", namespace: "prod",
+		revisions: []helmrelease.Revision{
+			{Revision: 2, Status: "deployed", Chart: "app-1.1.0", Description: "upgrade"},
+			{Revision: 1, Status: "superseded", Chart: "app-1.0.0", Description: "install"},
+		},
+	}
+	h := uiServer(t, projects, runs, states, "", history)
+
+	rr := getUI(t, h, "/projects/p1/tabs/releases")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || !strings.Contains(body, "#2") || !strings.Contains(body, "#1") || !strings.Contains(body, "Roll back") {
+		t.Fatalf("releases: %d %s", rr.Code, body)
+	}
+	rr = postUI(t, h, "/projects/p1/helm/rollback", strings.NewReader("revision=9"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown revision = %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = postUI(t, h, "/projects/p1/helm/rollback", strings.NewReader("revision=1"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	opened := runs.items["new-r"]
+	if opened == nil {
+		t.Fatal("rollback run was not opened")
+	}
+	rs := opened.Snapshot()
+	if rs.HelmRollbackRevision != 1 || !rs.AutoApprove || !strings.Contains(rs.Message, "revision 1") {
+		t.Fatalf("opened run = %#v", rs)
 	}
 }
 
