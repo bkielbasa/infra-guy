@@ -198,6 +198,121 @@ func TestQueueClaimBusyDelayReap(t *testing.T) {
 	}
 }
 
+func TestQueueClaimSkipsBusyWorkspace(t *testing.T) {
+	ctx := context.Background()
+	pool := openTestPool(t, ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+
+	clearJobs(t, ctx, pool)
+
+	projects := NewProjectRepo(pool)
+	runs := NewRunRepo(pool)
+	q := NewQueue(pool)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	suffix := fmt.Sprintf("skip-%d", time.Now().UnixNano())
+
+	busyProject := project.ID("proj-busy-" + suffix)
+	freeProject := project.ID("proj-free-" + suffix)
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, id := range []project.ID{busyProject, freeProject} {
+		p, err := project.New(id, "ws-"+string(id), repo, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		placeTestProject(t, ctx, pool, p, "ten-"+string(id), int64(i+1))
+		if err := projects.Save(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	activeID := run.ID("run-active-" + suffix)
+	active, err := run.Open(run.OpenInput{
+		ID: activeID, ProjectID: run.ProjectID(busyProject),
+		Trigger: run.TriggerPush, SHA: "sha-active-" + suffix, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserted, err := runs.InsertIfAbsent(ctx, active)
+	if err != nil || !inserted {
+		t.Fatalf("active insert: inserted=%v err=%v", inserted, err)
+	}
+	if err := q.Enqueue(ctx, activeID, run.StepInit); err != nil {
+		t.Fatal(err)
+	}
+	initJob, err := q.Claim(ctx, "worker-1", 5*time.Second)
+	if err != nil || initJob == nil || initJob.RunID != activeID {
+		t.Fatalf("claim init: job=%#v err=%v", initJob, err)
+	}
+
+	blockerID := run.ID("run-blocker-" + suffix)
+	blocker, err := run.Open(run.OpenInput{
+		ID: blockerID, ProjectID: run.ProjectID(busyProject),
+		Trigger: run.TriggerPush, SHA: "sha-blocker-" + suffix, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserted, err = runs.InsertIfAbsent(ctx, blocker)
+	if err != nil || !inserted {
+		t.Fatalf("blocker insert: inserted=%v err=%v", inserted, err)
+	}
+	if err := q.Enqueue(ctx, blockerID, run.StepInit); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Enqueue(ctx, activeID, run.StepApply); err != nil {
+		t.Fatal(err)
+	}
+
+	freeID := run.ID("run-free-" + suffix)
+	free, err := run.Open(run.OpenInput{
+		ID: freeID, ProjectID: run.ProjectID(freeProject),
+		Trigger: run.TriggerManual, SHA: "sha-free-" + suffix, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserted, err = runs.InsertIfAbsent(ctx, free)
+	if err != nil || !inserted {
+		t.Fatalf("free insert: inserted=%v err=%v", inserted, err)
+	}
+	if err := q.Enqueue(ctx, freeID, run.StepInit); err != nil {
+		t.Fatal(err)
+	}
+
+	applyJob, err := q.Claim(ctx, "worker-1", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applyJob == nil || applyJob.RunID != activeID || applyJob.Step != run.StepApply {
+		t.Fatalf("claim = %#v, want apply for the active run", applyJob)
+	}
+
+	var blockerAvailable time.Time
+	if err := pool.QueryRow(ctx, `
+		SELECT available_at FROM jobs WHERE run_id = $1 AND step_name = $2`,
+		blockerID, run.StepInit,
+	).Scan(&blockerAvailable); err != nil {
+		t.Fatal(err)
+	}
+	if remain := time.Until(blockerAvailable); remain < 4*time.Second {
+		t.Fatalf("blocker available in %s, want at least 4s", remain)
+	}
+
+	next, err := q.Claim(ctx, "worker-2", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == nil || next.RunID != freeID || next.Step != run.StepInit {
+		t.Fatalf("claim = %#v, want init for the free workspace", next)
+	}
+}
+
 func TestQueueHeartbeatAndComplete(t *testing.T) {
 	ctx := context.Background()
 	pool := openTestPool(t, ctx)

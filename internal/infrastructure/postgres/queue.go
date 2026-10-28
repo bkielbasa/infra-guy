@@ -29,9 +29,29 @@ func (q *Queue) Enqueue(ctx context.Context, id run.ID, step run.StepName) error
 }
 
 func (q *Queue) Claim(ctx context.Context, workerID string, retryDelay time.Duration) (*run.Job, error) {
+	// A busy or locked workspace used to stop the scan on its oldest job.
+	// Keep walking so that workspace's own next step, and every other
+	// workspace, can still be claimed in this call.
+	skipped := map[int64]struct{}{}
+	for {
+		job, skippedID, err := q.claimOne(ctx, workerID, retryDelay)
+		if err != nil || job != nil {
+			return job, err
+		}
+		if skippedID == 0 {
+			return nil, nil
+		}
+		if _, seen := skipped[skippedID]; seen {
+			return nil, nil
+		}
+		skipped[skippedID] = struct{}{}
+	}
+}
+
+func (q *Queue) claimOne(ctx context.Context, workerID string, retryDelay time.Duration) (*run.Job, int64, error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -44,52 +64,52 @@ func (q *Queue) Claim(ctx context.Context, workerID string, retryDelay time.Dura
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1`).Scan(&job.ID, &job.RunID, &job.Step, &job.Attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var projectID project.ID
 	if err := tx.QueryRow(ctx, `SELECT project_id FROM runs WHERE id = $1`, job.RunID).Scan(&projectID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	p, err := scanProject(tx.QueryRow(ctx, `SELECT `+projectColumns+` FROM projects WHERE id = $1 FOR UPDATE`, projectID))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	claimErr := p.ClaimActiveRun(string(job.RunID))
 	if errors.Is(claimErr, project.ErrLocked) || errors.Is(claimErr, project.ErrBusy) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE jobs SET available_at = now() + make_interval(secs => $2) WHERE id = $1`, job.ID, retryDelay.Seconds()); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if err := tx.Commit(ctx); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		return nil, nil
+		return nil, job.ID, nil
 	}
 	if claimErr != nil {
-		return nil, claimErr
+		return nil, 0, claimErr
 	}
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE jobs
 		SET status = 'running', locked_at = now(), locked_by = $2, attempts = attempts + 1
 		WHERE id = $1`, job.ID, workerID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE projects SET active_run_id = $1 WHERE id = $2`,
 		p.Snapshot().ActiveRunID, projectID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	job.Attempts++
-	return &job, nil
+	return &job, 0, nil
 }
 
 func (q *Queue) Get(ctx context.Context, jobID int64) (*run.Job, error) {
