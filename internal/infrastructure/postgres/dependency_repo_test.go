@@ -31,6 +31,7 @@ func TestDependencyRepoCRUDAndMappings(t *testing.T) {
 	repo, _ := project.ParseSourceRepo("bklebasa/infra")
 	upstream, _ := project.New(project.ID("proj-up-"+suffix), "network", repo, now)
 	_ = upstream.SetPlacement(tenantID, 100)
+	attachTestFolder(t, ctx, pool, upstream)
 	upstream.SetStateToken("tok-up")
 	if err := projects.Save(ctx, upstream); err != nil {
 		t.Fatal(err)
@@ -38,6 +39,7 @@ func TestDependencyRepoCRUDAndMappings(t *testing.T) {
 
 	downstream, _ := project.New(project.ID("proj-down-"+suffix), "app", repo, now)
 	_ = downstream.SetPlacement(tenantID, 101)
+	attachTestFolder(t, ctx, pool, downstream)
 	downstream.SetStateToken("tok-down")
 	if err := projects.Save(ctx, downstream); err != nil {
 		t.Fatal(err)

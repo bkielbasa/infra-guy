@@ -53,7 +53,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	if err := p.SetTerraformVersion("1.10.5"); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.SetTags(map[string]string{"env": "prod", "team": "core"}); err != nil {
+	if err := p.SetTagOverride(map[string]string{"env": "prod", "team": "core"}); err != nil {
 		t.Fatal(err)
 	}
 	p.SetAutoApprove(true)
@@ -69,6 +69,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 	if err := p.SetPlacement("ten-"+suffix, 99); err != nil {
 		t.Fatal(err)
 	}
+	attachTestFolder(t, ctx, pool, p)
 	if err := projects.Save(ctx, p); err != nil {
 		t.Fatal(err)
 	}
@@ -465,6 +466,17 @@ func placeTestProject(t *testing.T, ctx context.Context, pool *pgxpool.Pool, p *
 	if err := p.SetPlacement(tenantID, repoID); err != nil {
 		t.Fatal(err)
 	}
+	attachTestFolder(t, ctx, pool, p)
+}
+
+func attachTestFolder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, p *project.Project) {
+	t.Helper()
+	tenantID := p.Snapshot().TenantID
+	root, err := NewFolderRepo(pool).EnsureRoot(ctx, tenantID, "root-"+tenantID, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetFolderID(root.ID)
 }
 
 func TestIdentityStore(t *testing.T) {
@@ -686,6 +698,7 @@ func TestContextRepoCRUDAndEncryption(t *testing.T) {
 	srcRepo, _ := project.ParseSourceRepo("bklebasa/infra")
 	p, _ := project.New(project.ID("proj-ctx-"+suffix), "infra", srcRepo, now)
 	_ = p.SetPlacement(tenantID, 100)
+	attachTestFolder(t, ctx, pool, p)
 	p.SetStateToken("tok")
 	if err := projects.Save(ctx, p); err != nil {
 		t.Fatal(err)
@@ -950,4 +963,3 @@ func TestSecurityEnvelopeEncryptionTokenHashingAndKeyRotation(t *testing.T) {
 		t.Fatalf("expected rotated state key ID k2, got %q", kid)
 	}
 }
-

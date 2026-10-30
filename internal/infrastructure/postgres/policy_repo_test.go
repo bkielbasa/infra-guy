@@ -78,23 +78,32 @@ func TestPolicyRepoCRUDAndProjectApprovalPolicy(t *testing.T) {
 	repo, _ := project.ParseSourceRepo("bklebasa/infra")
 	p, _ := project.New(project.ID("proj-pol-"+suffix), "infra", repo, now)
 	_ = p.SetPlacement(tenantID, 100)
+	attachTestFolder(t, ctx, pool, p)
 	p.SetStateToken("tok")
-	p.ChangeApprovalPolicy(string(pol.ID()))
+	p.SetPolicyIDs([]string{string(pol.ID())})
 	if err := projects.Save(ctx, p); err != nil {
 		t.Fatal(err)
 	}
 
 	gotProj, err := projects.Get(ctx, p.Snapshot().ID)
-	if err != nil || gotProj == nil || gotProj.ApprovalPolicyID() != string(pol.ID()) {
-		t.Fatalf("expected project ApprovalPolicyID=%q, got %#v (err=%v)", pol.ID(), gotProj, err)
+	ids := []string{}
+	if gotProj != nil {
+		ids = gotProj.Snapshot().PolicyIDs
+	}
+	if err != nil || gotProj == nil || len(ids) != 1 || ids[0] != string(pol.ID()) {
+		t.Fatalf("expected project PolicyIDs=%q, got %#v (err=%v)", pol.ID(), ids, err)
 	}
 
-	// Deleting the policy sets approval_policy_id to NULL (read back as "")
+	// Deleting the policy removes the project_policies row.
 	if err := policies.Delete(ctx, pol.ID()); err != nil {
 		t.Fatal(err)
 	}
 	gotProjAfter, err := projects.Get(ctx, p.Snapshot().ID)
-	if err != nil || gotProjAfter == nil || gotProjAfter.ApprovalPolicyID() != "" {
-		t.Fatalf("expected empty ApprovalPolicyID after policy delete, got %q (err=%v)", gotProjAfter.ApprovalPolicyID(), err)
+	var afterIDs []string
+	if gotProjAfter != nil {
+		afterIDs = gotProjAfter.Snapshot().PolicyIDs
+	}
+	if err != nil || gotProjAfter == nil || len(afterIDs) != 0 {
+		t.Fatalf("expected no PolicyIDs after policy delete, got %#v (err=%v)", afterIDs, err)
 	}
 }
