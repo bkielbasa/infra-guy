@@ -131,6 +131,11 @@ type ProjectLister interface {
 	List(ctx context.Context, tenantID string) ([]*project.Project, error)
 }
 
+// ProjectEffective loads folder policy and tag inheritance for a project snapshot.
+type ProjectEffective interface {
+	Effective(ctx context.Context, p project.Snapshot) (project.Snapshot, error)
+}
+
 type BranchTipper interface {
 	BranchTip(ctx context.Context, cloneURL, token, branch string) (string, error)
 }
@@ -152,6 +157,7 @@ type Worker struct {
 	HelmReleases      helmrelease.Repository
 	Dependencies      DependencyResolver
 	CloudIntegrations CloudCredentialResolver
+	ProjectEffective  ProjectEffective
 	Cache             WorkspaceCache
 	WorkDir           string
 	InternalBaseURL   string
@@ -382,6 +388,18 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 			telemetry.Attr("project.id", string(ps.ID)),
 		)
 		homeDir := filepath.Join(dest, ".home")
+		if w.ProjectEffective != nil {
+			effective, eerr := w.ProjectEffective.Effective(credCtx, ps)
+			if eerr != nil {
+				credSpan.RecordError(eerr)
+				credSpan.End()
+				if ferr := w.Service.Fail(ctx, job.RunID, job.Step, eerr.Error()); ferr != nil {
+					return ferr
+				}
+				return w.completeAndCleanup(ctx, job)
+			}
+			ps = effective
+		}
 		creds, cerr := w.CloudIntegrations.ResolveCredentialsForRun(credCtx, ps, string(job.RunID), rs.Branch, rs.SHA, string(rs.Trigger), homeDir)
 		if cerr != nil {
 			credSpan.RecordError(cerr)

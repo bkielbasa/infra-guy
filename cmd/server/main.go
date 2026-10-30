@@ -25,6 +25,7 @@ import (
 	authapp "infra-guy/internal/application/auth"
 	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	dependencyapp "infra-guy/internal/application/dependency"
+	folderapp "infra-guy/internal/application/folder"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
@@ -196,6 +197,11 @@ func main() {
 
 	stateSvc := &stateapp.Service{Projects: projects, States: states, Now: now}
 	projectSvc := &projectapp.Service{Projects: projects, States: stateSvc, Now: now, NewID: newID}
+	folderSvc := &folderapp.Service{
+		Folders: postgres.NewFolderRepo(pool),
+		Now:     now,
+		NewID:   newID,
+	}
 
 	helmReleases := postgres.NewHelmReleaseRepo(pool)
 	dependencyRepo := postgres.NewDependencyRepo(pool)
@@ -218,7 +224,7 @@ func main() {
 		NewID:          newID,
 		PublicBaseURL:  public,
 		StatusReporter: newStatusReporter(tokenSource, gh),
-		Mergeability:   newMergeabilityChecker(policySvc),
+		Mergeability:   newMergeabilityChecker(policySvc, folderSvc),
 		OnTerminal: func(ctx context.Context, p *project.Project, r *run.Run) {
 			ps := p.Snapshot()
 			rs := r.Snapshot()
@@ -238,6 +244,7 @@ func main() {
 		Contexts:          contextSvc,
 		HelmReleases:      helmReleases,
 		CloudIntegrations: cloudIntegrationSvc,
+		ProjectEffective:  folderSvc,
 		Dependencies:      dependencySvc,
 		Cache:             wsCache,
 		WorkDir:           workDir, InternalBaseURL: internalBaseURL(addr), Now: now,
@@ -585,11 +592,12 @@ func (r githubStatusReporter) ReportCommitStatus(ctx context.Context, ps project
 }
 
 type policyMergeabilityChecker struct {
-	policySvc *policyapp.Service
+	policySvc        *policyapp.Service
+	projectEffective worker.ProjectEffective
 }
 
-func newMergeabilityChecker(policySvc *policyapp.Service) runapp.MergeabilityChecker {
-	return policyMergeabilityChecker{policySvc: policySvc}
+func newMergeabilityChecker(policySvc *policyapp.Service, projectEffective worker.ProjectEffective) runapp.MergeabilityChecker {
+	return policyMergeabilityChecker{policySvc: policySvc, projectEffective: projectEffective}
 }
 
 func (c policyMergeabilityChecker) IsMergeable(ctx context.Context, ps project.Snapshot, rs run.Snapshot) bool {
@@ -599,7 +607,25 @@ func (c policyMergeabilityChecker) IsMergeable(ctx context.Context, ps project.S
 		}
 		return ps.AutoApprove || len(rs.Approvals) > 0
 	}
-	resolved, err := c.policySvc.ResolveForProject(ctx, ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags)
+	explicitIDs := make([]policy.ID, 0, len(ps.PolicyIDs))
+	projectTags := ps.Tags
+	if c.projectEffective != nil {
+		resolvedPS, err := c.projectEffective.Effective(ctx, ps)
+		if err != nil {
+			return false
+		}
+		ps = resolvedPS
+		projectTags = ps.EffectiveTags
+		explicitIDs = make([]policy.ID, 0, len(ps.EffectivePolicies))
+		for _, ep := range ps.EffectivePolicies {
+			explicitIDs = append(explicitIDs, policy.ID(ep.PolicyID))
+		}
+	} else {
+		for _, id := range ps.PolicyIDs {
+			explicitIDs = append(explicitIDs, policy.ID(id))
+		}
+	}
+	resolved, err := c.policySvc.ResolveForProject(ctx, ps.TenantID, explicitIDs, projectTags)
 	if err != nil {
 		return false
 	}
@@ -632,8 +658,8 @@ func (c policyMergeabilityChecker) IsMergeable(ctx context.Context, ps project.S
 		WorkingDirectory: ps.WorkingDirectory,
 		TerraformVersion: ps.TerraformVersion,
 		AutoApprove:      ps.AutoApprove,
-		Tags:             ps.Tags,
+		Tags:             projectTags,
 	}
-	res, err := c.policySvc.EvaluateForProject(ctx, ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags, rs.PlanJSON, userInfo, projInfo, approvals)
+	res, err := c.policySvc.EvaluateForProject(ctx, ps.TenantID, explicitIDs, projectTags, rs.PlanJSON, userInfo, projInfo, approvals)
 	return err == nil && res.Allowed
 }

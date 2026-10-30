@@ -421,7 +421,7 @@ func (s *Service) ResolveCredentialsForRun(ctx context.Context, p project.Snapsh
 	if s == nil || s.Integrations == nil {
 		return res, nil
 	}
-	resolved, err := s.ResolveForProject(ctx, p.TenantID, p.ID, p.Tags)
+	resolved, err := s.ResolveForProject(ctx, p.TenantID, p.ID, p.EffectiveTags)
 	if err != nil {
 		return res, err
 	}

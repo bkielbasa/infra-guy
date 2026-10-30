@@ -369,19 +369,23 @@ func (s *Service) EvaluateForRun(ctx context.Context, tenantID string, policyID 
 }
 
 // ResolveForProject returns all policies that apply to a workspace:
-//  1. The explicit ApprovalPolicyID assigned to the workspace (if any)
+//  1. The explicit policy ids, in order, skipping blanks and duplicates
 //  2. Any tenant policies whose tags match the workspace tags (tag-bound or global scope),
 //     deduplicated by policy ID and ordered deterministically.
-func (s *Service) ResolveForProject(ctx context.Context, tenantID string, explicitPolicyID policy.ID, projectTags map[string]string) ([]ResolvedPolicy, error) {
+func (s *Service) ResolveForProject(ctx context.Context, tenantID string, explicitIDs []policy.ID, projectTags map[string]string) ([]ResolvedPolicy, error) {
 	seen := make(map[policy.ID]bool)
 	var out []ResolvedPolicy
 
-	explicitID := policy.ID(strings.TrimSpace(string(explicitPolicyID)))
-	if explicitID != "" {
+	for _, rawID := range explicitIDs {
+		explicitID := policy.ID(strings.TrimSpace(string(rawID)))
+		if explicitID == "" || seen[explicitID] {
+			continue
+		}
 		pol, err := s.Get(ctx, tenantID, explicitID)
 		if err != nil {
 			return nil, err
 		}
+		seen[explicitID] = true
 		seen[pol.ID()] = true
 		out = append(out, ResolvedPolicy{
 			Policy: pol,
@@ -423,8 +427,8 @@ func (s *Service) ResolveForProject(ctx context.Context, tenantID string, explic
 // EvaluateForProject evaluates all policies applicable to a workspace (explicit + tag-bound + global).
 // Every applicable policy must allow the run for the aggregate decision to be Allowed.
 // Any deny across any policy results in StatusDenied with all deny messages aggregated.
-func (s *Service) EvaluateForProject(ctx context.Context, tenantID string, explicitPolicyID policy.ID, projectTags map[string]string, planJSON []byte, u UserInfo, p ProjectInfo, approvals ...[]ApprovalInfo) (*ApprovalDecision, error) {
-	resolved, err := s.ResolveForProject(ctx, tenantID, explicitPolicyID, projectTags)
+func (s *Service) EvaluateForProject(ctx context.Context, tenantID string, explicitIDs []policy.ID, projectTags map[string]string, planJSON []byte, u UserInfo, p ProjectInfo, approvals ...[]ApprovalInfo) (*ApprovalDecision, error) {
+	resolved, err := s.ResolveForProject(ctx, tenantID, explicitIDs, projectTags)
 	if err != nil {
 		return nil, err
 	}

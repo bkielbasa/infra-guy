@@ -179,10 +179,10 @@ func TestResolveCredentialsForRun_AWSOIDCAndTagMatching(t *testing.T) {
 	}
 
 	projSnap := project.Snapshot{
-		ID:       "p1",
-		TenantID: "t1",
-		Name:     "networking",
-		Tags:     map[string]string{"env": "prod", "team": "platform"},
+		ID:            "p1",
+		TenantID:      "t1",
+		Name:          "networking",
+		EffectiveTags: map[string]string{"env": "prod", "team": "platform"},
 	}
 
 	creds, err := svc.ResolveCredentialsForRun(ctx, projSnap, "r1", "main", "abc1234", "manual", "/tmp/work")

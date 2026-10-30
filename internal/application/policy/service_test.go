@@ -373,7 +373,7 @@ deny contains "explicit: project must have team:platform tag" if {
 
 	// Resolve policies for a project with tags env:prod, team:platform and explicitPol attached
 	projectTags := map[string]string{"env": "prod", "team": "platform"}
-	resolved, err := svc.ResolveForProject(ctx, "t1", explicitPol.ID(), projectTags)
+	resolved, err := svc.ResolveForProject(ctx, "t1", []policy.ID{explicitPol.ID()}, projectTags)
 	if err != nil {
 		t.Fatalf("ResolveForProject: %v", err)
 	}
@@ -393,7 +393,7 @@ deny contains "explicit: project must have team:platform tag" if {
 
 	// Evaluate as non-admin member -> denied by Prod Requires Admin (tag-bound), even though explicit & global pass!
 	memberUser := UserInfo{ID: "u-mem", Login: "bob", Role: "member"}
-	decMember, err := svc.EvaluateForProject(ctx, "t1", explicitPol.ID(), projectTags, safePlan, memberUser, proj)
+	decMember, err := svc.EvaluateForProject(ctx, "t1", []policy.ID{explicitPol.ID()}, projectTags, safePlan, memberUser, proj)
 	if err != nil {
 		t.Fatalf("EvaluateForProject member: %v", err)
 	}
@@ -406,7 +406,7 @@ deny contains "explicit: project must have team:platform tag" if {
 
 	// Evaluate as admin -> all 3 policies allow!
 	adminUser := UserInfo{ID: "u-adm", Login: "alice", Role: "admin"}
-	decAdmin, err := svc.EvaluateForProject(ctx, "t1", explicitPol.ID(), projectTags, safePlan, adminUser, proj)
+	decAdmin, err := svc.EvaluateForProject(ctx, "t1", []policy.ID{explicitPol.ID()}, projectTags, safePlan, adminUser, proj)
 	if err != nil {
 		t.Fatalf("EvaluateForProject admin: %v", err)
 	}
@@ -416,7 +416,7 @@ deny contains "explicit: project must have team:platform tag" if {
 
 	// Evaluate as admin with IAM delete -> denied by Global policy!
 	iamDeletePlan := []byte(`{"resource_changes":[{"address":"aws_iam_role.r","type":"aws_iam_role","change":{"actions":["delete"]}}]}`)
-	decIAM, err := svc.EvaluateForProject(ctx, "t1", explicitPol.ID(), projectTags, iamDeletePlan, adminUser, proj)
+	decIAM, err := svc.EvaluateForProject(ctx, "t1", []policy.ID{explicitPol.ID()}, projectTags, iamDeletePlan, adminUser, proj)
 	if err != nil {
 		t.Fatalf("EvaluateForProject iam delete: %v", err)
 	}
@@ -427,3 +427,86 @@ deny contains "explicit: project must have team:platform tag" if {
 	_ = prodPol
 }
 
+func TestEvaluateForProjectDeniesWhenAnyExplicitPolicyDenies(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemPolicyRepo()
+	seq := 0
+	svc := &Service{
+		Policies: repo,
+		Engine:   opa.NewEvaluator(),
+		Now:      func() time.Time { return time.Now().UTC() },
+		NewID: func() string {
+			seq++
+			return fmt.Sprintf("pol-%d", seq)
+		},
+	}
+
+	allowPol, err := svc.Create(ctx, CreateInput{
+		TenantID: "t1",
+		Name:     "Explicit Allow",
+		Rego: `package infraguy.approval
+import rego.v1
+default allow := true
+`,
+	})
+	if err != nil {
+		t.Fatalf("create allow policy: %v", err)
+	}
+	denyPol, err := svc.Create(ctx, CreateInput{
+		TenantID: "t1",
+		Name:     "Explicit Deny",
+		Rego: `package infraguy.approval
+import rego.v1
+default allow := false
+deny contains "second policy denies" if {
+	input.project.id != ""
+}
+`,
+	})
+	if err != nil {
+		t.Fatalf("create deny policy: %v", err)
+	}
+	tagPol, err := svc.Create(ctx, CreateInput{
+		TenantID: "t1",
+		Name:     "Env Prod Tag",
+		Tags:     map[string]string{"env": "prod"},
+		Rego: `package infraguy.approval
+import rego.v1
+default allow := true
+`,
+	})
+	if err != nil {
+		t.Fatalf("create tag policy: %v", err)
+	}
+
+	projectTags := map[string]string{"env": "prod", "team": "platform"}
+	plan := []byte(`{"resource_changes":[]}`)
+	proj := ProjectInfo{ID: "p-prod", Name: "prod-core", Tags: projectTags}
+	user := UserInfo{ID: "u1", Login: "alice", Role: "admin"}
+
+	dec, err := svc.EvaluateForProject(ctx, "t1", []policy.ID{allowPol.ID(), denyPol.ID(), allowPol.ID()}, projectTags, plan, user, proj)
+	if err != nil {
+		t.Fatalf("EvaluateForProject: %v", err)
+	}
+	if dec.Allowed || dec.Status != opa.StatusDenied {
+		t.Fatalf("expected denied, got %+v", dec)
+	}
+
+	var allowCount, denyCount, tagCount int
+	for _, item := range dec.Policies {
+		switch item.PolicyID {
+		case allowPol.ID():
+			allowCount++
+		case denyPol.ID():
+			denyCount++
+		case tagPol.ID():
+			tagCount++
+			if item.Source != "tag-bound" {
+				t.Fatalf("tag-bound source = %q", item.Source)
+			}
+		}
+	}
+	if allowCount != 1 || denyCount != 1 || tagCount != 1 || len(dec.Policies) != 3 {
+		t.Fatalf("evaluated policies = %+v (allow=%d deny=%d tag=%d)", dec.Policies, allowCount, denyCount, tagCount)
+	}
+}

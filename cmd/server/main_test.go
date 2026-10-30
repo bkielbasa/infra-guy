@@ -301,7 +301,7 @@ func TestStatusReporterAndMergeabilityChecker(t *testing.T) {
 		Now:      time.Now,
 		NewID:    func() string { return "pol-1" },
 	}
-	checker := newMergeabilityChecker(polSvc)
+	checker := newMergeabilityChecker(polSvc, nil)
 
 	rUnapproved := run.Snapshot{ID: "r1", ProjectID: "p1", Status: run.StatusPlanned, PlanOnly: true}
 	if checker.IsMergeable(ctx, ps, rUnapproved) {
@@ -325,8 +325,8 @@ allow if { count(input.approvals) >= 2 }
 	}
 	psWithPol := project.Snapshot{
 		ID: "p1", TenantID: "t1", Name: "payments",
-		Repo:             project.SourceRepo{Owner: "acme", Name: "infra"},
-		ApprovalPolicyID: string(pol.ID()),
+		Repo:      project.SourceRepo{Owner: "acme", Name: "infra"},
+		PolicyIDs: []string{string(pol.ID())},
 	}
 	if checker.IsMergeable(ctx, psWithPol, rApproved) {
 		t.Fatalf("expected 1 approval to not satisfy 2-eyes policy")
@@ -347,4 +347,3 @@ allow if { count(input.approvals) >= 2 }
 func policySvcCreateHelper(ctx context.Context, svc *policyapp.Service, tenantID, name, rego string) (*policy.Policy, error) {
 	return svc.Create(ctx, policyapp.CreateInput{TenantID: tenantID, Name: name, Rego: rego})
 }
-

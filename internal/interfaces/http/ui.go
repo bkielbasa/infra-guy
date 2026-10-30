@@ -2917,13 +2917,13 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u.cfg.Policies != nil {
-		resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags)
+		resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, []policy.ID{policy.ID(ps.ApprovalPolicyID)}, ps.Tags)
 		if rErr != nil {
 			http.Error(w, "Policy evaluation failed: "+rErr.Error(), http.StatusForbidden)
 			return
 		}
 		if len(resolved) > 0 {
-			res, evalErr := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
+			res, evalErr := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, []policy.ID{policy.ID(ps.ApprovalPolicyID)}, ps.Tags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
 			if evalErr != nil {
 				http.Error(w, "Policy evaluation failed: "+evalErr.Error(), http.StatusForbidden)
 				return
@@ -3940,7 +3940,7 @@ func (u *ui) tagBoundPolicies(ctx context.Context, tenantID string, explicitID p
 	if u.cfg.Policies == nil || tenantID == "" {
 		return nil
 	}
-	resolved, err := u.cfg.Policies.ResolveForProject(ctx, tenantID, explicitID, projectTags)
+	resolved, err := u.cfg.Policies.ResolveForProject(ctx, tenantID, []policy.ID{explicitID}, projectTags)
 	if err != nil {
 		return nil
 	}
@@ -3981,7 +3981,7 @@ func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snap
 	if !approvable || u.cfg.Policies == nil {
 		return nil
 	}
-	resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags)
+	resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, []policy.ID{policy.ID(ps.ApprovalPolicyID)}, ps.Tags)
 	if rErr == nil && len(resolved) == 0 {
 		return nil
 	}
@@ -3990,7 +3990,7 @@ func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snap
 	if polName == "" {
 		polName = ps.ApprovalPolicyID
 	}
-	res, err := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, polID, ps.Tags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
+	res, err := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, []policy.ID{polID}, ps.Tags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
 	if err != nil {
 		return &runPolicyEvalView{
 			PolicyID:   ps.ApprovalPolicyID,
