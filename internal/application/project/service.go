@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"infra-guy/internal/domain/folder"
 	"infra-guy/internal/domain/project"
 )
 
@@ -17,9 +18,17 @@ type StateForceUnlocker interface {
 	ForceUnlock(ctx context.Context, projectID string) error
 }
 
+// FolderDirectory loads a destination folder and creates the tenant root.
+// Nil skips root assignment so callers that have not wired folders still compile.
+type FolderDirectory interface {
+	EnsureRoot(ctx context.Context, tenantID string) (folder.Snapshot, error)
+	Get(ctx context.Context, tenantID, id string) (folder.Snapshot, error)
+}
+
 type Service struct {
 	Projects project.Repository
 	States   StateForceUnlocker
+	Folders  FolderDirectory
 	Now      func() time.Time
 	NewID    func() string
 }
@@ -96,10 +105,44 @@ func (s *Service) Create(ctx context.Context, tenantID, name string, repo projec
 		return nil, err
 	}
 	p.SetStateToken(token)
+	if p.Snapshot().FolderID == "" && s.Folders != nil {
+		root, err := s.Folders.EnsureRoot(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		p.SetFolderID(root.ID)
+	}
 	if err := s.Projects.Save(ctx, p); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+func (s *Service) MoveToFolder(ctx context.Context, id project.ID, folderID string, policyIDs []string, replacePolicies bool) error {
+	p, err := s.Projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %s not found", id)
+	}
+	snap := p.Snapshot()
+	if s.Folders == nil {
+		return fmt.Errorf("folder %s not found", folderID)
+	}
+	dest, err := s.Folders.Get(ctx, snap.TenantID, folderID)
+	if err != nil {
+		return err
+	}
+	if dest.ID == "" || dest.TenantID != snap.TenantID {
+		return fmt.Errorf("folder %s not found", folderID)
+	}
+	p.ClearTagOverride()
+	p.SetFolderID(dest.ID)
+	if replacePolicies {
+		p.SetPolicyIDs(policyIDs)
+	}
+	return s.Projects.Save(ctx, p)
 }
 
 func (s *Service) Update(ctx context.Context, in UpdateInput) (*project.Project, error) {
@@ -318,4 +361,3 @@ func (s *Service) SyncAndFindByRepo(ctx context.Context, tenantID string, repoID
 	}
 	return matched, nil
 }
-

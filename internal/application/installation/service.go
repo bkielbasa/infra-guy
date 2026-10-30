@@ -46,11 +46,17 @@ type Client interface {
 	ListRepos(ctx context.Context, installationID int64) ([]Repo, error)
 }
 
+// RootFolders creates the tenant root folder. A nil value skips the call.
+type RootFolders interface {
+	EnsureRoot(ctx context.Context, tenantID string) error
+}
+
 type Service struct {
-	Store  Store
-	GitHub Client
-	Now    func() time.Time
-	NewID  func() string
+	Store   Store
+	GitHub  Client
+	Folders RootFolders
+	Now     func() time.Time
+	NewID   func() string
 }
 
 func (s *Service) Apply(ctx context.Context, event string, payload InstallationEvent) error {
@@ -74,6 +80,9 @@ func (s *Service) Apply(ctx context.Context, event string, payload InstallationE
 			if err != nil {
 				return err
 			}
+			if err := s.ensureRoot(ctx, ten.ID); err != nil {
+				return err
+			}
 			return s.Store.UpsertInstallation(ctx, tenant.Installation{
 				ID:                   s.NewID(),
 				TenantID:             ten.ID,
@@ -94,13 +103,16 @@ func (s *Service) Apply(ctx context.Context, event string, payload InstallationE
 				if s.NewID == nil {
 					return fmt.Errorf("missing id generator")
 				}
-				_, err = s.Store.UpsertTenant(ctx, tenant.Tenant{
+				ten, err := s.Store.UpsertTenant(ctx, tenant.Tenant{
 					ID:              s.NewID(),
 					Name:            payload.AccountLogin,
 					AccountType:     accountType,
 					GitHubAccountID: payload.AccountID,
 				}, now)
 				if err != nil {
+					return err
+				}
+				if err := s.ensureRoot(ctx, ten.ID); err != nil {
 					return err
 				}
 			}
@@ -130,6 +142,9 @@ func (s *Service) Apply(ctx context.Context, event string, payload InstallationE
 				GitHubAccountID: payload.AccountID,
 			}, now)
 			if err != nil {
+				return err
+			}
+			if err := s.ensureRoot(ctx, ten.ID); err != nil {
 				return err
 			}
 			if existing == nil {
@@ -180,4 +195,11 @@ func (s *Service) now() time.Time {
 		return s.Now()
 	}
 	return time.Now().UTC()
+}
+
+func (s *Service) ensureRoot(ctx context.Context, tenantID string) error {
+	if s.Folders == nil {
+		return nil
+	}
+	return s.Folders.EnsureRoot(ctx, tenantID)
 }

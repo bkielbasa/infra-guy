@@ -185,6 +185,51 @@ func TestApplySuspendWithoutAccountUpdatesDeactivates(t *testing.T) {
 	}
 }
 
+func TestApplyEnsuresRootAfterTenantUpsert(t *testing.T) {
+	store := newMemIdentity()
+	roots := &countingRoots{}
+	svc := &Service{Store: store, NewID: seqID("id"), Folders: roots}
+	ev := InstallationEvent{Action: "created", InstallationID: 1, AccountID: 50, AccountLogin: "acme", AccountType: "Organization"}
+	if err := svc.Apply(context.Background(), "installation", ev); err != nil {
+		t.Fatal(err)
+	}
+	if len(roots.ids) != 1 || roots.ids[0] != store.onlyTenant() {
+		t.Fatalf("created ensure = %#v tenant %q", roots.ids, store.onlyTenant())
+	}
+	suspend := ev
+	suspend.Action = "suspend"
+	suspend.AccountLogin = "acme-renamed"
+	if err := svc.Apply(context.Background(), "installation", suspend); err != nil {
+		t.Fatal(err)
+	}
+	if len(roots.ids) != 2 || roots.ids[1] != store.onlyTenant() {
+		t.Fatalf("suspend ensure = %#v", roots.ids)
+	}
+
+	roots.err = errors.New("root failed")
+	ev2 := InstallationEvent{Action: "created", InstallationID: 9, AccountID: 77, AccountLogin: "other", AccountType: "Organization"}
+	if err := svc.Apply(context.Background(), "installation", ev2); err == nil || err.Error() != "root failed" {
+		t.Fatalf("ensure root error: %v", err)
+	}
+	got, err := store.InstallationByGitHubID(context.Background(), 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("installation stored after root failure: %+v", got)
+	}
+}
+
+type countingRoots struct {
+	ids []string
+	err error
+}
+
+func (c *countingRoots) EnsureRoot(_ context.Context, tenantID string) error {
+	c.ids = append(c.ids, tenantID)
+	return c.err
+}
+
 func TestReposSuccess(t *testing.T) {
 	store := newMemIdentity()
 	gh := &fakeGitHub{

@@ -287,6 +287,48 @@ func TestEnterInstallationPersonalAndOrg(t *testing.T) {
 	}
 }
 
+func TestEnterInstallationEnsuresRoot(t *testing.T) {
+	store := newMemIdentity()
+	now := time.Unix(100, 0)
+	roots := &countingRoots{}
+	n := 0
+	svc := &Service{
+		Store: store,
+		GitHub: &fakeGitHub{
+			accountID: 4, accountLogin: "ada", accountType: "User",
+		},
+		Now:     func() time.Time { return now },
+		NewID:   func() string { n++; return "id-" + string(rune('0'+n)) },
+		Folders: roots,
+	}
+	tenID, err := svc.EnterInstallation(context.Background(), "", 11, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots.ids) != 1 || roots.ids[0] != tenID {
+		t.Fatalf("ensure root ids = %#v, tenant %q", roots.ids, tenID)
+	}
+
+	roots.err = errors.New("root failed")
+	svc.GitHub = &fakeGitHub{accountID: 8, accountLogin: "other", accountType: "User"}
+	if _, err := svc.EnterInstallation(context.Background(), "", 12, now); err == nil || err.Error() != "root failed" {
+		t.Fatalf("ensure root error: %v", err)
+	}
+}
+
+type countingRoots struct {
+	ids []string
+	err error
+}
+
+func (c *countingRoots) EnsureRoot(_ context.Context, tenantID string) error {
+	c.ids = append(c.ids, tenantID)
+	if c.err != nil {
+		return c.err
+	}
+	return nil
+}
+
 func TestAuthenticateSlidingRenewal(t *testing.T) {
 	store := newMemIdentity()
 	created := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)

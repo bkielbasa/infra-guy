@@ -52,9 +52,15 @@ type Client interface {
 	Slug(ctx context.Context) (string, error)
 }
 
+// RootFolders creates the tenant root folder. A nil value skips the call.
+type RootFolders interface {
+	EnsureRoot(ctx context.Context, tenantID string) error
+}
+
 type Service struct {
 	Store          Store
 	GitHub         Client
+	Folders        RootFolders
 	Now            func() time.Time
 	NewID          func() string
 	PublicBaseURL  string
@@ -191,6 +197,9 @@ func (s *Service) EnterInstallation(ctx context.Context, sessionID string, insta
 		ID: s.NewID(), Name: login, AccountType: accountType, GitHubAccountID: accountID,
 	}, now)
 	if err != nil {
+		return "", err
+	}
+	if err := s.ensureRoot(ctx, ten.ID); err != nil {
 		return "", err
 	}
 	if err := s.Store.UpsertInstallation(ctx, tenant.Installation{
@@ -378,6 +387,13 @@ func (s *Service) now() time.Time {
 		return s.Now()
 	}
 	return time.Now().UTC()
+}
+
+func (s *Service) ensureRoot(ctx context.Context, tenantID string) error {
+	if s.Folders == nil {
+		return nil
+	}
+	return s.Folders.EnsureRoot(ctx, tenantID)
 }
 
 func randomHex(n int) (string, error) {

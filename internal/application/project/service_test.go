@@ -2,9 +2,11 @@ package projectapp
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"infra-guy/internal/domain/folder"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/state"
 )
@@ -198,3 +200,161 @@ func TestSyncAndFindByRepoUpdatesRenamedRepo(t *testing.T) {
 	}
 }
 
+func TestCreateAssignsRootFolder(t *testing.T) {
+	ctx := context.Background()
+	projects := &memProjects{items: map[project.ID]*project.Project{}}
+	dirs := &memFolderDir{}
+	svc := &Service{
+		Projects: projects,
+		Folders:  dirs,
+		Now:      func() time.Time { return time.Unix(1, 0).UTC() },
+		NewID:    func() string { return "p1" },
+	}
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(ctx, "", "infra", repo, 1, "", "terraform", false); err == nil {
+		t.Fatal("create without a tenant must fail")
+	}
+	if dirs.roots != 0 {
+		t.Fatal("empty tenant called EnsureRoot")
+	}
+	created, err := svc.Create(ctx, "ten", "infra", repo, 1, "", "terraform", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Snapshot().FolderID != "root-ten" || dirs.roots != 1 {
+		t.Fatalf("folder id = %q roots = %d", created.Snapshot().FolderID, dirs.roots)
+	}
+}
+
+func TestMoveToFolderClearsOverrideAndKeepsDrift(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(50, 0).UTC()
+	projects := &memProjects{items: map[project.ID]*project.Project{}}
+	dirs := &memFolderDir{items: map[string]folder.Snapshot{
+		"dest":  {ID: "dest", TenantID: "ten", ParentID: "root", Name: "Dest"},
+		"other": {ID: "other", TenantID: "other", ParentID: "root", Name: "Other"},
+	}}
+	svc := &Service{Projects: projects, Folders: dirs, Now: func() time.Time { return now }}
+	p := mustFolderProject(t, "p1", "ten", "old")
+	snap := p.Snapshot()
+	snap.PolicyIDs = []string{"pol-b", "pol-a"}
+	p = project.Restore(snap)
+	if err := p.SetTagOverride(map[string]string{"env": "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	p.SetDriftConfig(true, 15, now)
+	p.RecordDriftStatus(project.DriftStatusDrifted, now)
+	projects.items["p1"] = p
+
+	if err := svc.MoveToFolder(ctx, "p1", "dest", []string{"other-pol"}, false); err != nil {
+		t.Fatal(err)
+	}
+	got := projects.items["p1"].Snapshot()
+	if got.FolderID != "dest" || got.TagsOverridden || len(got.Tags) != 0 {
+		t.Fatalf("moved = %#v", got)
+	}
+	if len(got.PolicyIDs) != 2 || got.PolicyIDs[0] != "pol-b" || got.PolicyIDs[1] != "pol-a" {
+		t.Fatalf("policies = %#v", got.PolicyIDs)
+	}
+	if !got.DriftEnabled || got.DriftIntervalMinutes != 15 || got.DriftStatus != project.DriftStatusDrifted {
+		t.Fatalf("drift = enabled %v interval %d status %q", got.DriftEnabled, got.DriftIntervalMinutes, got.DriftStatus)
+	}
+
+	if err := svc.MoveToFolder(ctx, "p1", "other", []string{"z", "a", "a"}, true); err == nil || err.Error() != "folder other not found" {
+		t.Fatalf("other tenant: %v", err)
+	}
+	if projects.items["p1"].Snapshot().FolderID != "dest" {
+		t.Fatal("rejected move changed the folder")
+	}
+
+	if err := svc.MoveToFolder(ctx, "p1", "dest", []string{" z ", "a", "a"}, true); err != nil {
+		t.Fatal(err)
+	}
+	got = projects.items["p1"].Snapshot()
+	if len(got.PolicyIDs) != 2 || got.PolicyIDs[0] != "a" || got.PolicyIDs[1] != "z" {
+		t.Fatalf("replaced policies = %#v", got.PolicyIDs)
+	}
+	if !got.DriftEnabled || got.DriftIntervalMinutes != 15 || got.DriftStatus != project.DriftStatusDrifted {
+		t.Fatalf("drift changed after policy replace: %#v", got)
+	}
+}
+
+func TestDriftOnlySaveKeepsPoliciesAndTagOverride(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(60, 0).UTC()
+	projects := &memProjects{items: map[project.ID]*project.Project{}}
+	svc := &Service{Projects: projects, Now: func() time.Time { return now }}
+	p := mustFolderProject(t, "p1", "ten", "root")
+	p.SetPolicyIDs([]string{"pol-b", "pol-a"})
+	if err := p.SetTagOverride(map[string]string{"env": "prod"}); err != nil {
+		t.Fatal(err)
+	}
+	p.SetDriftConfig(false, 15, now)
+	p.RecordDriftStatus(project.DriftStatusDrifted, now)
+	projects.items["p1"] = p
+
+	if err := svc.SetDriftConfig(ctx, "p1", true, 30); err != nil {
+		t.Fatal(err)
+	}
+	got := projects.items["p1"].Snapshot()
+	if !got.TagsOverridden || got.Tags["env"] != "prod" {
+		t.Fatalf("tag override = %#v overridden=%v", got.Tags, got.TagsOverridden)
+	}
+	if len(got.PolicyIDs) != 2 || got.PolicyIDs[0] != "pol-a" || got.PolicyIDs[1] != "pol-b" {
+		t.Fatalf("policies = %#v", got.PolicyIDs)
+	}
+	if !got.DriftEnabled || got.DriftIntervalMinutes != 30 || got.DriftStatus != project.DriftStatusDrifted {
+		t.Fatalf("drift = enabled %v interval %d status %q", got.DriftEnabled, got.DriftIntervalMinutes, got.DriftStatus)
+	}
+}
+
+type memFolderDir struct {
+	items map[string]folder.Snapshot
+	roots int
+}
+
+func (m *memFolderDir) EnsureRoot(_ context.Context, tenantID string) (folder.Snapshot, error) {
+	m.roots++
+	if m.items == nil {
+		m.items = map[string]folder.Snapshot{}
+	}
+	for _, f := range m.items {
+		if f.TenantID == tenantID && f.ParentID == "" {
+			return f, nil
+		}
+	}
+	f := folder.Snapshot{ID: "root-" + tenantID, TenantID: tenantID, Name: "Default", TagsSet: true, Tags: map[string]string{}}
+	m.items[f.ID] = f
+	return f, nil
+}
+
+func (m *memFolderDir) Get(_ context.Context, tenantID, id string) (folder.Snapshot, error) {
+	f, ok := m.items[id]
+	if !ok {
+		return folder.Snapshot{}, fmt.Errorf("folder %s not found", id)
+	}
+	if f.TenantID != tenantID {
+		return f, nil
+	}
+	return f, nil
+}
+
+func mustFolderProject(t *testing.T, id, tenantID, folderID string) *project.Project {
+	t.Helper()
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := project.New(project.ID(id), id, repo, time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetPlacement(tenantID, 1); err != nil {
+		t.Fatal(err)
+	}
+	p.SetFolderID(folderID)
+	return p
+}
