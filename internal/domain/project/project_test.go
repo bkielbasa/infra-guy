@@ -161,6 +161,60 @@ func TestRenameRepo(t *testing.T) {
 	}
 }
 
+func TestFolderPolicyAndTagOverride(t *testing.T) {
+	p := sample(t)
+	p.SetFolderID("  folder-1  ")
+	if p.Snapshot().FolderID != "folder-1" {
+		t.Fatalf("folder id = %q", p.Snapshot().FolderID)
+	}
+
+	p.SetPolicyIDs([]string{" b ", "a", "b", "", "a"})
+	snap := p.Snapshot()
+	if len(snap.PolicyIDs) != 2 || snap.PolicyIDs[0] != "a" || snap.PolicyIDs[1] != "b" {
+		t.Fatalf("policy ids = %#v", snap.PolicyIDs)
+	}
+	snap.PolicyIDs[0] = "mutated"
+	if p.Snapshot().PolicyIDs[0] != "a" {
+		t.Fatal("policy ids alias the snapshot")
+	}
+
+	if err := p.SetTagOverride(map[string]string{" env ": " prod "}); err != nil {
+		t.Fatal(err)
+	}
+	snap = p.Snapshot()
+	if !snap.TagsOverridden || snap.Tags["env"] != "prod" {
+		t.Fatalf("%#v", snap.Tags)
+	}
+	if err := p.SetTagOverride(map[string]string{"bad key": "v"}); err == nil {
+		t.Fatal("expected invalid tag")
+	}
+	if !p.Snapshot().TagsOverridden || p.Snapshot().Tags["env"] != "prod" {
+		t.Fatal("failed override changed tags")
+	}
+	p.ClearTagOverride()
+	snap = p.Snapshot()
+	if snap.TagsOverridden || len(snap.Tags) != 0 {
+		t.Fatalf("cleared tags = %#v overridden=%v", snap.Tags, snap.TagsOverridden)
+	}
+}
+
+func TestSnapshotClonesEffectiveFields(t *testing.T) {
+	p := sample(t)
+	p.s.PolicyIDs = []string{"pol-a"}
+	p.s.EffectiveTags = map[string]string{"env": "prod"}
+	p.s.EffectivePolicies = []EffectivePolicy{{PolicyID: "pol-a", Source: "project"}}
+
+	snap := p.Snapshot()
+	snap.PolicyIDs[0] = "other"
+	snap.EffectiveTags["env"] = "dev"
+	snap.EffectivePolicies[0].PolicyID = "other"
+
+	again := p.Snapshot()
+	if again.PolicyIDs[0] != "pol-a" || again.EffectiveTags["env"] != "prod" || again.EffectivePolicies[0].PolicyID != "pol-a" {
+		t.Fatalf("%#v", again)
+	}
+}
+
 func TestTags(t *testing.T) {
 	p := sample(t)
 	if len(p.Snapshot().Tags) != 0 {

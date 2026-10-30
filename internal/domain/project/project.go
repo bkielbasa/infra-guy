@@ -70,6 +70,11 @@ type EngineConfig struct {
 
 type ID string
 
+type EffectivePolicy struct {
+	PolicyID string
+	Source   string
+}
+
 type Snapshot struct {
 	ID                   ID
 	TenantID             string
@@ -84,6 +89,11 @@ type Snapshot struct {
 	ApprovalPolicyID     string
 	AutoApprove          bool
 	Tags                 map[string]string
+	FolderID             string
+	TagsOverridden       bool
+	PolicyIDs            []string
+	EffectiveTags        map[string]string
+	EffectivePolicies    []EffectivePolicy
 	Locked               bool
 	StateToken           string
 	StateTokenHash       string
@@ -138,6 +148,9 @@ func New(id ID, name string, repo SourceRepo, now time.Time) (*Project, error) {
 func Restore(s Snapshot) *Project {
 	s.ApprovalPolicyID = strings.TrimSpace(s.ApprovalPolicyID)
 	s.Tags = cloneTags(s.Tags)
+	s.PolicyIDs = cloneStrings(s.PolicyIDs)
+	s.EffectiveTags = cloneTags(s.EffectiveTags)
+	s.EffectivePolicies = cloneEffectivePolicies(s.EffectivePolicies)
 	if s.Engine == "" {
 		s.Engine = DefaultEngine
 	}
@@ -155,7 +168,40 @@ func Rehydrate(s Snapshot) *Project { return Restore(s) }
 func (p *Project) Snapshot() Snapshot {
 	s := p.s
 	s.Tags = cloneTags(p.s.Tags)
+	s.PolicyIDs = cloneStrings(p.s.PolicyIDs)
+	s.EffectiveTags = cloneTags(p.s.EffectiveTags)
+	s.EffectivePolicies = cloneEffectivePolicies(p.s.EffectivePolicies)
 	return s
+}
+
+func (p *Project) SetFolderID(id string) { p.s.FolderID = strings.TrimSpace(id) }
+
+func (p *Project) SetPolicyIDs(ids []string) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	p.s.PolicyIDs = out
+}
+
+func (p *Project) SetTagOverride(tags map[string]string) error {
+	if err := p.SetTags(tags); err != nil {
+		return err
+	}
+	p.s.TagsOverridden = true
+	return nil
+}
+
+func (p *Project) ClearTagOverride() {
+	p.s.TagsOverridden = false
+	p.s.Tags = nil
 }
 
 func (p *Project) ApprovalPolicyID() string { return p.s.ApprovalPolicyID }
@@ -508,6 +554,24 @@ func cloneTags(in map[string]string) map[string]string {
 	for k, v := range in {
 		out[k] = v
 	}
+	return out
+}
+
+func cloneStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneEffectivePolicies(in []EffectivePolicy) []EffectivePolicy {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]EffectivePolicy, len(in))
+	copy(out, in)
 	return out
 }
 
