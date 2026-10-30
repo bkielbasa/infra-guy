@@ -71,7 +71,11 @@ func NewServer(cfg ServerConfig) http.Handler {
 			PublicBaseURL: cfg.PublicBaseURL,
 		}
 	}
-	api := New(cfg.States, cfg.Runs, cfg.Projects, WithWebhook(cfg.Installations, cfg.WebhookSecret))
+	opts := []WebhookOption{WithWebhook(cfg.Installations, cfg.WebhookSecret)}
+	if cfg.Folders != nil {
+		opts = append(opts, WithFolders(cfg.Folders))
+	}
+	api := New(cfg.States, cfg.Runs, cfg.Projects, opts...)
 	uiMux := http.NewServeMux()
 	(&ui{cfg: cfg}).routes(uiMux)
 	protected := http.NewCrossOriginProtection().Handler(withSession(uiMux, cfg))

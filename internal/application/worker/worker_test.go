@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	runapp "infra-guy/internal/application/run"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
@@ -1030,6 +1031,58 @@ func TestWorkerDependencyResolutionErrorFailsWithoutExecutor(t *testing.T) {
 	}
 	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 21 {
 		t.Fatalf("completed jobs %#v, want [21]", fx.queue.completed)
+	}
+}
+
+type errProjectEffective struct{ err error }
+
+func (e errProjectEffective) Effective(context.Context, project.Snapshot) (project.Snapshot, error) {
+	return project.Snapshot{}, e.err
+}
+
+type fakeCloudResolver struct{ called bool }
+
+func (f *fakeCloudResolver) ResolveCredentialsForRun(context.Context, project.Snapshot, string, string, string, string, string) (cloudintegrationapp.RunCredentials, error) {
+	f.called = true
+	return cloudintegrationapp.RunCredentials{}, nil
+}
+
+func TestWorkerEffectiveErrorFailsRun(t *testing.T) {
+	ctx := context.Background()
+	p := testProject(t)
+	r, err := run.Open(run.OpenInput{
+		ID: "run-eff-err", ProjectID: "p1", PlanOnly: true, Trigger: run.TriggerPipeline, SHA: "abc", Now: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{res: Result{ExitCode: 0}}
+	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 31, RunID: "run-eff-err", Step: run.StepInit}}, exec)
+	clouds := &fakeCloudResolver{}
+	fx.w.CloudIntegrations = clouds
+	fx.w.ProjectEffective = errProjectEffective{err: errors.New("folder inheritance failed")}
+	if err := fx.w.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.exec.called {
+		t.Fatal("executor should not be called when folder effective fails")
+	}
+	if clouds.called {
+		t.Fatal("cloud credentials should not be resolved when folder effective fails")
+	}
+	saved, err := fx.runs.Get(ctx, "run-eff-err")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := saved.Snapshot()
+	if snap.Status != run.StatusFailed {
+		t.Fatalf("status %s, want failed", snap.Status)
+	}
+	if snap.Error != "folder inheritance failed" {
+		t.Fatalf("error %q, want folder inheritance failed", snap.Error)
+	}
+	if len(fx.queue.completed) != 1 || fx.queue.completed[0] != 31 {
+		t.Fatalf("completed jobs %#v, want [31]", fx.queue.completed)
 	}
 }
 

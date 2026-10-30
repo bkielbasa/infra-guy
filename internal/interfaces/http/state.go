@@ -25,12 +25,24 @@ func WithWebhook(installations *installation.Service, secret string) WebhookOpti
 	}
 }
 
+// folderEffective resolves inherited folder tags and policies for one project.
+type folderEffective interface {
+	Effective(ctx context.Context, p project.Snapshot) (project.Snapshot, error)
+}
+
+func WithFolders(folders folderEffective) WebhookOption {
+	return func(a *api) {
+		a.folders = folders
+	}
+}
+
 type api struct {
 	states        *stateapp.Service
 	open          opener
 	projects      ProjectMatcher
 	installations *installation.Service
 	webhookSecret string
+	folders       folderEffective
 }
 
 func New(states *stateapp.Service, open opener, projects ProjectMatcher, opts ...WebhookOption) *http.ServeMux {

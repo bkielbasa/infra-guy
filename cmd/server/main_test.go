@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -342,6 +343,75 @@ allow if { count(input.approvals) >= 2 }
 	if !checker.IsMergeable(ctx, psWithPol, rTwoApprovals) {
 		t.Fatalf("expected 2 approvals to satisfy 2-eyes policy")
 	}
+}
+
+type fakeProjectEffective struct {
+	snap project.Snapshot
+	err  error
+}
+
+func (f fakeProjectEffective) Effective(context.Context, project.Snapshot) (project.Snapshot, error) {
+	if f.err != nil {
+		return project.Snapshot{}, f.err
+	}
+	return f.snap, nil
+}
+
+func TestMergeabilityFolderEffective(t *testing.T) {
+	ctx := context.Background()
+	polRepo := &memPolRepo{items: map[policy.ID]*policy.Policy{}}
+	polSvc := &policyapp.Service{
+		Policies: polRepo,
+		Engine:   opa.NewEvaluator(),
+		Now:      time.Now,
+		NewID:    func() string { return "pol-folder" },
+	}
+	pol, err := policySvcCreateHelper(ctx, polSvc, "t1", "folder-two-eyes", `package infraguy.approval
+import rego.v1
+allow if { count(input.approvals) >= 2 }
+`)
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	ps := project.Snapshot{
+		ID: "p1", TenantID: "t1", Name: "payments", AutoApprove: true,
+		Repo: project.SourceRepo{Owner: "acme", Name: "infra"},
+	}
+	oneApproval := run.Snapshot{
+		ID: "r1", ProjectID: "p1", Status: run.StatusPlanned, PlanOnly: true,
+		PlanJSON:  []byte(`{"format_version":"1.2"}`),
+		Approvals: []run.Approval{{UserID: "u1", Login: "alice", Role: "admin"}},
+	}
+
+	t.Run("folder policy denies merge", func(t *testing.T) {
+		checker := newMergeabilityChecker(polSvc, fakeProjectEffective{snap: project.Snapshot{
+			ID: "p1", TenantID: "t1", Name: "payments",
+			Repo: project.SourceRepo{Owner: "acme", Name: "infra"},
+			EffectivePolicies: []project.EffectivePolicy{{
+				PolicyID: string(pol.ID()),
+				Source:   "fld-root",
+			}},
+		}})
+		if checker.IsMergeable(ctx, ps, oneApproval) {
+			t.Fatal("expected inherited folder policy to deny merge with one approval")
+		}
+	})
+
+	t.Run("effective error blocks merge", func(t *testing.T) {
+		checker := newMergeabilityChecker(polSvc, fakeProjectEffective{err: errors.New("folder lookup failed")})
+		if checker.IsMergeable(ctx, ps, oneApproval) {
+			t.Fatal("expected effective error to block merge")
+		}
+	})
+
+	t.Run("nil policy service with policies blocks merge", func(t *testing.T) {
+		checker := newMergeabilityChecker(nil, fakeProjectEffective{snap: project.Snapshot{
+			EffectivePolicies: []project.EffectivePolicy{{PolicyID: "pol-from-folder", Source: "fld-root"}},
+		}})
+		if checker.IsMergeable(ctx, ps, oneApproval) {
+			t.Fatal("expected nil policy service to block merge when policies exist")
+		}
+	})
 }
 
 func policySvcCreateHelper(ctx context.Context, svc *policyapp.Service, tenantID, name, rego string) (*policy.Policy, error) {

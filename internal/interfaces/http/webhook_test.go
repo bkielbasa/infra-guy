@@ -15,9 +15,11 @@ import (
 	"testing"
 	"time"
 
+	folderapp "infra-guy/internal/application/folder"
 	"infra-guy/internal/application/installation"
 	projectapp "infra-guy/internal/application/project"
 	runapp "infra-guy/internal/application/run"
+	"infra-guy/internal/domain/folder"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
 	"infra-guy/internal/domain/tenant"
@@ -784,6 +786,93 @@ func TestWebhookMonorepoPathFilteringAndChatOps(t *testing.T) {
 		calls = open.calls()
 		if len(calls) != 1 || calls[0].ProjectID != "p-stage" || !calls[0].PlanOnly {
 			t.Fatalf("expected plan-only run opened for p-stage, got %#v", calls)
+		}
+	})
+}
+
+type errFolderEffective struct{}
+
+func (errFolderEffective) Effective(context.Context, project.Snapshot) (project.Snapshot, error) {
+	return project.Snapshot{}, errors.New("folder lookup failed")
+}
+
+func TestWebhookWatchTagComesFromFolder(t *testing.T) {
+	const secret = "app-secret"
+	ctx := context.Background()
+
+	instStore := newMemInstallationStore()
+	instSvc := &installation.Service{
+		Store: instStore,
+		NewID: func() string { return "id-1" },
+		Now:   time.Now,
+	}
+	if _, err := instStore.UpsertTenant(ctx, tenant.Tenant{
+		ID: "ten-1", Name: "acme", AccountType: "organization", GitHubAccountID: 50,
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := instStore.UpsertInstallation(ctx, tenant.Installation{
+		ID: "inst-9", TenantID: "ten-1", AccountLogin: "acme", AccountType: "organization",
+		GitHubInstallationID: 9, Active: true,
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	projects := newWebhookProjects()
+	inherited := makeProject(t, "p-inherited", "billing", "ten-1", 5, "main")
+	inherited.SetFolderID("billing")
+	if err := inherited.SetTags(map[string]string{"watch": "services/other"}); err != nil {
+		t.Fatal(err)
+	}
+	storedOnly := makeProject(t, "p-stored", "other", "ten-1", 5, "main")
+	storedOnly.SetFolderID("other")
+	if err := storedOnly.SetTags(map[string]string{"watch": "services/billing"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.Save(ctx, inherited); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.Save(ctx, storedOnly); err != nil {
+		t.Fatal(err)
+	}
+
+	dirs := &uiMemFolders{items: map[string]folder.Snapshot{
+		"billing": {ID: "billing", TenantID: "ten-1", Name: "Billing", TagsSet: true, Tags: map[string]string{"watch": "services/billing"}},
+		"other":   {ID: "other", TenantID: "ten-1", Name: "Other", TagsSet: true, Tags: map[string]string{"watch": "services/other"}},
+	}}
+	folderSvc := &folderapp.Service{Folders: dirs}
+	open := &fakeOpen{}
+	projSvc := &projectapp.Service{Projects: projects, Now: time.Now}
+	h := New(nil, open, projSvc, WithWebhook(instSvc, secret), WithFolders(folderSvc))
+
+	payload := []byte(`{
+		"ref":"refs/heads/main",
+		"after":"2222222222222222222222222222222222222222",
+		"commits":[{"added":[],"modified":["services/billing/main.tf"],"removed":[]}],
+		"head_commit":{"message":"bill","timestamp":"2026-10-24T12:30:00Z","author":{"name":"Alice"}},
+		"sender":{"login":"alice"},
+		"installation":{"id":9,"account":{"id":50,"login":"acme","type":"Organization"}},
+		"repository":{"id":5,"full_name":"acme/infra","name":"infra","owner":{"login":"acme"}}
+	}`)
+	rr := postWebhook(t, h, "push", secret, payload, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("push code=%d", rr.Code)
+	}
+	calls := open.calls()
+	if len(calls) != 1 || calls[0].ProjectID != "p-inherited" {
+		t.Fatalf("expected the folder watch tag to open p-inherited, got %#v", calls)
+	}
+
+	t.Run("effective error keeps stored watch tags", func(t *testing.T) {
+		open.reset()
+		h := New(nil, open, projSvc, WithWebhook(instSvc, secret), WithFolders(errFolderEffective{}))
+		rr := postWebhook(t, h, "push", secret, payload, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("push code=%d", rr.Code)
+		}
+		calls := open.calls()
+		if len(calls) != 1 || calls[0].ProjectID != "p-stored" {
+			t.Fatalf("expected stored watch tag after effective error, got %#v", calls)
 		}
 	})
 }

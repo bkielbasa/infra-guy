@@ -97,6 +97,26 @@ func (s *Service) Effective(ctx context.Context, p project.Snapshot) (project.Sn
 	return folder.Resolve(p, folders)
 }
 
+// EffectiveAll resolves every project with one folder listing.
+func (s *Service) EffectiveAll(ctx context.Context, tenantID string, projects []project.Snapshot) ([]project.Snapshot, error) {
+	out := make([]project.Snapshot, 0, len(projects))
+	if len(projects) == 0 {
+		return out, nil
+	}
+	folders, err := s.list(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range projects {
+		resolved, err := folder.Resolve(p, folders)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resolved)
+	}
+	return out, nil
+}
+
 func (s *Service) Create(ctx context.Context, in CreateInput) (folder.Snapshot, error) {
 	name, err := folder.ParseName(in.Name)
 	if err != nil {

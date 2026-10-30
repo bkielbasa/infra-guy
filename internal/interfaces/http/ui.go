@@ -5386,13 +5386,28 @@ func (u *ui) effectiveList(ctx context.Context, tenantID string) ([]*project.Pro
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*project.Project, 0, len(items))
-	for _, p := range items {
-		eff, err := u.effectiveProject(ctx, p)
-		if err != nil {
-			return nil, err
+	if u.cfg.Folders == nil {
+		out := make([]*project.Project, 0, len(items))
+		for _, p := range items {
+			eff, err := u.effectiveProject(ctx, p)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, eff)
 		}
-		out = append(out, eff)
+		return out, nil
+	}
+	snaps := make([]project.Snapshot, len(items))
+	for i, p := range items {
+		snaps[i] = p.Snapshot()
+	}
+	resolved, err := u.cfg.Folders.EffectiveAll(ctx, tenantID, snaps)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*project.Project, 0, len(resolved))
+	for _, snap := range resolved {
+		out = append(out, project.Restore(snap))
 	}
 	return out, nil
 }

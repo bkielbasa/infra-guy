@@ -334,6 +334,44 @@ func TestEffectiveIncludesAncestorPolicyOnlyWhenPassDown(t *testing.T) {
 	}
 }
 
+func TestEffectiveAllLoadsFoldersOnce(t *testing.T) {
+	ctx := context.Background()
+	mem := newMemFolders()
+	mem.add(folder.Snapshot{ID: "root", TenantID: "ten", Name: "Default", TagsSet: true, PassDown: true, Tags: map[string]string{"watch": "root"}})
+	mem.add(folder.Snapshot{ID: "pay", TenantID: "ten", ParentID: "root", Name: "Pay", TagsSet: true, Tags: map[string]string{"watch": "services/pay"}})
+	mem.add(folder.Snapshot{ID: "net", TenantID: "ten", ParentID: "root", Name: "Net", TagsSet: true, Tags: map[string]string{"watch": "services/net"}})
+	svc := &Service{Folders: mem}
+
+	if got, err := svc.EffectiveAll(ctx, "ten", nil); err != nil || len(got) != 0 || mem.lists != 0 {
+		t.Fatalf("empty projects listed %d times: %v %#v", mem.lists, err, got)
+	}
+
+	projects := []project.Snapshot{
+		{TenantID: "ten", FolderID: "pay", Tags: map[string]string{"watch": "stored-pay"}},
+		{TenantID: "ten", FolderID: "net", Tags: map[string]string{"watch": "stored-net"}},
+	}
+	got, err := svc.EffectiveAll(ctx, "ten", projects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem.lists != 1 {
+		t.Fatalf("folder lists = %d, want 1", mem.lists)
+	}
+	if len(got) != 2 || got[0].EffectiveTags["watch"] != "services/pay" || got[1].EffectiveTags["watch"] != "services/net" {
+		t.Fatalf("effective = %#v", got)
+	}
+	if got[0].Tags["watch"] != "stored-pay" || got[1].Tags["watch"] != "stored-net" {
+		t.Fatalf("stored tags changed: %#v %#v", got[0].Tags, got[1].Tags)
+	}
+
+	if _, err := svc.EffectiveAll(ctx, "ten", []project.Snapshot{{TenantID: "ten", FolderID: "missing"}}); err == nil {
+		t.Fatal("expected missing folder error")
+	}
+	if mem.lists != 2 {
+		t.Fatalf("folder lists = %d, want 2", mem.lists)
+	}
+}
+
 func policySources(p project.Snapshot) map[string]bool {
 	out := map[string]bool{}
 	for _, pol := range p.EffectivePolicies {
@@ -346,6 +384,7 @@ type memFolders struct {
 	folders      map[string]folder.Snapshot
 	projects     map[project.ID]*project.Project
 	ensureCalls  []string
+	lists        int
 	saves        int
 	saveErr      error
 	deletes      int
@@ -367,6 +406,7 @@ func (m *memFolders) add(s folder.Snapshot) {
 }
 
 func (m *memFolders) ListByTenant(_ context.Context, tenantID string) ([]folder.Snapshot, error) {
+	m.lists++
 	var out []folder.Snapshot
 	for _, f := range m.folders {
 		if f.TenantID == tenantID {

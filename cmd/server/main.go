@@ -307,10 +307,12 @@ func main() {
 		Auth: &authapp.Service{
 			Store: identStore, GitHub: gh,
 			Now: now, NewID: newID, PublicBaseURL: public, ClientID: gh.ClientID,
+			Folders: rootEnsurer{folders: folderSvc},
 		},
 		Installations: &installation.Service{
 			Store: identStore, GitHub: githubAdapter{client: gh},
 			Now: now, NewID: newID,
+			Folders: rootEnsurer{folders: folderSvc},
 		},
 		WebhookSecret: webhookSecret,
 	})
@@ -534,6 +536,17 @@ func loadAppKey(path string) (*rsa.PrivateKey, error) {
 		return nil, fmt.Errorf("GITHUB_APP_PRIVATE_KEY_FILE: not an RSA key")
 	}
 	return key, nil
+}
+
+// rootEnsurer adapts folderapp.Service.EnsureRoot to the error-only call
+// auth and installation make after a successful tenant upsert.
+type rootEnsurer struct {
+	folders *folderapp.Service
+}
+
+func (r rootEnsurer) EnsureRoot(ctx context.Context, tenantID string) error {
+	_, err := r.folders.EnsureRoot(ctx, tenantID)
+	return err
 }
 
 type githubAdapter struct{ client *github.Client }

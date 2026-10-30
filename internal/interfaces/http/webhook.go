@@ -146,7 +146,7 @@ func (a *api) webhook(w http.ResponseWriter, r *http.Request) {
 	switch event {
 	case "push":
 		for _, p := range matched {
-			req, ok := pushOpen(p.Snapshot(), body)
+			req, ok := a.pushOpen(r.Context(), p.Snapshot(), body)
 			if !ok {
 				continue
 			}
@@ -160,7 +160,7 @@ func (a *api) webhook(w http.ResponseWriter, r *http.Request) {
 		}
 	case "pull_request":
 		for _, p := range matched {
-			req, ok := pullRequestOpen(p.Snapshot(), body)
+			req, ok := a.pullRequestOpen(r.Context(), p.Snapshot(), body)
 			if !ok {
 				continue
 			}
@@ -194,15 +194,21 @@ func parseRFC3339Ptr(raw string) *time.Time {
 	return nil
 }
 
-func matchesProjectPaths(ps project.Snapshot, changedFiles []string) bool {
+func (a *api) matchesProjectPaths(ctx context.Context, ps project.Snapshot, changedFiles []string) bool {
 	if len(changedFiles) == 0 {
 		return true
+	}
+	tags := ps.Tags
+	if a.folders != nil {
+		if eff, err := a.folders.Effective(ctx, ps); err == nil {
+			tags = eff.EffectiveTags
+		}
 	}
 	var prefixes []string
 	if wd := strings.Trim(strings.TrimSpace(ps.WorkingDirectory), "/"); wd != "" && wd != "." {
 		prefixes = append(prefixes, wd)
 	}
-	if watchTag := strings.Trim(strings.TrimSpace(ps.Tags["watch"]), "/"); watchTag != "" {
+	if watchTag := strings.Trim(strings.TrimSpace(tags["watch"]), "/"); watchTag != "" {
 		prefixes = append(prefixes, watchTag)
 	}
 	if len(prefixes) == 0 {
@@ -225,7 +231,7 @@ func matchesProjectPaths(ps project.Snapshot, changedFiles []string) bool {
 	return false
 }
 
-func pullRequestOpen(ps project.Snapshot, body []byte) (runapp.OpenRequest, bool) {
+func (a *api) pullRequestOpen(ctx context.Context, ps project.Snapshot, body []byte) (runapp.OpenRequest, bool) {
 	var ev struct {
 		Action      string   `json:"action"`
 		Files       []string `json:"files"`
@@ -267,7 +273,7 @@ func pullRequestOpen(ps project.Snapshot, body []byte) (runapp.OpenRequest, bool
 	var changedFiles []string
 	changedFiles = append(changedFiles, ev.Files...)
 	changedFiles = append(changedFiles, ev.PullRequest.ChangedFilesPaths...)
-	if !matchesProjectPaths(ps, changedFiles) {
+	if !a.matchesProjectPaths(ctx, ps, changedFiles) {
 		return runapp.OpenRequest{}, false
 	}
 	n := ev.PullRequest.Number
@@ -284,7 +290,7 @@ func pullRequestOpen(ps project.Snapshot, body []byte) (runapp.OpenRequest, bool
 	}, true
 }
 
-func pushOpen(ps project.Snapshot, body []byte) (runapp.OpenRequest, bool) {
+func (a *api) pushOpen(ctx context.Context, ps project.Snapshot, body []byte) (runapp.OpenRequest, bool) {
 	type commitFiles struct {
 		Added    []string `json:"added"`
 		Modified []string `json:"modified"`
@@ -327,7 +333,7 @@ func pushOpen(ps project.Snapshot, body []byte) (runapp.OpenRequest, bool) {
 	changedFiles = append(changedFiles, ev.HeadCommit.Added...)
 	changedFiles = append(changedFiles, ev.HeadCommit.Modified...)
 	changedFiles = append(changedFiles, ev.HeadCommit.Removed...)
-	if !matchesProjectPaths(ps, changedFiles) {
+	if !a.matchesProjectPaths(ctx, ps, changedFiles) {
 		return runapp.OpenRequest{}, false
 	}
 	return runapp.OpenRequest{
