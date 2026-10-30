@@ -1,5 +1,5 @@
 {{define "project"}}
-<nav class="crumb"><a href="/">Projects</a> / {{.Name}}</nav>
+<nav class="crumb"><a href="/projects">Projects</a>{{range .Breadcrumbs}} / <a href="/projects?folder={{.ID}}">{{.Name}}</a>{{end}} / {{$.Name}}</nav>
 <div class="panel">
   {{template "project_headline" .}}
   <div class="actions">

@@ -11,6 +11,8 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 
 	auditapp "infra-guy/internal/application/audit"
 	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
+	folderapp "infra-guy/internal/application/folder"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
@@ -26,6 +29,7 @@ import (
 	"infra-guy/internal/domain/audit"
 	"infra-guy/internal/domain/cloudintegration"
 	"infra-guy/internal/domain/dependency"
+	"infra-guy/internal/domain/folder"
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
 	"infra-guy/internal/domain/run"
@@ -60,6 +64,7 @@ type projectRow struct {
 	ID, Name, Repo, Branch, Status, StatusClass, StatusCategory string
 	Tags                                                        []string
 	TagsCSV                                                     string
+	FolderID, FolderPath                                        string
 	Drifted                                                     bool
 	DriftEnabled                                                bool
 	DriftStatus                                                 string
@@ -178,6 +183,10 @@ func (u *ui) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /projects", u.list)
 	mux.HandleFunc("GET /projects/new", u.newProject)
 	mux.HandleFunc("POST /projects", u.create)
+	mux.HandleFunc("POST /folders", u.createFolder)
+	mux.HandleFunc("POST /folders/{id}", u.updateFolder)
+	mux.HandleFunc("POST /folders/{id}/move", u.moveFolder)
+	mux.HandleFunc("POST /folders/{id}/delete", u.deleteFolder)
 	mux.HandleFunc("GET /projects/{id}", u.project)
 	mux.HandleFunc("GET /projects/{id}/headline", u.projectHeadline)
 	mux.HandleFunc("GET /projects/{id}/tabs/tracked", u.tabTracked)
@@ -359,7 +368,7 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := u.cfg.Projects.List(r.Context(), tenantID)
+	items, err := u.effectiveList(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -407,7 +416,7 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 
 	for _, p := range items {
 		ps := p.Snapshot()
-		tags := project.TagList(ps.Tags)
+		tags := project.TagList(ps.EffectiveTags)
 		for _, t := range tags {
 			tagCounts[t]++
 		}
@@ -420,7 +429,7 @@ func (u *ui) dashboard(w http.ResponseWriter, r *http.Request) {
 		if ps.Locked {
 			countLocked++
 		}
-		if ps.ApprovalPolicyID != "" {
+		if len(ps.EffectivePolicies) > 0 {
 			policyProtected++
 		}
 		if ps.AutoApprove {
@@ -928,7 +937,7 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := u.cfg.Projects.List(r.Context(), tenantID)
+	items, err := u.effectiveList(r.Context(), tenantID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -972,7 +981,7 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 	var filteredProjects []*project.Project
 	for _, p := range items {
 		ps := p.Snapshot()
-		for _, t := range project.TagList(ps.Tags) {
+		for _, t := range project.TagList(ps.EffectiveTags) {
 			allTagsSet[t] = true
 		}
 		if selectedProject != "" && string(ps.ID) != selectedProject {
@@ -980,7 +989,7 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 		}
 		if selectedTag != "" {
 			matched := false
-			for _, t := range project.TagList(ps.Tags) {
+			for _, t := range project.TagList(ps.EffectiveTags) {
 				if t == selectedTag {
 					matched = true
 					break
@@ -1087,11 +1096,11 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 
 	for _, p := range filteredProjects {
 		ps := p.Snapshot()
-		tags := project.TagList(ps.Tags)
+		tags := project.TagList(ps.EffectiveTags)
 		if len(tags) > 0 {
 			taggedProjectCount++
 		}
-		if ps.ApprovalPolicyID != "" {
+		if len(ps.EffectivePolicies) > 0 {
 			policyGuardedCount++
 		}
 		if ps.DriftStatus == project.DriftStatusDrifted {
@@ -1126,7 +1135,7 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 			st.workspaces++
 		}
 
-		if ps.AutoApprove && ps.ApprovalPolicyID == "" {
+		if ps.AutoApprove && len(ps.EffectivePolicies) == 0 {
 			risks = append(risks, analyticsRiskItem{
 				Severity:    "High risk",
 				BadgeClass:  "pill-failed",
@@ -1372,7 +1381,7 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 				DaysSinceLastRun: daysLabel,
 				Locked:           ps.Locked,
 				TerraformVersion: tfVer,
-				HasPolicy:        ps.ApprovalPolicyID != "",
+				HasPolicy:        len(ps.EffectivePolicies) > 0,
 			})
 		}
 
@@ -1797,7 +1806,12 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		u.picker(w, r)
 		return
 	}
-	items, err := u.cfg.Projects.List(r.Context(), tenantID)
+	items, err := u.effectiveList(r.Context(), tenantID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	tree, err := u.folderTree(r.Context(), tenantID, strings.TrimSpace(r.URL.Query().Get("folder")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1809,12 +1823,13 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 	var countNeedsApproval, countFailed, countInProgress, countFinished int
 	for _, p := range items {
 		ps := p.Snapshot()
-		tags := project.TagList(ps.Tags)
+		tags := project.TagList(ps.EffectiveTags)
 		if !matchesProjectFilter(ps.Name, ps.DefaultBranch, tags, filterName, filterBranch, filterTag) {
 			continue
 		}
 		row := projectRow{
 			ID: string(ps.ID), Name: ps.Name, Repo: ps.Repo.String(), Branch: ps.DefaultBranch,
+			FolderID: ps.FolderID, FolderPath: tree.paths[ps.FolderID],
 			Tags: tags, TagsCSV: strings.Join(tags, ","),
 			DriftEnabled:     ps.DriftEnabled,
 			DriftStatus:      ps.DriftStatus,
@@ -1854,6 +1869,11 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 	}
 	u.page(w, "Projects", "projects", map[string]any{
 		"Projects":           rows,
+		"Folders":            tree.nodes,
+		"SelectedFolder":     tree.selected,
+		"HasFolders":         len(tree.nodes) > 0,
+		"NewFolderFields":    folderFields{Policies: u.policyChoicesFor(r.Context(), tenantID, nil)},
+		"EditFolderFields":   folderFields{Policies: u.policyChoicesFor(r.Context(), tenantID, tree.selected.PolicyIDs), PassDown: tree.selected.PassDown, TagsSet: tree.selected.TagsSet, Tags: tree.selected.Tags, IsRoot: tree.selected.IsRoot},
 		"Policies":           u.policyChoices(r.Context(), tenantID, ""),
 		"FilterName":         filterName,
 		"FilterBranch":       filterBranch,
@@ -1889,7 +1909,7 @@ func collectKnownBranches(items []*project.Project) []string {
 func collectKnownTags(items []*project.Project) []string {
 	seen := make(map[string]struct{})
 	for _, p := range items {
-		for _, t := range project.TagList(p.Snapshot().Tags) {
+		for _, t := range project.TagList(p.Snapshot().EffectiveTags) {
 			seen[t] = struct{}{}
 		}
 	}
@@ -1910,9 +1930,9 @@ func (u *ui) knownTags(ctx context.Context, tenantID string) []string {
 	}
 	seen := make(map[string]struct{})
 	if u.cfg.Projects != nil {
-		if items, err := u.cfg.Projects.List(ctx, tenantID); err == nil {
+		if items, err := u.effectiveList(ctx, tenantID); err == nil {
 			for _, p := range items {
-				for _, t := range project.TagList(p.Snapshot().Tags) {
+				for _, t := range project.TagList(p.Snapshot().EffectiveTags) {
 					seen[t] = struct{}{}
 				}
 			}
@@ -1991,6 +2011,11 @@ func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
 		u.page(w, "New project", "new_project", nil)
 		return
 	}
+	tree, err := u.folderTree(r.Context(), tenantID, strings.TrimSpace(r.URL.Query().Get("folder")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	repos, err := u.cfg.Installations.Repos(r.Context(), tenantID)
 	if err != nil {
 		if errors.Is(err, installation.ErrNotInstalled) {
@@ -2018,6 +2043,10 @@ func (u *ui) newProject(w http.ResponseWriter, r *http.Request) {
 		"Policies":          u.policyChoices(r.Context(), tenantID, ""),
 		"CloudIntegrations": u.cloudIntegrationChoices(r.Context(), tenantID, ""),
 		"EngineForm":        engineFormFrom(nil),
+		"Folders":           tree.nodes,
+		"FolderID":          tree.selected.ID,
+		"FolderPolicies":    u.applicableFolderPolicies(r.Context(), tenantID, tree.selected.ID),
+		"InheritedTags":     project.FormatTags(u.folderEffectiveTags(r.Context(), tenantID, tree.selected.ID)),
 	})
 }
 
@@ -2031,10 +2060,19 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
 	}
-	policyID := strings.TrimSpace(r.FormValue("approval_policy_id"))
-	if policyID != "" && u.cfg.Policies != nil {
-		if _, err := u.cfg.Policies.Get(r.Context(), tenantID, policy.ID(policyID)); err != nil {
-			http.Error(w, "invalid approval_policy_id", http.StatusBadRequest)
+	replacePolicies := r.FormValue("policy_field") == "1"
+	var policyIDs []string
+	if replacePolicies {
+		policyIDs = r.Form["policy_id"]
+		if !u.validPolicyIDs(r, tenantID, policyIDs) {
+			http.Error(w, "invalid policy_id", http.StatusBadRequest)
+			return
+		}
+	}
+	folderID := strings.TrimSpace(r.FormValue("folder_id"))
+	if folderID != "" && u.cfg.Folders != nil {
+		if _, err := u.cfg.Folders.Get(r.Context(), tenantID, folderID); err != nil {
+			u.folderError(w, err)
 			return
 		}
 	}
@@ -2064,10 +2102,14 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repository not found", http.StatusBadRequest)
 		return
 	}
-	tags, err := project.ParseTags(r.FormValue("tags"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	var tags map[string]string
+	overrideTags := r.FormValue("tags_override") == "on"
+	if overrideTags {
+		tags, err = project.ParseTags(r.FormValue("tags"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	sourceRepo := project.SourceRepo{Owner: match.Owner, Name: match.Name}
 	branch := strings.TrimSpace(r.FormValue("branch"))
@@ -2079,8 +2121,24 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if len(tags) > 0 {
-		if err := u.cfg.Projects.SetTags(r.Context(), p.Snapshot().ID, tags); err != nil {
+	if folderID != "" && u.cfg.Folders != nil {
+		if err := u.cfg.Projects.MoveToFolder(r.Context(), p.Snapshot().ID, folderID, policyIDs, replacePolicies); err != nil {
+			u.folderError(w, err)
+			return
+		}
+	} else if replacePolicies {
+		if err := u.editProject(r.Context(), p.Snapshot().ID, func(p *project.Project) error {
+			p.SetPolicyIDs(policyIDs)
+			return nil
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if overrideTags {
+		if err := u.editProject(r.Context(), p.Snapshot().ID, func(p *project.Project) error {
+			return p.SetTagOverride(tags)
+		}); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -2092,12 +2150,6 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 	if err := u.cfg.Projects.SetEngine(r.Context(), p.Snapshot().ID, r.FormValue("engine"), engineConfigFromRequest(r)); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
-	if policyID != "" {
-		if err := u.cfg.Projects.UpdateApprovalPolicy(r.Context(), p.Snapshot().ID, policyID); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
 	}
 	if r.FormValue("drift_enabled") == "on" {
 		interval, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("drift_interval_minutes")))
@@ -2126,7 +2178,7 @@ func (u *ui) create(w http.ResponseWriter, r *http.Request) {
 	}
 	u.recordAudit(r, tenantID, "workspace.created", "workspace", string(p.Snapshot().ID), p.Snapshot().Name,
 		fmt.Sprintf("Created workspace %s (%s)", p.Snapshot().Name, sourceRepo.String()),
-		map[string]any{"repo": sourceRepo.String(), "branch": branch, "tags": project.FormatTags(tags), "approval_policy_id": policyID})
+		map[string]any{"repo": sourceRepo.String(), "branch": branch, "tags": project.FormatTags(tags), "folder_id": folderID, "policy_ids": policyIDs})
 	http.Redirect(w, r, "/projects/"+string(p.Snapshot().ID), http.StatusSeeOther)
 }
 
@@ -2448,12 +2500,28 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 	if driftInterval <= 0 {
 		driftInterval = project.DefaultDriftIntervalMinutes
 	}
+	tree, err := u.folderTree(r.Context(), ps.TenantID, ps.FolderID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ownPolicies := u.policyChoicesFor(r.Context(), ps.TenantID, ps.PolicyIDs)
+	tagText := project.FormatTags(ps.EffectiveTags)
+	tagsLabel := "Inherited"
+	if ps.TagsOverridden {
+		tagsLabel = "Override"
+	}
 	u.page(w, ps.Name+" details", "details", map[string]any{
-		"ID": string(ps.ID), "Name": ps.Name, "Repo": ps.Repo.String(),
+		"Breadcrumbs":     tree.crumbs(ps.FolderID),
+		"Folders":         tree.nodes,
+		"FolderID":        ps.FolderID,
+		"AppliedPolicies": u.appliedFolderPolicies(r.Context(), ps),
+		"TagsOverridden":  ps.TagsOverridden,
+		"TagsLabel":       tagsLabel,
+		"ID":              string(ps.ID), "Name": ps.Name, "Repo": ps.Repo.String(),
 		"AutoApprove": ps.AutoApprove, "Locked": ps.Locked,
 		"Branch": ps.DefaultBranch, "Workdir": ps.WorkingDirectory,
 		"TerraformVersion":          ps.TerraformVersion,
-		"ApprovalPolicyID":          ps.ApprovalPolicyID,
 		"DriftEnabled":              ps.DriftEnabled,
 		"DriftIntervalMinutes":      driftInterval,
 		"DriftStatus":               ps.DriftStatus,
@@ -2462,15 +2530,15 @@ func (u *ui) details(w http.ResponseWriter, r *http.Request) {
 		"TTLHours":                  ps.TTLHours,
 		"AutoDestroy":               ps.AutoDestroy,
 		"ExpiresAt":                 fmtTimePtr(ps.ExpiresAt),
-		"Tags":                      project.FormatTags(ps.Tags),
-		"TagList":                   project.TagList(ps.Tags),
+		"Tags":                      tagText,
+		"TagList":                   project.TagList(ps.EffectiveTags),
 		"KnownTags":                 u.knownTags(r.Context(), ps.TenantID),
 		"Versions":                  u.versions(r.Context()),
 		"Contexts":                  u.contextChoices(r.Context(), ps.TenantID, ps.ID),
-		"Policies":                  u.policyChoices(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID)),
-		"TagBoundPolicies":          u.tagBoundPolicies(r.Context(), ps.TenantID, policy.ID(ps.ApprovalPolicyID), ps.Tags),
+		"Policies":                  ownPolicies,
+		"TagBoundPolicies":          u.tagBoundPolicies(r.Context(), ps.TenantID, effectivePolicyIDs(ps), ps.EffectiveTags),
 		"CloudIntegrations":         u.cloudIntegrationChoices(r.Context(), ps.TenantID, ps.ID),
-		"TagBoundCloudIntegrations": u.tagBoundCloudIntegrations(r.Context(), ps.TenantID, ps.ID, ps.Tags),
+		"TagBoundCloudIntegrations": u.tagBoundCloudIntegrations(r.Context(), ps.TenantID, ps.ID, ps.EffectiveTags),
 		"EngineForm":                engineFormFrom(&ps),
 	})
 }
@@ -2486,18 +2554,29 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 	}
 	ps := p.Snapshot()
 	id := ps.ID
+	newFolderID := strings.TrimSpace(r.FormValue("folder_id"))
+	moved := u.cfg.Folders != nil && newFolderID != "" && newFolderID != ps.FolderID
+	overrideTags := r.FormValue("tags_override") == "on"
 	var tags map[string]string
-	if r.Form.Has("tags") {
+	if overrideTags && !moved {
 		tags, err = project.ParseTags(r.FormValue("tags"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
-	policyID := strings.TrimSpace(r.FormValue("approval_policy_id"))
-	if policyID != "" && u.cfg.Policies != nil {
-		if _, err := u.cfg.Policies.Get(r.Context(), ps.TenantID, policy.ID(policyID)); err != nil {
-			http.Error(w, "invalid approval_policy_id", http.StatusBadRequest)
+	replacePolicies := r.FormValue("policy_field") == "1"
+	var policyIDs []string
+	if replacePolicies {
+		policyIDs = r.Form["policy_id"]
+		if !u.validPolicyIDs(r, ps.TenantID, policyIDs) {
+			http.Error(w, "invalid policy_id", http.StatusBadRequest)
+			return
+		}
+	}
+	if moved {
+		if err := u.cfg.Projects.MoveToFolder(r.Context(), id, newFolderID, policyIDs, replacePolicies); err != nil {
+			u.folderError(w, err)
 			return
 		}
 	}
@@ -2513,8 +2592,6 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 		EngineConfig:         engineConfigFromRequest(r),
 		TerraformVersion:     r.FormValue("terraform_version"),
 		AutoApprove:          r.FormValue("auto_approve") == "on",
-		ApprovalPolicyID:     policyID,
-		Tags:                 tags,
 		UpdateDrift:          r.Form.Has("drift_interval_minutes") || r.Form.Has("drift_enabled"),
 		DriftEnabled:         driftEnabled,
 		DriftIntervalMinutes: driftInterval,
@@ -2525,9 +2602,20 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := u.cfg.Projects.UpdateApprovalPolicy(r.Context(), id, policyID); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	if !moved && (replacePolicies || r.Form.Has("tags_override") || r.Form.Has("tags")) {
+		if err := u.editProject(r.Context(), id, func(p *project.Project) error {
+			if replacePolicies {
+				p.SetPolicyIDs(policyIDs)
+			}
+			if overrideTags {
+				return p.SetTagOverride(tags)
+			}
+			p.ClearTagOverride()
+			return nil
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if u.cfg.Contexts != nil {
 		if err := u.cfg.Contexts.SetProjectContexts(r.Context(), ps.TenantID, id, parseContextIDs(r.Form["context_ids"])); err != nil {
@@ -2541,11 +2629,27 @@ func (u *ui) update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if moved {
+		var movedPolicyIDs []string
+		var movedTags map[string]string
+		if after, err := u.cfg.Projects.Get(r.Context(), id); err == nil && after != nil {
+			if eff, err := u.effectiveProject(r.Context(), after); err == nil {
+				movedPolicyIDs = eff.Snapshot().PolicyIDs
+				movedTags = eff.Snapshot().EffectiveTags
+			}
+		}
+		u.recordAudit(r, ps.TenantID, "workspace.moved", "workspace", string(id), ps.Name,
+			fmt.Sprintf("Moved workspace %s to another folder", ps.Name),
+			map[string]any{
+				"from_folder_id": ps.FolderID, "to_folder_id": newFolderID,
+				"policy_ids": movedPolicyIDs, "tags": project.FormatTags(movedTags),
+			})
+	}
 	u.recordAudit(r, ps.TenantID, "workspace.updated", "workspace", string(id), ps.Name,
 		fmt.Sprintf("Updated settings for workspace %s", ps.Name),
 		map[string]any{
 			"branch": r.FormValue("branch"), "workdir": r.FormValue("workdir"),
-			"auto_approve": r.FormValue("auto_approve") == "on", "approval_policy_id": policyID,
+			"auto_approve": r.FormValue("auto_approve") == "on", "policy_ids": policyIDs,
 			"drift_enabled": driftEnabled, "drift_interval_minutes": driftInterval,
 			"ttl_hours": ttlHours, "auto_destroy": autoDestroy,
 			"tags": project.FormatTags(tags),
@@ -2570,7 +2674,14 @@ func (u *ui) updateProjectPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := u.cfg.Projects.UpdateApprovalPolicy(r.Context(), ps.ID, policyID); err != nil {
+	var ownIDs []string
+	if policyID != "" {
+		ownIDs = []string{policyID}
+	}
+	if err := u.editProject(r.Context(), ps.ID, func(p *project.Project) error {
+		p.SetPolicyIDs(ownIDs)
+		return nil
+	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -2911,19 +3022,24 @@ func (u *ui) confirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rs := rn.Snapshot()
-	ps := p.Snapshot()
-	if ps.ApprovalPolicyID != "" && u.cfg.Policies == nil {
+	ps, err := u.effectiveSnapshot(r.Context(), p.Snapshot())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	policyIDs := effectivePolicyIDs(ps)
+	if len(policyIDs) > 0 && u.cfg.Policies == nil {
 		http.Error(w, "policy service not configured", http.StatusInternalServerError)
 		return
 	}
 	if u.cfg.Policies != nil {
-		resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, []policy.ID{policy.ID(ps.ApprovalPolicyID)}, ps.Tags)
+		resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, policyIDs, ps.EffectiveTags)
 		if rErr != nil {
 			http.Error(w, "Policy evaluation failed: "+rErr.Error(), http.StatusForbidden)
 			return
 		}
 		if len(resolved) > 0 {
-			res, evalErr := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, []policy.ID{policy.ID(ps.ApprovalPolicyID)}, ps.Tags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
+			res, evalErr := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, policyIDs, ps.EffectiveTags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
 			if evalErr != nil {
 				http.Error(w, "Policy evaluation failed: "+evalErr.Error(), http.StatusForbidden)
 				return
@@ -3000,7 +3116,12 @@ func (u *ui) getProject(w http.ResponseWriter, r *http.Request) (*project.Projec
 		http.NotFound(w, r)
 		return nil, fmt.Errorf("not found")
 	}
-	return p, nil
+	eff, err := u.effectiveProject(r.Context(), p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil, err
+	}
+	return eff, nil
 }
 
 func (u *ui) loadProject(w http.ResponseWriter, r *http.Request) (*project.Project, []*run.Run, error) {
@@ -3051,7 +3172,12 @@ func (u *ui) loadRun(w http.ResponseWriter, r *http.Request) (*run.Run, *project
 		http.NotFound(w, r)
 		return nil, nil, fmt.Errorf("not found")
 	}
-	return rn, p, nil
+	eff, err := u.effectiveProject(r.Context(), p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil, nil, err
+	}
+	return rn, eff, nil
 }
 
 func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, panel template.HTML) map[string]any {
@@ -3068,8 +3194,15 @@ func (u *ui) projectView(r *http.Request, ps project.Snapshot, runs []*run.Run, 
 			}
 		}
 	}
+	var crumbs []folderCrumb
+	if panel != "" {
+		if tree, err := u.folderTree(r.Context(), ps.TenantID, ps.FolderID); err == nil {
+			crumbs = tree.crumbs(ps.FolderID)
+		}
+	}
 	return map[string]any{
-		"ID": string(ps.ID), "Name": ps.Name, "Locked": ps.Locked,
+		"Breadcrumbs": crumbs,
+		"ID":          string(ps.ID), "Name": ps.Name, "Locked": ps.Locked,
 		"LatestLabel": latestLabel(latest), "LatestClass": latestClass(latest),
 		"Meta": projectMeta(ps, latest, meta), "Empty": len(runs) == 0,
 		"Panel":             panel,
@@ -3105,7 +3238,7 @@ func projectMeta(ps project.Snapshot, latest *run.Snapshot, meta state.Metadata)
 		Repo:             ps.Repo.String(),
 		Workdir:          ps.WorkingDirectory,
 		Branch:           ps.DefaultBranch,
-		Tags:             project.TagList(ps.Tags),
+		Tags:             project.TagList(ps.EffectiveTags),
 		ShowManagedBy:    ps.Engine == "" || ps.Engine == project.EngineTerraform,
 	}
 	if ps.Engine != "" && ps.Engine != project.EngineTerraform {
@@ -3936,11 +4069,11 @@ func approvalsInfoFrom(approvals []run.Approval) []policyapp.ApprovalInfo {
 	return out
 }
 
-func (u *ui) tagBoundPolicies(ctx context.Context, tenantID string, explicitID policy.ID, projectTags map[string]string) []tagBoundPolicyView {
+func (u *ui) tagBoundPolicies(ctx context.Context, tenantID string, explicitIDs []policy.ID, projectTags map[string]string) []tagBoundPolicyView {
 	if u.cfg.Policies == nil || tenantID == "" {
 		return nil
 	}
-	resolved, err := u.cfg.Policies.ResolveForProject(ctx, tenantID, []policy.ID{explicitID}, projectTags)
+	resolved, err := u.cfg.Policies.ResolveForProject(ctx, tenantID, explicitIDs, projectTags)
 	if err != nil {
 		return nil
 	}
@@ -3981,19 +4114,30 @@ func (u *ui) evaluateRunPolicy(r *http.Request, ps project.Snapshot, rs run.Snap
 	if !approvable || u.cfg.Policies == nil {
 		return nil
 	}
-	resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, []policy.ID{policy.ID(ps.ApprovalPolicyID)}, ps.Tags)
+	ps, effErr := u.effectiveSnapshot(r.Context(), ps)
+	if effErr != nil {
+		return &runPolicyEvalView{
+			Allowed: false,
+			Deny:    []string{"Policy evaluation error: " + effErr.Error()},
+		}
+	}
+	policyIDs := effectivePolicyIDs(ps)
+	resolved, rErr := u.cfg.Policies.ResolveForProject(r.Context(), ps.TenantID, policyIDs, ps.EffectiveTags)
 	if rErr == nil && len(resolved) == 0 {
 		return nil
 	}
-	polID := policy.ID(ps.ApprovalPolicyID)
-	polName := u.policyName(r.Context(), ps.TenantID, polID)
-	if polName == "" {
-		polName = ps.ApprovalPolicyID
+	var firstID policy.ID
+	if len(policyIDs) > 0 {
+		firstID = policyIDs[0]
 	}
-	res, err := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, []policy.ID{polID}, ps.Tags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
+	polName := u.policyName(r.Context(), ps.TenantID, firstID)
+	if polName == "" {
+		polName = string(firstID)
+	}
+	res, err := u.cfg.Policies.EvaluateForProject(r.Context(), ps.TenantID, policyIDs, ps.EffectiveTags, rs.PlanJSON, u.userInfo(r), projectInfoFrom(ps), approvalsInfoFrom(rs.Approvals))
 	if err != nil {
 		return &runPolicyEvalView{
-			PolicyID:   ps.ApprovalPolicyID,
+			PolicyID:   string(firstID),
 			PolicyName: polName,
 			Allowed:    false,
 			Deny:       []string{"Policy evaluation error: " + err.Error()},
@@ -5208,4 +5352,438 @@ func (u *ui) deleteCloudIntegration(w http.ResponseWriter, r *http.Request) {
 	u.recordAudit(r, tenantID, "cloud_integration.deleted", "cloud_integration", string(id), name,
 		fmt.Sprintf("Deleted cloud integration %s", name), nil)
 	http.Redirect(w, r, "/cloud-integrations", http.StatusSeeOther)
+}
+
+// effectiveSnapshot resolves stacked folder policies and the nearest tags for a stored project.
+// Without a folder service the project is treated as having no folder: only its own ids and tags apply.
+func (u *ui) effectiveSnapshot(ctx context.Context, ps project.Snapshot) (project.Snapshot, error) {
+	if u.cfg.Folders != nil {
+		return u.cfg.Folders.Effective(ctx, ps)
+	}
+	ps.EffectiveTags = map[string]string{}
+	for k, v := range ps.Tags {
+		ps.EffectiveTags[k] = v
+	}
+	ids := append([]string(nil), ps.PolicyIDs...)
+	sort.Strings(ids)
+	ps.EffectivePolicies = nil
+	for _, id := range ids {
+		ps.EffectivePolicies = append(ps.EffectivePolicies, project.EffectivePolicy{PolicyID: id, Source: "project"})
+	}
+	return ps, nil
+}
+
+func (u *ui) effectiveProject(ctx context.Context, p *project.Project) (*project.Project, error) {
+	eff, err := u.effectiveSnapshot(ctx, p.Snapshot())
+	if err != nil {
+		return nil, err
+	}
+	return project.Restore(eff), nil
+}
+
+func (u *ui) effectiveList(ctx context.Context, tenantID string) ([]*project.Project, error) {
+	items, err := u.cfg.Projects.List(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*project.Project, 0, len(items))
+	for _, p := range items {
+		eff, err := u.effectiveProject(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, eff)
+	}
+	return out, nil
+}
+
+func effectivePolicyIDs(ps project.Snapshot) []policy.ID {
+	if len(ps.EffectivePolicies) == 0 {
+		return nil
+	}
+	out := make([]policy.ID, 0, len(ps.EffectivePolicies))
+	for _, ep := range ps.EffectivePolicies {
+		out = append(out, policy.ID(ep.PolicyID))
+	}
+	return out
+}
+
+// editProject loads the stored project, applies fn, and saves it.
+func (u *ui) editProject(ctx context.Context, id project.ID, fn func(*project.Project) error) error {
+	p, err := u.cfg.Projects.Projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return fmt.Errorf("project %s not found", id)
+	}
+	if err := fn(p); err != nil {
+		return err
+	}
+	return u.cfg.Projects.Projects.Save(ctx, p)
+}
+
+func (u *ui) validPolicyIDs(r *http.Request, tenantID string, ids []string) bool {
+	if u.cfg.Policies == nil {
+		return true
+	}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, err := u.cfg.Policies.Get(r.Context(), tenantID, policy.ID(id)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (u *ui) policyChoicesFor(ctx context.Context, tenantID string, selected []string) []policyChoice {
+	chosen := make(map[string]bool, len(selected))
+	for _, id := range selected {
+		chosen[strings.TrimSpace(id)] = true
+	}
+	out := u.policyChoices(ctx, tenantID, "")
+	for i := range out {
+		out[i].Selected = chosen[out[i].ID]
+	}
+	return out
+}
+
+// folderFields feeds the shared folder policy and tag inputs.
+type folderFields struct {
+	Policies          []policyChoice
+	PassDown, TagsSet bool
+	IsRoot            bool
+	Tags              string
+}
+
+type folderNode struct {
+	ID, ParentID, Name, Path, Label string
+	Depth, Indent                   int
+	Selected, IsRoot                bool
+	PassDown, TagsSet               bool
+	Tags                            string
+	PolicyIDs                       []string
+}
+
+type folderCrumb struct{ ID, Name string }
+
+type folderTreeView struct {
+	nodes    []folderNode
+	selected folderNode
+	paths    map[string]string
+	byID     map[string]folderNode
+}
+
+func (t folderTreeView) crumbs(folderID string) []folderCrumb {
+	var chain []folderCrumb
+	seen := map[string]bool{}
+	for id := folderID; id != "" && !seen[id]; {
+		seen[id] = true
+		n, ok := t.byID[id]
+		if !ok {
+			break
+		}
+		chain = append([]folderCrumb{{ID: n.ID, Name: n.Name}}, chain...)
+		id = n.ParentID
+	}
+	return chain
+}
+
+// folderTree lists the tenant's folders depth first. An unknown or empty selection picks the root.
+func (u *ui) folderTree(ctx context.Context, tenantID, selectedID string) (folderTreeView, error) {
+	view := folderTreeView{paths: map[string]string{}, byID: map[string]folderNode{}}
+	if u.cfg.Folders == nil || tenantID == "" {
+		return view, nil
+	}
+	root, err := u.cfg.Folders.EnsureRoot(ctx, tenantID)
+	if err != nil {
+		return view, err
+	}
+	folders, err := u.cfg.Folders.List(ctx, tenantID)
+	if err != nil {
+		return view, err
+	}
+	children := map[string][]folder.Snapshot{}
+	byID := map[string]folder.Snapshot{}
+	for _, f := range folders {
+		byID[f.ID] = f
+		children[f.ParentID] = append(children[f.ParentID], f)
+	}
+	for _, list := range children {
+		sort.Slice(list, func(i, j int) bool {
+			a, b := strings.ToLower(list[i].Name), strings.ToLower(list[j].Name)
+			if a != b {
+				return a < b
+			}
+			return list[i].ID < list[j].ID
+		})
+	}
+	if _, ok := byID[selectedID]; !ok {
+		selectedID = root.ID
+	}
+	var walk func(f folder.Snapshot, parentPath string, depth int)
+	walk = func(f folder.Snapshot, parentPath string, depth int) {
+		path := f.ID
+		if parentPath != "" {
+			path = parentPath + "/" + f.ID
+		}
+		node := folderNode{
+			ID: f.ID, ParentID: f.ParentID, Name: f.Name, Path: path,
+			Label: strings.Repeat("\u2014 ", depth) + f.Name,
+			Depth: depth, Indent: depth * 16,
+			Selected: f.ID == selectedID, IsRoot: f.ParentID == "",
+			PassDown: f.PassDown, TagsSet: f.TagsSet,
+			Tags: project.FormatTags(f.Tags), PolicyIDs: append([]string(nil), f.PolicyIDs...),
+		}
+		view.nodes = append(view.nodes, node)
+		view.paths[f.ID] = path
+		view.byID[f.ID] = node
+		if node.Selected {
+			view.selected = node
+		}
+		for _, child := range children[f.ID] {
+			walk(child, path, depth+1)
+		}
+	}
+	for _, top := range children[""] {
+		walk(top, "", 0)
+	}
+	return view, nil
+}
+
+type appliedPolicy struct {
+	ID, Name, Label string
+}
+
+func (u *ui) appliedFromEffective(ctx context.Context, ps project.Snapshot) []appliedPolicy {
+	var out []appliedPolicy
+	for _, ep := range ps.EffectivePolicies {
+		if ep.Source == "project" {
+			continue
+		}
+		label := "Passed down"
+		if ep.Source == ps.FolderID {
+			label = "This folder"
+		}
+		out = append(out, appliedPolicy{
+			ID:    ep.PolicyID,
+			Name:  firstNonEmpty(u.policyName(ctx, ps.TenantID, policy.ID(ep.PolicyID)), ep.PolicyID),
+			Label: label,
+		})
+	}
+	return out
+}
+
+func (u *ui) appliedFolderPolicies(ctx context.Context, ps project.Snapshot) []appliedPolicy {
+	return u.appliedFromEffective(ctx, ps)
+}
+
+// applicableFolderPolicies lists what a new project in the folder would inherit.
+func (u *ui) applicableFolderPolicies(ctx context.Context, tenantID, folderID string) []appliedPolicy {
+	if u.cfg.Folders == nil || folderID == "" {
+		return nil
+	}
+	eff, err := u.cfg.Folders.Effective(ctx, project.Snapshot{TenantID: tenantID, FolderID: folderID})
+	if err != nil {
+		return nil
+	}
+	return u.appliedFromEffective(ctx, eff)
+}
+
+func (u *ui) folderEffectiveTags(ctx context.Context, tenantID, folderID string) map[string]string {
+	if u.cfg.Folders == nil || folderID == "" {
+		return nil
+	}
+	eff, err := u.cfg.Folders.Effective(ctx, project.Snapshot{TenantID: tenantID, FolderID: folderID})
+	if err != nil {
+		return nil
+	}
+	return eff.EffectiveTags
+}
+
+var notFoundError = regexp.MustCompile(`^(folder|project) \S+ not found$`)
+
+var folderDomainErrors = map[string]bool{
+	"folder name is required":                     true,
+	"folder name cannot contain a slash":          true,
+	"folder name contains invalid characters":     true,
+	"folder name is too long":                     true,
+	"a folder with that name already exists here": true,
+	"the root folder cannot be deleted":           true,
+	"the root folder cannot be moved":             true,
+	"the root folder must set its own tags":       true,
+	"folder cannot be moved under itself":         true,
+	"folder depth cannot exceed 8":                true,
+}
+
+func (u *ui) folderError(w http.ResponseWriter, err error) {
+	msg := err.Error()
+	switch {
+	case notFoundError.MatchString(msg):
+		http.Error(w, msg, http.StatusNotFound)
+	case folderDomainErrors[msg] || errors.Is(err, project.ErrInvalidTag):
+		http.Error(w, msg, http.StatusBadRequest)
+	default:
+		http.Error(w, msg, http.StatusInternalServerError)
+	}
+}
+
+func (u *ui) folderTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return "", false
+	}
+	_, tenantID, _, ok := SessionFrom(r.Context())
+	if !ok || tenantID == "" {
+		http.Error(w, "session required", http.StatusUnauthorized)
+		return "", false
+	}
+	if u.cfg.Folders == nil {
+		http.Error(w, "folder service not configured", http.StatusInternalServerError)
+		return "", false
+	}
+	return tenantID, true
+}
+
+type folderSettingsForm struct {
+	name      string
+	passDown  bool
+	policyIDs []string
+	tagsSet   bool
+	tags      map[string]string
+}
+
+func (u *ui) parseFolderSettings(w http.ResponseWriter, r *http.Request, tenantID string) (folderSettingsForm, bool) {
+	f := folderSettingsForm{
+		name:      r.FormValue("name"),
+		passDown:  r.FormValue("pass_down") == "on",
+		policyIDs: r.Form["policy_id"],
+		tagsSet:   r.FormValue("tags_set") == "on",
+	}
+	if !u.validPolicyIDs(r, tenantID, f.policyIDs) {
+		http.Error(w, "invalid policy_id", http.StatusBadRequest)
+		return f, false
+	}
+	if f.tagsSet {
+		tags, err := project.ParseTags(r.FormValue("tags"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return f, false
+		}
+		f.tags = tags
+	}
+	return f, true
+}
+
+func folderRedirect(id string) string { return "/projects?folder=" + url.QueryEscape(id) }
+
+func (u *ui) createFolder(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := u.folderTenant(w, r)
+	if !ok {
+		return
+	}
+	form, ok := u.parseFolderSettings(w, r, tenantID)
+	if !ok {
+		return
+	}
+	in := folderapp.CreateInput{
+		TenantID: tenantID, ParentID: strings.TrimSpace(r.FormValue("parent_id")), Name: form.name,
+		TagsSet: form.tagsSet, Tags: form.tags,
+	}
+	in.PassDown = form.passDown
+	in.PolicyIDs = form.policyIDs
+	created, err := u.cfg.Folders.Create(r.Context(), in)
+	if err != nil {
+		u.folderError(w, err)
+		return
+	}
+	u.recordAudit(r, tenantID, "folder.created", "folder", created.ID, created.Name,
+		fmt.Sprintf("Created folder %s", created.Name),
+		map[string]any{"parent_id": created.ParentID, "pass_down": created.PassDown, "policy_ids": created.PolicyIDs, "tags": project.FormatTags(created.Tags)})
+	http.Redirect(w, r, folderRedirect(created.ID), http.StatusSeeOther)
+}
+
+func (u *ui) updateFolder(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := u.folderTenant(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	before, err := u.cfg.Folders.Get(r.Context(), tenantID, id)
+	if err != nil {
+		u.folderError(w, err)
+		return
+	}
+	form, ok := u.parseFolderSettings(w, r, tenantID)
+	if !ok {
+		return
+	}
+	updateTags := r.Form.Has("tags_field")
+	updated, err := u.cfg.Folders.UpdateSettings(r.Context(), folderapp.SettingsInput{
+		TenantID: tenantID, ID: id, Name: form.name,
+		PassDown: form.passDown, PolicyIDs: form.policyIDs, TagsSet: form.tagsSet, Tags: form.tags,
+		UpdateTags: updateTags,
+	})
+	if err != nil {
+		u.folderError(w, err)
+		return
+	}
+	if updated.Name != before.Name {
+		u.recordAudit(r, tenantID, "folder.renamed", "folder", updated.ID, updated.Name,
+			fmt.Sprintf("Renamed folder %s to %s", before.Name, updated.Name),
+			map[string]any{"from": before.Name, "to": updated.Name})
+	}
+	if updateTags {
+		u.recordAudit(r, tenantID, "folder.settings_updated", "folder", updated.ID, updated.Name,
+			fmt.Sprintf("Updated settings for folder %s", updated.Name),
+			map[string]any{"pass_down": updated.PassDown, "policy_ids": updated.PolicyIDs, "tags_set": updated.TagsSet, "tags": project.FormatTags(updated.Tags)})
+	}
+	http.Redirect(w, r, folderRedirect(updated.ID), http.StatusSeeOther)
+}
+
+func (u *ui) moveFolder(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := u.folderTenant(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	before, err := u.cfg.Folders.Get(r.Context(), tenantID, id)
+	if err != nil {
+		u.folderError(w, err)
+		return
+	}
+	parentID := strings.TrimSpace(r.FormValue("parent_id"))
+	if err := u.cfg.Folders.Move(r.Context(), tenantID, id, parentID); err != nil {
+		u.folderError(w, err)
+		return
+	}
+	u.recordAudit(r, tenantID, "folder.moved", "folder", before.ID, before.Name,
+		fmt.Sprintf("Moved folder %s", before.Name),
+		map[string]any{"from_parent_id": before.ParentID, "to_parent_id": parentID})
+	http.Redirect(w, r, folderRedirect(id), http.StatusSeeOther)
+}
+
+func (u *ui) deleteFolder(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := u.folderTenant(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	before, err := u.cfg.Folders.Get(r.Context(), tenantID, id)
+	if err != nil {
+		u.folderError(w, err)
+		return
+	}
+	parentID, err := u.cfg.Folders.Delete(r.Context(), tenantID, id)
+	if err != nil {
+		u.folderError(w, err)
+		return
+	}
+	u.recordAudit(r, tenantID, "folder.deleted", "folder", before.ID, before.Name,
+		fmt.Sprintf("Deleted folder %s", before.Name),
+		map[string]any{"parent_id": parentID})
+	http.Redirect(w, r, folderRedirect(parentID), http.StatusSeeOther)
 }

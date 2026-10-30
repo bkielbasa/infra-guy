@@ -202,6 +202,7 @@ func main() {
 		Now:     now,
 		NewID:   newID,
 	}
+	projectSvc.Folders = folderSvc
 
 	helmReleases := postgres.NewHelmReleaseRepo(pool)
 	dependencyRepo := postgres.NewDependencyRepo(pool)
@@ -289,6 +290,7 @@ func main() {
 
 	h := httpapi.NewServer(httpapi.ServerConfig{
 		Projects:          projectSvc,
+		Folders:           folderSvc,
 		Runs:              runSvc,
 		States:            stateSvc,
 		HelmReleases:      helmReleases,

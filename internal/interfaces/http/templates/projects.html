@@ -5,8 +5,67 @@
       <h1>Projects</h1>
       <p class="settings-card-desc">Filter and inspect Terraform workspaces across repositories and branches.</p>
     </div>
-    <a href="/projects/new" class="btn btn-trigger">New project</a>
+    <a href="/projects/new{{if .SelectedFolder.ID}}?folder={{.SelectedFolder.ID}}{{end}}" class="btn btn-trigger">New project</a>
   </div>
+
+  {{if .HasFolders}}
+  <section class="panel folder-panel" id="folder-panel">
+    <h2>Folders</h2>
+    <ul class="folder-tree" id="folder-tree">
+      {{range .Folders}}
+      <li class="folder-node{{if .Selected}} selected{{end}}" data-folder-id="{{.ID}}" data-folder-path="{{.Path}}"{{if .Selected}} aria-current="true"{{end}} style="padding-left: {{.Indent}}px;">
+        <a href="/projects?folder={{.ID}}">{{.Name}}</a>{{if .IsRoot}} <span class="muted">(root)</span>{{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{with .SelectedFolder}}
+    <details class="folder-actions">
+      <summary>New subfolder in {{.Name}}</summary>
+      <form method="post" action="/folders" class="folder-form">
+        <input type="hidden" name="parent_id" value="{{.ID}}">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" name="name" required maxlength="80">
+        </div>
+        {{template "folder_settings_fields" $.NewFolderFields}}
+        <button type="submit" class="btn">Create folder</button>
+      </form>
+    </details>
+    <details class="folder-actions">
+      <summary>Settings for {{.Name}}</summary>
+      <form method="post" action="/folders/{{.ID}}" class="folder-form">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" name="name" value="{{.Name}}" required maxlength="80">
+        </div>
+        {{template "folder_settings_fields" $.EditFolderFields}}
+        <button type="submit" class="btn">Save folder</button>
+      </form>
+    </details>
+    {{if not .IsRoot}}
+    <details class="folder-actions">
+      <summary>Move {{.Name}}</summary>
+      <form method="post" action="/folders/{{.ID}}/move" class="folder-form">
+        <div class="field">
+          <label for="folder-move-parent">New parent</label>
+          <select id="folder-move-parent" name="parent_id">
+            {{range $.Folders}}{{if ne .ID $.SelectedFolder.ID}}<option value="{{.ID}}"{{if eq .ID $.SelectedFolder.ParentID}} selected{{end}}>{{.Label}}</option>{{end}}{{end}}
+          </select>
+        </div>
+        <button type="submit" class="btn">Move folder</button>
+      </form>
+    </details>
+    <details class="folder-actions">
+      <summary>Delete {{.Name}}</summary>
+      <form method="post" action="/folders/{{.ID}}/delete" class="folder-form">
+        <p class="field-hint">Projects in this folder move to the parent and take that parent's policies and tags. Their own policies stay. Subfolders move up with their projects.</p>
+        <button type="submit" class="btn-danger">Delete folder</button>
+      </form>
+    </details>
+    {{end}}
+    {{end}}
+  </section>
+  {{end}}
 
   <div class="projects-topbar">
     <div class="projects-search-wrap">
@@ -77,7 +136,7 @@
         </thead>
         <tbody>
           {{range .Projects}}
-          <tr class="project-row" data-name="{{.Name}}" data-repo="{{.Repo}}" data-branch="{{.Branch}}" data-tags="{{.TagsCSV}}" data-status-cat="{{.StatusCategory}}">
+          <tr class="project-row" data-folder-id="{{.FolderID}}" data-folder-path="{{.FolderPath}}" data-name="{{.Name}}" data-repo="{{.Repo}}" data-branch="{{.Branch}}" data-tags="{{.TagsCSV}}" data-status-cat="{{.StatusCategory}}">
             <td><a href="/projects/{{.ID}}"><strong>{{.Name}}</strong></a></td>
             <td class="mono">{{.Repo}}</td>
             <td><span class="branch-badge">{{.Branch}}</span></td>
@@ -119,6 +178,8 @@
   if (!nameInput || !branchInput || !tagInput) return;
 
   let activeStatus = 'all';
+  const selectedFolder = document.querySelector('#folder-tree .folder-node.selected');
+  const folderPath = selectedFolder ? (selectedFolder.dataset.folderPath || '') : '';
   const tagBtns = Array.from(document.querySelectorAll('.tag-filter-btn'));
 
   function parseTagTokens(raw) {
@@ -156,8 +217,10 @@
       const matchTag = tagTokens.length === 0 || tagTokens.every(tok => rTags.some(tag => tag.includes(tok)));
       const matchRepo = !rp || rRepo.includes(rp);
       const matchStatus = (activeStatus === 'all') || (rStatus === activeStatus);
+      const rPath = row.dataset.folderPath || '';
+      const matchFolder = !folderPath || rPath === folderPath || rPath.startsWith(folderPath + '/');
 
-      row.style.display = (matchQuery && matchName && matchBranch && matchTag && matchRepo && matchStatus) ? '' : 'none';
+      row.style.display = (matchQuery && matchName && matchBranch && matchTag && matchRepo && matchStatus && matchFolder) ? '' : 'none';
     }
   }
 
@@ -205,6 +268,31 @@
   }
 
   syncTagButtons();
+  applyFilter();
 })();
 </script>
+{{end}}
+
+{{define "folder_settings_fields"}}
+<input type="hidden" name="tags_field" value="1">
+{{if .Policies}}
+<div class="field">
+  <label>Policies attached to this folder</label>
+  <div class="context-grid">
+    {{range .Policies}}
+    <label class="check"><input type="checkbox" name="policy_id" value="{{.ID}}"{{if .Selected}} checked{{end}}> {{.Name}}</label>
+    {{end}}
+  </div>
+</div>
+{{end}}
+<label class="check"><input type="checkbox" name="pass_down"{{if .PassDown}} checked{{end}}> Pass policies and tags to subfolders</label>
+<div class="field">
+  {{if .IsRoot}}
+  <input type="hidden" name="tags_set" value="on">
+  <label>Tags (key:value)</label>
+  {{else}}
+  <label class="check"><input type="checkbox" name="tags_set"{{if .TagsSet}} checked{{end}}> Set tags on this folder</label>
+  {{end}}
+  <input type="text" name="tags" value="{{.Tags}}" placeholder="env:prod, team:core" autocomplete="off">
+</div>
 {{end}}

@@ -72,6 +72,11 @@ func (s *Service) EnsureRoot(ctx context.Context, tenantID string) (folder.Snaps
 	return s.Folders.EnsureRoot(ctx, tenantID, id, s.now())
 }
 
+// List returns every folder in the tenant.
+func (s *Service) List(ctx context.Context, tenantID string) ([]folder.Snapshot, error) {
+	return s.list(ctx, tenantID)
+}
+
 func (s *Service) Get(ctx context.Context, tenantID, id string) (folder.Snapshot, error) {
 	folders, err := s.list(ctx, tenantID)
 	if err != nil {

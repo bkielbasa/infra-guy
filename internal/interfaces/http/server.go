@@ -10,6 +10,7 @@ import (
 	authapp "infra-guy/internal/application/auth"
 	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	dependencyapp "infra-guy/internal/application/dependency"
+	folderapp "infra-guy/internal/application/folder"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
@@ -37,6 +38,7 @@ type VersionLister interface {
 
 type ServerConfig struct {
 	Projects          *projectapp.Service
+	Folders           *folderapp.Service
 	Runs              *runapp.Service
 	States            *stateapp.Service
 	HelmReleases      helmrelease.Repository

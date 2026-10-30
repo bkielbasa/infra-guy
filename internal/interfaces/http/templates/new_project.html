@@ -32,8 +32,19 @@
         <span class="field-hint">Type any characters from <code>owner/repo</code> to fuzzy filter repositories.</span>
       </div>
 
+      {{if .Folders}}
+      <div class="field">
+        <label for="project-folder">Folder</label>
+        <select id="project-folder" name="folder_id" onchange="window.location='/projects/new?folder='+encodeURIComponent(this.value)">
+          {{range .Folders}}<option value="{{.ID}}"{{if eq .ID $.FolderID}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+        <span class="field-hint">The project inherits this folder's policies and tags. Changing the folder reloads the form.</span>
+      </div>
+      {{end}}
+
       <div class="field">
         <label for="tags-input">Tags</label>
+        <label class="check"><input type="checkbox" name="tags_override"> Override the tags inherited from the folder{{if .InheritedTags}} (<code>{{.InheritedTags}}</code>){{end}}</label>
         <div class="repo-Combobox" id="tag-combobox">
           <input type="text" id="tags-input" name="tags" placeholder="env:prod, team:core, region:eu-central-1" autocomplete="off">
           <div id="tag-results" class="repo-results" role="listbox"></div>
@@ -80,11 +91,23 @@
       <h2>Runs, contexts, and credentials</h2>
       {{if .Policies}}
       <div class="field">
-        <label for="project-policy">Approval policy</label>
-        <select id="project-policy" name="approval_policy_id">
-          <option value="">None</option>
-          {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
-        </select>
+        <label>Approval policies</label>
+        <input type="hidden" name="policy_field" value="1">
+        <div class="context-grid">
+          {{range .Policies}}
+          <label class="check"><input type="checkbox" name="policy_id" value="{{.ID}}"{{if .Selected}} checked{{end}}> {{.Name}}</label>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      {{if .FolderPolicies}}
+      <div class="field">
+        <label>Folder policies (read-only)</label>
+        <ul class="applied-policies">
+          {{range .FolderPolicies}}
+          <li><a href="/policies/{{.ID}}">{{.Name}}</a> <span class="pill">{{.Label}}</span></li>
+          {{end}}
+        </ul>
       </div>
       {{end}}
       <label class="check-card">

@@ -18,6 +18,7 @@ import (
 	authapp "infra-guy/internal/application/auth"
 	cloudintegrationapp "infra-guy/internal/application/cloudintegration"
 	dependencyapp "infra-guy/internal/application/dependency"
+	folderapp "infra-guy/internal/application/folder"
 	"infra-guy/internal/application/installation"
 	policyapp "infra-guy/internal/application/policy"
 	projectapp "infra-guy/internal/application/project"
@@ -26,6 +27,7 @@ import (
 	tfcontextapp "infra-guy/internal/application/tfcontext"
 	"infra-guy/internal/domain/cloudintegration"
 	"infra-guy/internal/domain/dependency"
+	"infra-guy/internal/domain/folder"
 	"infra-guy/internal/domain/helmrelease"
 	"infra-guy/internal/domain/policy"
 	"infra-guy/internal/domain/project"
@@ -1311,8 +1313,10 @@ func (m *uiMemPolicies) Delete(_ context.Context, id policy.ID) error {
 	}
 	if m.projects != nil {
 		for _, proj := range m.projects.items {
-			if proj.Snapshot().ApprovalPolicyID == string(id) {
-				return errors.New("policy is attached to project")
+			for _, attached := range proj.Snapshot().PolicyIDs {
+				if attached == string(id) {
+					return errors.New("policy is attached to project")
+				}
 			}
 		}
 	}
@@ -1481,19 +1485,19 @@ deny contains "Cannot destroy S3 buckets" if {
 
 	// 5. Assign policy to project via POST /projects/p1/policy (and verify settings page vs minimal project page)
 	rrProjPage := getUI(t, h, "/projects/p1")
-	if rrProjPage.Code != http.StatusOK || strings.Contains(rrProjPage.Body.String(), `name="approval_policy_id"`) {
+	if rrProjPage.Code != http.StatusOK || strings.Contains(rrProjPage.Body.String(), `name="policy_id"`) {
 		t.Fatalf("expected /projects/p1 to be minimal without policy form, got %d: %s", rrProjPage.Code, rrProjPage.Body.String())
 	}
 	rrSettings := getUI(t, h, "/projects/p1/settings")
-	if rrSettings.Code != http.StatusOK || !strings.Contains(rrSettings.Body.String(), `name="approval_policy_id"`) {
-		t.Fatalf("expected /projects/p1/settings to render approval_policy_id select, got %d: %s", rrSettings.Code, rrSettings.Body.String())
+	if rrSettings.Code != http.StatusOK || !strings.Contains(rrSettings.Body.String(), `name="policy_id"`) {
+		t.Fatalf("expected /projects/p1/settings to render policy_id checkboxes, got %d: %s", rrSettings.Code, rrSettings.Body.String())
 	}
 	rrAssign := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id=pol-2"))
 	if rrAssign.Code != http.StatusSeeOther {
 		t.Fatalf("POST /projects/p1/policy = %d: %s", rrAssign.Code, rrAssign.Body.String())
 	}
-	if projects.items["p1"].Snapshot().ApprovalPolicyID != "pol-2" {
-		t.Fatalf("expected p1 ApprovalPolicyID=pol-2, got %q", projects.items["p1"].Snapshot().ApprovalPolicyID)
+	if got := projects.items["p1"].Snapshot().PolicyIDs; len(got) != 1 || got[0] != "pol-2" {
+		t.Fatalf("expected p1 PolicyIDs=[pol-2], got %v", got)
 	}
 
 	// 6. Deleting a policy attached to a project fails with 409 Conflict
@@ -1622,8 +1626,8 @@ allow if {
 
 	// 10. Detach policy from project and delete policies
 	rrDetach := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id="))
-	if rrDetach.Code != http.StatusSeeOther || projects.items["p1"].Snapshot().ApprovalPolicyID != "" {
-		t.Fatalf("detach policy = %d, ApprovalPolicyID=%q", rrDetach.Code, projects.items["p1"].Snapshot().ApprovalPolicyID)
+	if rrDetach.Code != http.StatusSeeOther || len(projects.items["p1"].Snapshot().PolicyIDs) != 0 {
+		t.Fatalf("detach policy = %d, PolicyIDs=%v", rrDetach.Code, projects.items["p1"].Snapshot().PolicyIDs)
 	}
 	rrDel := postUI(t, h, "/policies/pol-2/delete", nil)
 	if rrDel.Code != http.StatusSeeOther || rrDel.Header().Get("Location") != "/policies" {
@@ -2506,7 +2510,7 @@ func TestProjectTagsAndFilters(t *testing.T) {
 	}
 
 	// 2. Creating a project with tags stores them
-	rr = postUI(t, h, "/projects", strings.NewReader("name=billing&repo_id=101&branch=main&tags=env%3Aprod%2C+tier%3Abackend"))
+	rr = postUI(t, h, "/projects", strings.NewReader("name=billing&repo_id=101&branch=main&tags_override=on&tags=env%3Aprod%2C+tier%3Abackend"))
 	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("create project with tags = %d: %s", rr.Code, rr.Body.String())
 	}
@@ -2516,13 +2520,13 @@ func TestProjectTagsAndFilters(t *testing.T) {
 	}
 
 	// 3. Invalid tag format on create returns 400
-	rr = postUI(t, h, "/projects", strings.NewReader("name=bad&repo_id=101&branch=main&tags=not-key-value"))
+	rr = postUI(t, h, "/projects", strings.NewReader("name=bad&repo_id=101&branch=main&tags_override=on&tags=not-key-value"))
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("create with invalid tag = %d, want 400", rr.Code)
 	}
 
 	// 4. Updating tags via POST /projects/{id} updates them
-	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=&terraform_version=1.9.8&tags=env%3Aprod%2C+owner%3Aplatform"))
+	rr = postUI(t, h, "/projects/p1", strings.NewReader("branch=main&workdir=&terraform_version=1.9.8&tags_override=on&tags=env%3Aprod%2C+owner%3Aplatform"))
 	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("update project tags = %d: %s", rr.Code, rr.Body.String())
 	}
@@ -2958,7 +2962,7 @@ func TestDashboardOverviewAndInsights(t *testing.T) {
 	pApproval := project.Restore(project.Snapshot{
 		ID: "p-approval", TenantID: "ten", Name: "payments-prod",
 		Repo: project.SourceRepo{Owner: "acme", Name: "infra"}, DefaultBranch: "main",
-		TerraformVersion: "1.9.8", ApprovalPolicyID: "pol-1",
+		TerraformVersion: "1.9.8", PolicyIDs: []string{"pol-1"},
 		Tags: map[string]string{"env": "prod", "team": "payments"},
 	})
 	pFailed := project.Restore(project.Snapshot{
@@ -3138,7 +3142,7 @@ func TestAnalyticsDORAAndMetricsWithData(t *testing.T) {
 	pPayments := project.Restore(project.Snapshot{
 		ID: "p-pay", TenantID: "ten", Name: "payments-prod",
 		Repo: project.SourceRepo{Owner: "acme", Name: "payments"}, DefaultBranch: "main",
-		TerraformVersion: "1.9.8", ApprovalPolicyID: "pol-1",
+		TerraformVersion: "1.9.8", PolicyIDs: []string{"pol-1"},
 		Tags:      map[string]string{"env": "prod", "team": "payments"},
 		CreatedAt: now.Add(-30 * 24 * time.Hour),
 	})
@@ -3453,7 +3457,7 @@ deny contains "prod: cannot delete s3 bucket in production" if {
 		},
 	})
 
-	// 1. Project details page shows inherited tag-bound & global policies even with no explicit ApprovalPolicyID
+	// 1. Project details page shows inherited tag-bound & global policies even with no explicit project policy
 	rr := getUI(t, h, "/projects/p-prod/details")
 	detailsBody := rr.Body.String()
 	if rr.Code != http.StatusOK {
@@ -3933,5 +3937,488 @@ func TestMilestone3DriftDetectionTTLAndFinOps(t *testing.T) {
 	destroyRun := runs.items["r-3"].Snapshot()
 	if !destroyRun.IsDestroy {
 		t.Fatalf("expected destroy run to have IsDestroy=true, got %+v", destroyRun)
+	}
+}
+
+type uiMemFolders struct {
+	items    map[string]folder.Snapshot
+	projects *memProjects
+}
+
+func (m *uiMemFolders) ListByTenant(_ context.Context, tenantID string) ([]folder.Snapshot, error) {
+	var out []folder.Snapshot
+	for _, f := range m.items {
+		if f.TenantID == tenantID {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+func (m *uiMemFolders) Save(_ context.Context, f folder.Snapshot) error {
+	m.items[f.ID] = f
+	return nil
+}
+
+func (m *uiMemFolders) EnsureRoot(_ context.Context, tenantID, id string, now time.Time) (folder.Snapshot, error) {
+	for _, f := range m.items {
+		if f.TenantID == tenantID && f.ParentID == "" {
+			return f, nil
+		}
+	}
+	root := folder.Snapshot{ID: id, TenantID: tenantID, Name: "Default", TagsSet: true, Tags: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	m.items[id] = root
+	return root, nil
+}
+
+func (m *uiMemFolders) DeleteAndReparent(_ context.Context, _, folderID, parentID string, _ time.Time) error {
+	for id, f := range m.items {
+		if f.ParentID == folderID {
+			f.ParentID = parentID
+			m.items[id] = f
+		}
+	}
+	for id, p := range m.projects.items {
+		if p.Snapshot().FolderID == folderID {
+			moved := project.Restore(p.Snapshot())
+			moved.SetFolderID(parentID)
+			moved.ClearTagOverride()
+			m.projects.items[id] = moved
+		}
+	}
+	delete(m.items, folderID)
+	return nil
+}
+
+type folderUIEnv struct {
+	h        http.Handler
+	projects *memProjects
+	runs     *memRuns
+	runsSvc  *runapp.Service
+	folders  *uiMemFolders
+	policies *policyapp.Service
+}
+
+func (e *folderUIEnv) addFolder(f folder.Snapshot) {
+	f.TenantID = "ten"
+	if f.Tags == nil {
+		f.Tags = map[string]string{}
+	}
+	e.folders.items[f.ID] = f
+}
+
+func (e *folderUIEnv) addPolicy(t *testing.T, name, rego string) string {
+	t.Helper()
+	p, err := e.policies.Create(context.Background(), policyapp.CreateInput{TenantID: "ten", Name: name, Rego: rego})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(p.ID())
+}
+
+func (e *folderUIEnv) addProject(t *testing.T, id, name, folderID string, policyIDs []string, tags map[string]string) {
+	t.Helper()
+	repo, err := project.ParseSourceRepo("bklebasa/infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := project.New(project.ID(id), name, repo, time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetStateToken("tok")
+	if err := p.SetPlacement("ten", 1); err != nil {
+		t.Fatal(err)
+	}
+	p.SetFolderID(folderID)
+	p.SetPolicyIDs(policyIDs)
+	if tags != nil {
+		if err := p.SetTagOverride(tags); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.projects.items[p.Snapshot().ID] = p
+}
+
+const folderAllowRego = `package infraguy.approval
+import rego.v1
+default allow := true
+`
+
+const folderDenyRego = `package infraguy.approval
+import rego.v1
+default allow := false
+`
+
+func newFolderUIEnv(t *testing.T) *folderUIEnv {
+	t.Helper()
+	projects := &memProjects{items: map[project.ID]*project.Project{}}
+	runs := &memRuns{items: map[run.ID]*run.Run{}}
+	states := &memStates{items: map[string]*state.State{}}
+	projSvc, runsSvc, stSvc := uiServices(projects, runs, states)
+
+	folders := &uiMemFolders{items: map[string]folder.Snapshot{}, projects: projects}
+	var folderSeq int
+	folderSvc := &folderapp.Service{Folders: folders, Now: time.Now, NewID: func() string {
+		folderSeq++
+		return fmt.Sprintf("fld-%d", folderSeq)
+	}}
+	projSvc.Folders = folderSvc
+
+	polSeq := 0
+	polSvc := &policyapp.Service{
+		Policies: newUIMemPolicies(projects),
+		Engine:   opa.NewEvaluator(),
+		Now:      time.Now,
+		NewID: func() string {
+			polSeq++
+			return fmt.Sprintf("pol-%d", polSeq)
+		},
+	}
+
+	store := newUIIdentity("operator", "ten")
+	gh := &uiGitHub{
+		slug: "infra-guy", userID: 4, login: "operator",
+		membershipState: "active", membershipRole: "admin", membershipStatus: http.StatusOK,
+		repos: map[int64][]installation.Repo{100: {{ID: 101, Owner: "operator", Name: "my-infra"}}},
+	}
+	h := NewServer(ServerConfig{
+		Projects: projSvc, Folders: folderSvc, Runs: runsSvc, States: stSvc, Policies: polSvc,
+		Versions: stubVersions{list: []string{"1.10.5"}},
+		Checkout: &stubTip{sha: "abc1234"}, Lookup: &stubLookup{},
+		Tokens:        uiTokenSource{store: store},
+		PublicBaseURL: "http://localhost:8080",
+		Auth: &authapp.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "id-1" },
+			PublicBaseURL: "http://localhost:8080", ClientID: "cid",
+		},
+		Installations: &installation.Service{
+			Store: store, GitHub: gh, Now: time.Now, NewID: func() string { return "inst-1" },
+		},
+	})
+	env := &folderUIEnv{h: h, projects: projects, runs: runs, runsSvc: runsSvc, folders: folders, policies: polSvc}
+	env.addFolder(folder.Snapshot{ID: "root", Name: "Default", TagsSet: true})
+	return env
+}
+
+func formBody(pairs ...string) io.Reader {
+	v := url.Values{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		v.Add(pairs[i], pairs[i+1])
+	}
+	return strings.NewReader(v.Encode())
+}
+
+func TestProjectsPageShowsFolderTree(t *testing.T) {
+	env := newFolderUIEnv(t)
+	env.addFolder(folder.Snapshot{ID: "pay", ParentID: "root", Name: "Payments"})
+	env.addProject(t, "p1", "ledger", "pay", nil, nil)
+
+	rr := getUI(t, env.h, "/projects")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /projects = %d: %s", rr.Code, body)
+	}
+	if !strings.Contains(body, `class="folder-tree"`) || !strings.Contains(body, `href="/projects?folder=pay"`) || !strings.Contains(body, "Payments") {
+		t.Fatalf("folder tree missing: %s", body)
+	}
+	if !strings.Contains(body, `class="folder-node selected" data-folder-id="root"`) {
+		t.Fatalf("root is not selected: %s", body)
+	}
+	if !strings.Contains(body, `data-folder-id="pay" data-folder-path="root/pay"`) {
+		t.Fatalf("project row folder path missing: %s", body)
+	}
+	if !strings.Contains(body, `href="/projects/new?folder=root"`) {
+		t.Fatalf("new project link not scoped to the root: %s", body)
+	}
+
+	rr = getUI(t, env.h, "/projects?folder=pay")
+	body = rr.Body.String()
+	if !strings.Contains(body, `class="folder-node selected" data-folder-id="pay"`) || !strings.Contains(body, `href="/projects/new?folder=pay"`) {
+		t.Fatalf("selected folder = %s", body)
+	}
+	if !strings.Contains(body, "Projects in this folder move to the parent and take that parent's policies and tags. Their own policies stay. Subfolders move up with their projects.") {
+		t.Fatalf("delete sentence missing: %s", body)
+	}
+	if !strings.Contains(body, "Pass policies and tags to subfolders") {
+		t.Fatalf("pass-down label missing: %s", body)
+	}
+}
+
+func TestProjectFolderCreateRedirectsToNewFolder(t *testing.T) {
+	env := newFolderUIEnv(t)
+	rr := postUI(t, env.h, "/folders", formBody("name", "Payments", "parent_id", "root"))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/projects?folder=fld-1" {
+		t.Fatalf("POST /folders = %d loc=%q: %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+	if got := env.folders.items["fld-1"]; got.Name != "Payments" || got.ParentID != "root" {
+		t.Fatalf("stored folder = %#v", got)
+	}
+
+	rr = postUI(t, env.h, "/folders", formBody("name", "Payments", "parent_id", "root"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate folder = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+	rr = postUI(t, env.h, "/folders", formBody("name", "Lost", "parent_id", "missing"))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing parent = %d, want 404: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestProjectFolderUpdateAndMove(t *testing.T) {
+	env := newFolderUIEnv(t)
+	pol := env.addPolicy(t, "allow-all", folderAllowRego)
+	env.addFolder(folder.Snapshot{ID: "a", ParentID: "root", Name: "A"})
+	env.addFolder(folder.Snapshot{ID: "b", ParentID: "root", Name: "B"})
+
+	rr := postUI(t, env.h, "/folders/a", formBody(
+		"name", "Alpha", "pass_down", "on", "tags_field", "1", "tags_set", "on", "tags", "env:prod", "policy_id", pol))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/projects?folder=a" {
+		t.Fatalf("update folder = %d loc=%q: %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+	got := env.folders.items["a"]
+	if got.Name != "Alpha" || !got.PassDown || !got.TagsSet || got.Tags["env"] != "prod" || len(got.PolicyIDs) != 1 || got.PolicyIDs[0] != pol {
+		t.Fatalf("updated folder = %#v", got)
+	}
+
+	rr = postUI(t, env.h, "/folders/a", formBody("name", "Renamed"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("rename = %d: %s", rr.Code, rr.Body.String())
+	}
+	got = env.folders.items["a"]
+	if got.Name != "Renamed" || !got.PassDown || got.Tags["env"] != "prod" || len(got.PolicyIDs) != 1 {
+		t.Fatalf("rename without tags_field changed settings: %#v", got)
+	}
+
+	rr = postUI(t, env.h, "/folders/root", formBody("name", "Default", "tags_field", "1"))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("root without tags = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+
+	rr = postUI(t, env.h, "/folders/a/move", formBody("parent_id", "b"))
+	if rr.Code != http.StatusSeeOther || env.folders.items["a"].ParentID != "b" {
+		t.Fatalf("move = %d parent=%q: %s", rr.Code, env.folders.items["a"].ParentID, rr.Body.String())
+	}
+	rr = postUI(t, env.h, "/folders/b/move", formBody("parent_id", "a"))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "folder cannot be moved under itself") {
+		t.Fatalf("move under itself = %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = postUI(t, env.h, "/folders/missing/move", formBody("parent_id", "b"))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("move missing = %d, want 404", rr.Code)
+	}
+}
+
+func TestProjectFolderCreateStoresPoliciesAndInheritsTags(t *testing.T) {
+	env := newFolderUIEnv(t)
+	p1 := env.addPolicy(t, "one", folderAllowRego)
+	p2 := env.addPolicy(t, "two", folderAllowRego)
+	env.addFolder(folder.Snapshot{ID: "pay", ParentID: "root", Name: "Payments", TagsSet: true, Tags: map[string]string{"team": "pay"}})
+
+	rr := postUI(t, env.h, "/projects", formBody(
+		"name", "ledger", "repo_id", "101", "branch", "main", "folder_id", "pay",
+		"policy_field", "1", "policy_id", p1, "policy_id", p2))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("create = %d: %s", rr.Code, rr.Body.String())
+	}
+	snap := env.projects.items["new-p"].Snapshot()
+	if snap.FolderID != "pay" || len(snap.PolicyIDs) != 2 || snap.TagsOverridden {
+		t.Fatalf("created project = folder %q policies %v overridden %v", snap.FolderID, snap.PolicyIDs, snap.TagsOverridden)
+	}
+
+	rr = getUI(t, env.h, "/projects/new-p/settings")
+	body := rr.Body.String()
+	for _, id := range []string{p1, p2} {
+		if !strings.Contains(body, `name="policy_id" value="`+id+`" checked`) {
+			t.Fatalf("policy %s not checked on settings: %s", id, body)
+		}
+	}
+	if !strings.Contains(body, "team:pay") || !strings.Contains(body, "Inherited") {
+		t.Fatalf("inherited tags missing: %s", body)
+	}
+
+	rr = postUI(t, env.h, "/projects", formBody(
+		"name", "other", "repo_id", "101", "branch", "main", "folder_id", "missing"))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("create in missing folder = %d, want 404", rr.Code)
+	}
+
+	rr = postUI(t, env.h, "/projects", formBody("name", "rooted", "repo_id", "101", "branch", "main"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("create without folder = %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := env.projects.items["new-p"].Snapshot().FolderID; got != "root" {
+		t.Fatalf("folderless create used %q, want the root", got)
+	}
+}
+
+func TestProjectFolderCreateOverridesTagsOnlyWhenAsked(t *testing.T) {
+	env := newFolderUIEnv(t)
+	env.addFolder(folder.Snapshot{ID: "pay", ParentID: "root", Name: "Payments", TagsSet: true, Tags: map[string]string{"team": "pay"}})
+	rr := postUI(t, env.h, "/projects", formBody(
+		"name", "ledger", "repo_id", "101", "branch", "main", "folder_id", "pay", "tags", "env:dev"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("create = %d: %s", rr.Code, rr.Body.String())
+	}
+	if snap := env.projects.items["new-p"].Snapshot(); snap.TagsOverridden || len(snap.Tags) != 0 {
+		t.Fatalf("tags stored without tags_override: %#v", snap.Tags)
+	}
+	rr = postUI(t, env.h, "/projects", formBody(
+		"name", "ledger2", "repo_id", "101", "branch", "main", "folder_id", "pay", "tags_override", "on", "tags", "env:dev"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("create = %d: %s", rr.Code, rr.Body.String())
+	}
+	if snap := env.projects.items["new-p"].Snapshot(); !snap.TagsOverridden || snap.Tags["env"] != "dev" {
+		t.Fatalf("override not stored: %#v overridden=%v", snap.Tags, snap.TagsOverridden)
+	}
+}
+
+func TestProjectFolderSettingsLabelFolderPolicies(t *testing.T) {
+	env := newFolderUIEnv(t)
+	own := env.addPolicy(t, "own-policy", folderAllowRego)
+	direct := env.addPolicy(t, "direct-policy", folderAllowRego)
+	up := env.addPolicy(t, "grandparent-policy", folderAllowRego)
+	env.addFolder(folder.Snapshot{ID: "gp", ParentID: "root", Name: "Grand", PassDown: true, PolicyIDs: []string{up}})
+	env.addFolder(folder.Snapshot{ID: "par", ParentID: "gp", Name: "Parent"})
+	env.addFolder(folder.Snapshot{ID: "kid", ParentID: "par", Name: "Kid", PolicyIDs: []string{direct}})
+	env.addProject(t, "p1", "ledger", "kid", []string{own}, nil)
+
+	body := getUI(t, env.h, "/projects/p1/settings").Body.String()
+	if !strings.Contains(body, `<a href="/policies/`+direct+`">direct-policy</a> <span class="pill">This folder</span>`) {
+		t.Fatalf("immediate folder policy missing: %s", body)
+	}
+	if !strings.Contains(body, `<a href="/policies/`+up+`">grandparent-policy</a> <span class="pill">Passed down</span>`) {
+		t.Fatalf("passed-down policy missing: %s", body)
+	}
+	if strings.Contains(body, `/policies/`+own+`">`) {
+		t.Fatalf("project's own policy rendered as read-only: %s", body)
+	}
+	if !strings.Contains(body, `name="policy_id" value="`+own+`" checked`) {
+		t.Fatalf("own policy not checked: %s", body)
+	}
+	if !strings.Contains(body, `<a href="/projects?folder=gp">Grand</a> / <a href="/projects?folder=par">Parent</a> / <a href="/projects?folder=kid">Kid</a>`) {
+		t.Fatalf("breadcrumbs missing: %s", body)
+	}
+
+	env.addFolder(folder.Snapshot{ID: "gp", ParentID: "root", Name: "Grand", PassDown: false, PolicyIDs: []string{up}})
+	body = getUI(t, env.h, "/projects/p1/settings").Body.String()
+	if strings.Contains(body, "Passed down") || strings.Contains(body, `<a href="/policies/`+up+`">`) {
+		t.Fatalf("policy passed down with pass-down off: %s", body)
+	}
+}
+
+func TestProjectFolderMoveKeepsPoliciesAndTakesDestinationTags(t *testing.T) {
+	env := newFolderUIEnv(t)
+	keep := env.addPolicy(t, "keep", folderAllowRego)
+	env.addFolder(folder.Snapshot{ID: "src", ParentID: "root", Name: "Src"})
+	env.addFolder(folder.Snapshot{ID: "dst", ParentID: "root", Name: "Dst", TagsSet: true, Tags: map[string]string{"zone": "dest"}})
+	env.addProject(t, "p1", "ledger", "src", []string{keep}, map[string]string{"own": "tag"})
+
+	rr := postUI(t, env.h, "/projects/p1", formBody(
+		"branch", "main", "folder_id", "dst", "policy_field", "1", "policy_id", keep,
+		"tags_override", "on", "tags", "ignored:tag"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("move = %d: %s", rr.Code, rr.Body.String())
+	}
+	snap := env.projects.items["p1"].Snapshot()
+	if snap.FolderID != "dst" || snap.TagsOverridden || len(snap.PolicyIDs) != 1 || snap.PolicyIDs[0] != keep {
+		t.Fatalf("moved project = folder %q overridden %v policies %v", snap.FolderID, snap.TagsOverridden, snap.PolicyIDs)
+	}
+	body := getUI(t, env.h, "/projects/p1/settings").Body.String()
+	if !strings.Contains(body, "zone:dest") || strings.Contains(body, "ignored:tag") || strings.Contains(body, "own:tag") {
+		t.Fatalf("settings do not show destination tags: %s", body)
+	}
+
+	rr = postUI(t, env.h, "/projects/p1", formBody("branch", "main", "folder_id", "missing"))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("move to missing folder = %d, want 404", rr.Code)
+	}
+
+	// An unchanged folder with an unset override clears it and replaces policy ids.
+	rr = postUI(t, env.h, "/projects/p1", formBody("branch", "main", "folder_id", "dst", "policy_field", "1", "tags_override", "on", "tags", "own:tag"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("override = %d: %s", rr.Code, rr.Body.String())
+	}
+	snap = env.projects.items["p1"].Snapshot()
+	if !snap.TagsOverridden || snap.Tags["own"] != "tag" || len(snap.PolicyIDs) != 0 {
+		t.Fatalf("override = %v %v policies %v", snap.TagsOverridden, snap.Tags, snap.PolicyIDs)
+	}
+	rr = postUI(t, env.h, "/projects/p1", formBody("branch", "main", "folder_id", "dst", "tags", "own:tag"))
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("inherit = %d: %s", rr.Code, rr.Body.String())
+	}
+	if snap = env.projects.items["p1"].Snapshot(); snap.TagsOverridden {
+		t.Fatalf("override kept without tags_override: %#v", snap)
+	}
+}
+
+func TestProjectFolderDeleteRedirectsToParent(t *testing.T) {
+	env := newFolderUIEnv(t)
+	keep := env.addPolicy(t, "keep", folderAllowRego)
+	env.addFolder(folder.Snapshot{ID: "par", ParentID: "root", Name: "Par"})
+	env.addFolder(folder.Snapshot{ID: "kid", ParentID: "par", Name: "Kid"})
+	env.addProject(t, "p1", "ledger", "kid", []string{keep}, map[string]string{"a": "b"})
+
+	rr := postUI(t, env.h, "/folders/kid/delete", nil)
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/projects?folder=par" {
+		t.Fatalf("delete = %d loc=%q: %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+	snap := env.projects.items["p1"].Snapshot()
+	if snap.FolderID != "par" || len(snap.PolicyIDs) != 1 || snap.PolicyIDs[0] != keep {
+		t.Fatalf("project after delete = folder %q policies %v", snap.FolderID, snap.PolicyIDs)
+	}
+
+	rr = postUI(t, env.h, "/folders/root/delete", nil)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "the root folder cannot be deleted") {
+		t.Fatalf("delete root = %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = postUI(t, env.h, "/folders/missing/delete", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("delete missing = %d, want 404", rr.Code)
+	}
+}
+
+func TestProjectFolderNewProjectListsFolderPoliciesReadOnly(t *testing.T) {
+	env := newFolderUIEnv(t)
+	up := env.addPolicy(t, "grandparent-policy", folderAllowRego)
+	direct := env.addPolicy(t, "direct-policy", folderAllowRego)
+	env.addFolder(folder.Snapshot{ID: "gp", ParentID: "root", Name: "Grand", PassDown: true, PolicyIDs: []string{up}})
+	env.addFolder(folder.Snapshot{ID: "kid", ParentID: "gp", Name: "Kid", PolicyIDs: []string{direct}})
+
+	body := getUI(t, env.h, "/projects/new?folder=kid").Body.String()
+	if !strings.Contains(body, `<option value="kid" selected>`) {
+		t.Fatalf("folder not preselected: %s", body)
+	}
+	if !strings.Contains(body, `<a href="/policies/`+direct+`">direct-policy</a> <span class="pill">This folder</span>`) ||
+		!strings.Contains(body, `<a href="/policies/`+up+`">grandparent-policy</a> <span class="pill">Passed down</span>`) {
+		t.Fatalf("applicable policies missing: %s", body)
+	}
+	if strings.Contains(body, `name="policy_id" value="`+direct+`" checked`) {
+		t.Fatalf("folder policy posted as a checked project policy: %s", body)
+	}
+}
+
+func TestProjectFolderPoliciesApplyAtConfirm(t *testing.T) {
+	env := newFolderUIEnv(t)
+	deny := env.addPolicy(t, "deny-all", folderDenyRego)
+	env.addFolder(folder.Snapshot{ID: "gp", ParentID: "root", Name: "Grand", PassDown: true, PolicyIDs: []string{deny}})
+	env.addFolder(folder.Snapshot{ID: "kid", ParentID: "gp", Name: "Kid"})
+	env.addProject(t, "p1", "ledger", "kid", nil, nil)
+	env.runs.items["r1"] = run.Restore(needsApprovalSnap("r1"))
+
+	body := getUI(t, env.h, "/runs/r1").Body.String()
+	if !strings.Contains(body, "deny-all") {
+		t.Fatalf("run page does not evaluate the folder policy: %s", body)
+	}
+	rr := postUI(t, env.h, "/runs/r1/confirm", nil)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("confirm = %d, want 403 from the passed-down folder policy: %s", rr.Code, rr.Body.String())
+	}
+
+	// A folder that does not pass down leaves the descendant unguarded.
+	env.addFolder(folder.Snapshot{ID: "gp", ParentID: "root", Name: "Grand", PassDown: false, PolicyIDs: []string{deny}})
+	rr = postUI(t, env.h, "/runs/r1/confirm", nil)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("confirm without inherited policy = %d: %s", rr.Code, rr.Body.String())
 	}
 }

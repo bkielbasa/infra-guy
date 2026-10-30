@@ -1,5 +1,5 @@
 {{define "details"}}
-<nav class="crumb"><a href="/">Projects</a> / <a href="/projects/{{.ID}}">{{.Name}}</a> / Settings</nav>
+<nav class="crumb"><a href="/projects">Projects</a>{{range .Breadcrumbs}} / <a href="/projects?folder={{.ID}}">{{.Name}}</a>{{end}} / <a href="/projects/{{$.ID}}">{{$.Name}}</a> / Settings</nav>
 <div class="panel form-panel">
   <div class="form-header">
     <h1>Settings</h1>
@@ -22,8 +22,19 @@
         </div>
       </div>
 
+      {{if .Folders}}
       <div class="field" style="margin-top: 14px;">
-        <label for="tags-input">Tags (key:value)</label>
+        <label for="project-folder">Folder</label>
+        <select id="project-folder" name="folder_id">
+          {{range .Folders}}<option value="{{.ID}}"{{if eq .ID $.FolderID}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+        <span class="field-hint">Moving a project to another folder makes it inherit that folder's tags. Its own policies stay.</span>
+      </div>
+      {{end}}
+
+      <div class="field" style="margin-top: 14px;">
+        <label for="tags-input">Tags (key:value) <span class="pill">{{.TagsLabel}}</span></label>
+        <label class="check"><input type="checkbox" name="tags_override"{{if .TagsOverridden}} checked{{end}}> Override the tags inherited from the folder</label>
         <div class="repo-Combobox" id="tag-combobox">
           <input type="text" id="tags-input" name="tags" value="{{.Tags}}" placeholder="env:prod, team:core" autocomplete="off">
           <div id="tag-results" class="repo-results" role="listbox"></div>
@@ -51,11 +62,27 @@
     <section class="form-section">
       <h2>Runs, contexts, and credentials</h2>
       <div class="field">
-        <label for="project-policy">Approval policy</label>
-        <select id="project-policy" name="approval_policy_id">
-          <option value="">None</option>
-          {{range .Policies}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}
-        </select>
+        <label>Approval policies</label>
+        <input type="hidden" name="policy_field" value="1">
+        {{if .Policies}}
+        <div class="context-grid">
+          {{range .Policies}}
+          <label class="check"><input type="checkbox" name="policy_id" value="{{.ID}}"{{if .Selected}} checked{{end}}> {{.Name}}</label>
+          {{end}}
+        </div>
+        {{else}}
+        <span class="muted">No policies defined yet.</span>
+        {{end}}
+        {{if .AppliedPolicies}}
+        <div class="field-hint" style="margin-top: 6px;">
+          <strong>Folder policies (read-only):</strong>
+          <ul class="applied-policies">
+            {{range .AppliedPolicies}}
+            <li><a href="/policies/{{.ID}}">{{.Name}}</a> <span class="pill">{{.Label}}</span></li>
+            {{end}}
+          </ul>
+        </div>
+        {{end}}
         {{if .TagBoundPolicies}}
         <div class="field-hint" style="margin-top: 6px;">
           <strong>Tag-bound &amp; global policies automatically enforced:</strong>
