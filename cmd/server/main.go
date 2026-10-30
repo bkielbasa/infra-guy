@@ -602,7 +602,12 @@ func newMergeabilityChecker(policySvc *policyapp.Service, projectEffective worke
 
 func (c policyMergeabilityChecker) IsMergeable(ctx context.Context, ps project.Snapshot, rs run.Snapshot) bool {
 	if c.policySvc == nil {
-		if ps.ApprovalPolicyID != "" {
+		if c.projectEffective != nil {
+			resolvedPS, err := c.projectEffective.Effective(ctx, ps)
+			if err != nil || len(resolvedPS.EffectivePolicies) > 0 {
+				return false
+			}
+		} else if len(ps.PolicyIDs) > 0 {
 			return false
 		}
 		return ps.AutoApprove || len(rs.Approvals) > 0
