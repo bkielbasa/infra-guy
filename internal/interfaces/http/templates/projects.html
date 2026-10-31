@@ -5,67 +5,13 @@
       <h1>Projects</h1>
       <p class="settings-card-desc">Filter and inspect Terraform workspaces across repositories and branches.</p>
     </div>
-    <a href="/projects/new{{if .SelectedFolder.ID}}?folder={{.SelectedFolder.ID}}{{end}}" class="btn btn-trigger">New project</a>
-  </div>
-
-  {{if .HasFolders}}
-  <section class="panel folder-panel" id="folder-panel">
-    <h2>Folders</h2>
-    <ul class="folder-tree" id="folder-tree">
-      {{range .Folders}}
-      <li class="folder-node{{if .Selected}} selected{{end}}" data-folder-id="{{.ID}}" data-folder-path="{{.Path}}"{{if .Selected}} aria-current="true"{{end}} style="padding-left: {{.Indent}}px;">
-        <a href="/projects?folder={{.ID}}">{{.Name}}</a>{{if .IsRoot}} <span class="muted">(root)</span>{{end}}
-      </li>
+    <div class="projects-header-actions">
+      {{if .HasFolders}}
+      <button type="button" class="btn" id="open-new-folder">New folder</button>
       {{end}}
-    </ul>
-    {{with .SelectedFolder}}
-    <details class="folder-actions">
-      <summary>New subfolder in {{.Name}}</summary>
-      <form method="post" action="/folders" class="folder-form">
-        <input type="hidden" name="parent_id" value="{{.ID}}">
-        <div class="field">
-          <label>Name</label>
-          <input type="text" name="name" required maxlength="80">
-        </div>
-        {{template "folder_settings_fields" $.NewFolderFields}}
-        <button type="submit" class="btn">Create folder</button>
-      </form>
-    </details>
-    <details class="folder-actions">
-      <summary>Settings for {{.Name}}</summary>
-      <form method="post" action="/folders/{{.ID}}" class="folder-form">
-        <div class="field">
-          <label>Name</label>
-          <input type="text" name="name" value="{{.Name}}" required maxlength="80">
-        </div>
-        {{template "folder_settings_fields" $.EditFolderFields}}
-        <button type="submit" class="btn">Save folder</button>
-      </form>
-    </details>
-    {{if not .IsRoot}}
-    <details class="folder-actions">
-      <summary>Move {{.Name}}</summary>
-      <form method="post" action="/folders/{{.ID}}/move" class="folder-form">
-        <div class="field">
-          <label for="folder-move-parent">New parent</label>
-          <select id="folder-move-parent" name="parent_id">
-            {{range $.Folders}}{{if ne .ID $.SelectedFolder.ID}}<option value="{{.ID}}"{{if eq .ID $.SelectedFolder.ParentID}} selected{{end}}>{{.Label}}</option>{{end}}{{end}}
-          </select>
-        </div>
-        <button type="submit" class="btn">Move folder</button>
-      </form>
-    </details>
-    <details class="folder-actions">
-      <summary>Delete {{.Name}}</summary>
-      <form method="post" action="/folders/{{.ID}}/delete" class="folder-form">
-        <p class="field-hint">Projects in this folder move to the parent and take that parent's policies and tags. Their own policies stay. Subfolders move up with their projects.</p>
-        <button type="submit" class="btn-danger">Delete folder</button>
-      </form>
-    </details>
-    {{end}}
-    {{end}}
-  </section>
-  {{end}}
+      <a href="/projects/new{{if .NewProjectFolder}}?folder={{.NewProjectFolder}}{{end}}" class="btn btn-trigger" id="new-project-link">New project</a>
+    </div>
+  </div>
 
   <div class="projects-topbar">
     <div class="projects-search-wrap">
@@ -87,6 +33,38 @@
         <button type="button" class="filters-reset-btn" id="filters-reset">Reset</button>
       </div>
       <form method="get" action="/projects" id="projects-filter-form" class="filters-sidebar-form">
+        {{if .HasFolders}}
+        <details class="filter-group" open>
+          <summary class="filter-group-title">Folders</summary>
+          <div class="filter-group-body">
+            <ul class="folder-filter" id="folder-filter">
+              {{range .Folders}}
+              <li class="folder-filter-item" style="padding-left: {{.Indent}}px;">
+                <label class="folder-filter-row">
+                  <input type="checkbox" class="folder-filter-check" value="{{.ID}}" data-is-root="{{if .IsRoot}}true{{else}}false{{end}}" data-folder-id="{{.ID}}" data-folder-path="{{.Path}}"{{if .Selected}} checked{{end}}>
+                  <span class="folder-filter-name">{{.Name}}</span>
+                  <span class="folder-filter-count"></span>
+                </label>
+                <button type="button" class="folder-edit-btn"
+                  data-folder-id="{{.ID}}"
+                  data-folder-path="{{.Path}}"
+                  data-name="{{.Name}}"
+                  data-parent-id="{{.ParentID}}"
+                  data-pass-down="{{if .PassDown}}true{{else}}false{{end}}"
+                  data-tags-set="{{if .TagsSet}}true{{else}}false{{end}}"
+                  data-tags="{{.Tags}}"
+                  data-policy-ids="{{.PolicyIDsCSV}}"
+                  data-is-root="{{if .IsRoot}}true{{else}}false{{end}}"
+                  aria-label="Edit {{.Name}}">Edit</button>
+              </li>
+              {{end}}
+            </ul>
+            <p class="field-hint">Includes subfolders. None checked shows all.</p>
+            <div id="folder-query-fields"></div>
+          </div>
+        </details>
+        {{end}}
+
         <details class="filter-group" open>
           <summary class="filter-group-title">Name</summary>
           <div class="filter-group-body">
@@ -132,12 +110,17 @@
     <div class="projects-main panel">
       <table id="projects-table">
         <thead>
-          <tr><th>Name</th><th>Repository</th><th>Branch</th><th>Tags</th><th>Drift / TTL</th><th>Cost</th><th>Latest run</th></tr>
+          <tr><th>Name</th><th>Folder</th><th>Repository</th><th>Branch</th><th>Tags</th><th>Drift / TTL</th><th>Cost</th><th>Latest run</th></tr>
         </thead>
         <tbody>
           {{range .Projects}}
           <tr class="project-row" data-folder-id="{{.FolderID}}" data-folder-path="{{.FolderPath}}" data-name="{{.Name}}" data-repo="{{.Repo}}" data-branch="{{.Branch}}" data-tags="{{.TagsCSV}}" data-status-cat="{{.StatusCategory}}">
             <td><a href="/projects/{{.ID}}"><strong>{{.Name}}</strong></a></td>
+            <td>
+              {{if .FolderName}}
+              <button type="button" class="folder-chip" data-folder-id="{{.FolderID}}" title="Show projects in {{.FolderLabel}}">{{.FolderName}}</button>
+              {{else}}<span class="muted">&mdash;</span>{{end}}
+            </td>
             <td class="mono">{{.Repo}}</td>
             <td><span class="branch-badge">{{.Branch}}</span></td>
             <td>
@@ -157,14 +140,106 @@
           </tr>
           {{else}}
           <tr>
-            <td colspan="7" class="empty">No projects found.</td>
+            <td colspan="8" class="empty">No projects found.</td>
           </tr>
           {{end}}
         </tbody>
       </table>
+      <p id="projects-filter-empty" class="projects-filter-empty" hidden>No projects match these filters.</p>
     </div>
   </div>
 </div>
+
+{{if .HasFolders}}
+<dialog id="new-folder-dialog" class="folder-dialog" aria-labelledby="new-folder-title">
+  <form method="post" action="/folders" class="folder-dialog-form">
+    <div class="folder-dialog-head">
+      <h2 id="new-folder-title">New folder</h2>
+      <button type="button" class="folder-dialog-close" data-close-dialog aria-label="Close">Close</button>
+    </div>
+    <div class="folder-dialog-body">
+      <div class="field">
+        <label for="new-folder-parent">Parent folder</label>
+        <select id="new-folder-parent" name="parent_id" required>
+          {{range .Folders}}<option value="{{.ID}}">{{.Label}}</option>{{end}}
+        </select>
+      </div>
+      <div class="field">
+        <label for="new-folder-name">Name</label>
+        <input type="text" id="new-folder-name" name="name" required maxlength="80" autocomplete="off">
+      </div>
+      {{template "folder_settings_fields" .NewFolderFields}}
+    </div>
+    <div class="folder-dialog-foot">
+      <button type="button" class="btn" data-close-dialog>Cancel</button>
+      <button type="submit" class="btn btn-trigger">Create folder</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="edit-folder-dialog" class="folder-dialog" aria-labelledby="edit-folder-title">
+  <form method="post" id="edit-folder-form" class="folder-dialog-form">
+    <div class="folder-dialog-head">
+      <h2 id="edit-folder-title">Folder</h2>
+      <button type="button" class="folder-dialog-close" data-close-dialog aria-label="Close">Close</button>
+    </div>
+    <div class="folder-dialog-body">
+      <div class="field">
+        <label for="edit-folder-name">Name</label>
+        <input type="text" id="edit-folder-name" name="name" required maxlength="80" autocomplete="off">
+      </div>
+      <input type="hidden" name="tags_field" value="1">
+      {{if .FolderPolicies}}
+      <div class="field">
+        <label>Policies attached to this folder</label>
+        <div class="context-grid">
+          {{range .FolderPolicies}}
+          <label class="check"><input type="checkbox" name="policy_id" value="{{.ID}}"> {{.Name}}</label>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      <label class="check"><input type="checkbox" name="pass_down" id="edit-folder-pass-down"> Pass policies and tags to subfolders</label>
+      <div class="field">
+        <input type="hidden" name="tags_set" value="on" id="edit-folder-tags-set-forced" disabled>
+        <label class="check" id="edit-folder-tags-set-label"><input type="checkbox" name="tags_set" id="edit-folder-tags-set"> Set tags on this folder</label>
+        <label for="edit-folder-tags">Tags (key:value)</label>
+        <input type="text" id="edit-folder-tags" name="tags" placeholder="env:prod, team:core" autocomplete="off">
+      </div>
+    </div>
+    <div class="folder-dialog-foot">
+      <button type="button" class="btn" data-close-dialog>Cancel</button>
+      <button type="submit" class="btn btn-trigger">Save folder</button>
+    </div>
+  </form>
+  <div class="folder-dialog-extra" id="edit-folder-move">
+    <form method="post" id="edit-folder-move-form" class="folder-dialog-form">
+      <div class="folder-dialog-body">
+        <div class="field">
+          <label for="edit-folder-parent">Move to parent</label>
+          <select id="edit-folder-parent" name="parent_id">
+            {{range .Folders}}<option value="{{.ID}}" data-folder-path="{{.Path}}">{{.Label}}</option>{{end}}
+          </select>
+        </div>
+      </div>
+      <div class="folder-dialog-foot">
+        <button type="submit" class="btn">Move folder</button>
+      </div>
+    </form>
+  </div>
+  <div class="folder-dialog-extra" id="edit-folder-delete">
+    <form method="post" id="edit-folder-delete-form" class="folder-dialog-form">
+      <div class="folder-dialog-body">
+        <p class="field-hint">Projects in this folder move to the parent and take that parent's policies and tags. Their own policies stay. Subfolders move up with their projects.</p>
+      </div>
+      <div class="folder-dialog-foot">
+        <button type="submit" class="btn-danger">Delete folder</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+{{end}}
+
 <script>
 (function() {
   const queryInput = document.getElementById('filter-query');
@@ -175,11 +250,12 @@
   const resetBtn = document.getElementById('filters-reset');
   const statusTabs = Array.from(document.querySelectorAll('.status-tab[data-status-filter]'));
   const rows = Array.from(document.querySelectorAll('#projects-table tbody .project-row'));
+  const folderChecks = Array.from(document.querySelectorAll('#folder-filter .folder-filter-check'));
+  const newProjectLink = document.getElementById('new-project-link');
+  const emptyNote = document.getElementById('projects-filter-empty');
   if (!nameInput || !branchInput || !tagInput) return;
 
   let activeStatus = 'all';
-  const selectedFolder = document.querySelector('#folder-tree .folder-node.selected');
-  const folderPath = selectedFolder ? (selectedFolder.dataset.folderPath || '') : '';
   const tagBtns = Array.from(document.querySelectorAll('.tag-filter-btn'));
 
   function parseTagTokens(raw) {
@@ -194,38 +270,107 @@
     }
   }
 
+  function checkedFolders() {
+    return folderChecks.filter(box => box.checked);
+  }
+
+  function syncFolderChrome() {
+    const ids = checkedFolders().map(box => box.value);
+    if (newProjectLink) {
+      newProjectLink.href = ids.length === 1 ? '/projects/new?folder=' + encodeURIComponent(ids[0]) : '/projects/new';
+    }
+    const holder = document.getElementById('folder-query-fields');
+    if (holder) {
+      holder.replaceChildren();
+      for (const id of ids) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'folder';
+        input.value = id;
+        holder.appendChild(input);
+      }
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete('folder');
+    for (const id of ids) url.searchParams.append('folder', id);
+    if (url.search !== window.location.search) {
+      history.replaceState(null, '', url);
+    }
+  }
+
+  function fillFolderCounts() {
+    for (const box of folderChecks) {
+      const path = box.dataset.folderPath || '';
+      let n = 0;
+      for (const row of rows) {
+        const rPath = row.dataset.folderPath || '';
+        if (rPath === path || rPath.startsWith(path + '/')) n++;
+      }
+      const count = box.parentElement && box.parentElement.querySelector('.folder-filter-count');
+      if (count) count.textContent = String(n);
+    }
+  }
+
+  function rowMatches(row, q, n, b, tagTokens, rp) {
+    const rName = (row.dataset.name || '').toLowerCase();
+    const rRepo = (row.dataset.repo || '').toLowerCase();
+    const rBranch = (row.dataset.branch || '').toLowerCase();
+    const rTagsRaw = (row.dataset.tags || '').toLowerCase();
+    const rTags = rTagsRaw.split(',').filter(Boolean);
+    const rPath = row.dataset.folderPath || '';
+    const paths = checkedFolders().map(box => box.dataset.folderPath || '');
+    const matchFolder = paths.length === 0 || paths.some(path => rPath === path || rPath.startsWith(path + '/'));
+    const matchQuery = !q || rName.includes(q) || rRepo.includes(q) || rBranch.includes(q) || rTagsRaw.includes(q);
+    const matchName = !n || rName.includes(n);
+    const matchBranch = !b || rBranch.includes(b);
+    const matchTag = tagTokens.length === 0 || tagTokens.every(tok => rTags.some(tag => tag.includes(tok)));
+    const matchRepo = !rp || rRepo.includes(rp);
+    return matchQuery && matchName && matchBranch && matchTag && matchRepo && matchFolder;
+  }
+
   function applyFilter() {
     const q = (queryInput ? queryInput.value : '').trim().toLowerCase();
     const n = nameInput.value.trim().toLowerCase();
     const b = branchInput.value.trim().toLowerCase();
     const tagTokens = parseTagTokens(tagInput.value.toLowerCase());
     const rp = (repoInput ? repoInput.value : '').trim().toLowerCase();
-
     syncTagButtons();
 
+    const counts = {all: 0, needs_approval: 0, failed: 0, in_progress: 0, finished: 0};
+    let visible = 0;
     for (const row of rows) {
-      const rName = (row.dataset.name || '').toLowerCase();
-      const rRepo = (row.dataset.repo || '').toLowerCase();
-      const rBranch = (row.dataset.branch || '').toLowerCase();
-      const rTagsRaw = (row.dataset.tags || '').toLowerCase();
-      const rTags = rTagsRaw.split(',').filter(Boolean);
-      const rStatus = row.dataset.statusCat || 'none';
-
-      const matchQuery = !q || rName.includes(q) || rRepo.includes(q) || rBranch.includes(q) || rTagsRaw.includes(q);
-      const matchName = !n || rName.includes(n);
-      const matchBranch = !b || rBranch.includes(b);
-      const matchTag = tagTokens.length === 0 || tagTokens.every(tok => rTags.some(tag => tag.includes(tok)));
-      const matchRepo = !rp || rRepo.includes(rp);
-      const matchStatus = (activeStatus === 'all') || (rStatus === activeStatus);
-      const rPath = row.dataset.folderPath || '';
-      const matchFolder = !folderPath || rPath === folderPath || rPath.startsWith(folderPath + '/');
-
-      row.style.display = (matchQuery && matchName && matchBranch && matchTag && matchRepo && matchStatus && matchFolder) ? '' : 'none';
+      const matched = rowMatches(row, q, n, b, tagTokens, rp);
+      if (matched) {
+        counts.all++;
+        const cat = row.dataset.statusCat || '';
+        if (Object.prototype.hasOwnProperty.call(counts, cat)) counts[cat]++;
+      }
+      const show = matched && (activeStatus === 'all' || (row.dataset.statusCat || 'none') === activeStatus);
+      row.style.display = show ? '' : 'none';
+      if (show) visible++;
     }
+    for (const tab of statusTabs) {
+      const key = tab.dataset.statusFilter || 'all';
+      const el = tab.querySelector('.status-tab-count');
+      if (el && Object.prototype.hasOwnProperty.call(counts, key)) el.textContent = String(counts[key]);
+    }
+    if (emptyNote) emptyNote.hidden = rows.length === 0 || visible !== 0;
+  }
+
+  function selectOnlyFolder(id) {
+    for (const box of folderChecks) box.checked = box.value === id;
+    syncFolderChrome();
+    applyFilter();
   }
 
   [queryInput, nameInput, branchInput, tagInput, repoInput].forEach(inp => {
     if (inp) inp.addEventListener('input', applyFilter);
+  });
+  folderChecks.forEach(box => {
+    box.addEventListener('change', () => {
+      syncFolderChrome();
+      applyFilter();
+    });
   });
 
   statusTabs.forEach(tab => {
@@ -244,14 +389,15 @@
       const current = parseTagTokens(tagInput.value);
       const lower = tag.toLowerCase();
       const idx = current.findIndex(t => t.toLowerCase() === lower);
-      if (idx >= 0) {
-        current.splice(idx, 1);
-      } else {
-        current.push(tag);
-      }
+      if (idx >= 0) current.splice(idx, 1);
+      else current.push(tag);
       tagInput.value = current.join(', ');
       applyFilter();
     });
+  });
+
+  document.querySelectorAll('.folder-chip').forEach(btn => {
+    btn.addEventListener('click', () => selectOnlyFolder(btn.dataset.folderId || ''));
   });
 
   if (resetBtn) {
@@ -261,12 +407,105 @@
       branchInput.value = '';
       tagInput.value = '';
       if (repoInput) repoInput.value = '';
+      folderChecks.forEach(box => { box.checked = false; });
       activeStatus = 'all';
       statusTabs.forEach(t => t.classList.toggle('active', t.dataset.statusFilter === 'all'));
+      syncFolderChrome();
       applyFilter();
     });
   }
 
+  const newDialog = document.getElementById('new-folder-dialog');
+  const editDialog = document.getElementById('edit-folder-dialog');
+  function bindDialog(dialog) {
+    if (!dialog) return;
+    dialog.querySelectorAll('[data-close-dialog]').forEach(btn => {
+      btn.addEventListener('click', () => dialog.close());
+    });
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) dialog.close();
+    });
+  }
+  bindDialog(newDialog);
+  bindDialog(editDialog);
+
+  const openNew = document.getElementById('open-new-folder');
+  if (openNew && newDialog) {
+    openNew.addEventListener('click', () => {
+      const parent = document.getElementById('new-folder-parent');
+      const name = document.getElementById('new-folder-name');
+      const chosen = checkedFolders();
+      if (parent) {
+        if (chosen.length === 1) parent.value = chosen[0].value;
+        else {
+          const root = folderChecks.find(box => box.dataset.isRoot === 'true');
+          if (root) parent.value = root.value;
+        }
+      }
+      if (name) name.value = '';
+      newDialog.showModal();
+      if (name) name.focus();
+    });
+  }
+
+  document.querySelectorAll('.folder-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!editDialog) return;
+      const id = btn.dataset.folderId || '';
+      const isRoot = btn.dataset.isRoot === 'true';
+      const title = document.getElementById('edit-folder-title');
+      const name = document.getElementById('edit-folder-name');
+      const tags = document.getElementById('edit-folder-tags');
+      const passDown = document.getElementById('edit-folder-pass-down');
+      const tagsSet = document.getElementById('edit-folder-tags-set');
+      const tagsSetLabel = document.getElementById('edit-folder-tags-set-label');
+      const forced = document.getElementById('edit-folder-tags-set-forced');
+      const settings = document.getElementById('edit-folder-form');
+      const move = document.getElementById('edit-folder-move');
+      const moveForm = document.getElementById('edit-folder-move-form');
+      const parent = document.getElementById('edit-folder-parent');
+      const del = document.getElementById('edit-folder-delete');
+      const delForm = document.getElementById('edit-folder-delete-form');
+      if (title) title.textContent = btn.dataset.name || 'Folder';
+      if (name) name.value = btn.dataset.name || '';
+      if (tags) tags.value = btn.dataset.tags || '';
+      if (passDown) passDown.checked = btn.dataset.passDown === 'true';
+      if (forced) forced.disabled = !isRoot;
+      if (tagsSet) {
+        tagsSet.disabled = isRoot;
+        tagsSet.checked = btn.dataset.tagsSet === 'true';
+      }
+      if (tagsSetLabel) tagsSetLabel.hidden = isRoot;
+      const policyIDs = new Set((btn.dataset.policyIds || '').split(',').filter(Boolean));
+      editDialog.querySelectorAll('#edit-folder-form input[name="policy_id"]').forEach(box => {
+        box.checked = policyIDs.has(box.value);
+      });
+      if (settings) settings.action = '/folders/' + encodeURIComponent(id);
+      if (moveForm) moveForm.action = '/folders/' + encodeURIComponent(id) + '/move';
+      if (delForm) delForm.action = '/folders/' + encodeURIComponent(id) + '/delete';
+      if (move) move.hidden = isRoot;
+      if (del) del.hidden = isRoot;
+      if (parent) {
+        const path = btn.dataset.folderPath || '';
+        for (const opt of parent.options) {
+          const optPath = opt.dataset.folderPath || '';
+          const invalid = opt.value === id || optPath === path || optPath.startsWith(path + '/');
+          opt.disabled = invalid;
+          opt.hidden = invalid;
+        }
+        parent.value = btn.dataset.parentId || '';
+        if (parent.selectedOptions[0] && parent.selectedOptions[0].disabled) {
+          const first = Array.from(parent.options).find(opt => !opt.disabled);
+          if (first) parent.value = first.value;
+        }
+      }
+      editDialog.showModal();
+      if (name) name.focus();
+    });
+  });
+
+  fillFolderCounts();
+  syncFolderChrome();
   syncTagButtons();
   applyFilter();
 })();

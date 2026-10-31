@@ -4119,24 +4119,37 @@ func TestProjectsPageShowsFolderTree(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("GET /projects = %d: %s", rr.Code, body)
 	}
-	if !strings.Contains(body, `class="folder-tree"`) || !strings.Contains(body, `href="/projects?folder=pay"`) || !strings.Contains(body, "Payments") {
-		t.Fatalf("folder tree missing: %s", body)
+	if !strings.Contains(body, `id="folder-filter"`) || !strings.Contains(body, `id="new-folder-dialog"`) || !strings.Contains(body, "Payments") {
+		t.Fatalf("folder filter missing: %s", body)
 	}
-	if !strings.Contains(body, `class="folder-node selected" data-folder-id="root"`) {
-		t.Fatalf("root is not selected: %s", body)
+	if strings.Contains(body, `data-folder-id="root" data-folder-path="root" checked`) || strings.Contains(body, `data-folder-id="pay" data-folder-path="root/pay" checked`) {
+		t.Fatalf("folders are checked before the user filters: %s", body)
 	}
 	if !strings.Contains(body, `data-folder-id="pay" data-folder-path="root/pay"`) {
 		t.Fatalf("project row folder path missing: %s", body)
 	}
-	if !strings.Contains(body, `href="/projects/new?folder=root"`) {
-		t.Fatalf("new project link not scoped to the root: %s", body)
+	if strings.Contains(body, `href="/projects/new?folder=`) {
+		t.Fatalf("new project link is scoped before a folder is chosen: %s", body)
+	}
+	if !strings.Contains(body, ">Payments</button>") {
+		t.Fatalf("folder column missing: %s", body)
 	}
 
 	rr = getUI(t, env.h, "/projects?folder=pay")
 	body = rr.Body.String()
-	if !strings.Contains(body, `class="folder-node selected" data-folder-id="pay"`) || !strings.Contains(body, `href="/projects/new?folder=pay"`) {
+	if !strings.Contains(body, `data-folder-id="pay" data-folder-path="root/pay" checked`) || !strings.Contains(body, `href="/projects/new?folder=pay"`) {
 		t.Fatalf("selected folder = %s", body)
 	}
+	rr = getUI(t, env.h, "/projects?folder=root&folder=pay")
+	body = rr.Body.String()
+	if !strings.Contains(body, `data-folder-id="root" data-folder-path="root" checked`) || !strings.Contains(body, `data-folder-id="pay" data-folder-path="root/pay" checked`) {
+		t.Fatalf("multiple folder filters missing: %s", body)
+	}
+	if strings.Contains(body, `href="/projects/new?folder=`) {
+		t.Fatalf("new project link scoped while several folders are filtered: %s", body)
+	}
+	rr = getUI(t, env.h, "/projects?folder=pay")
+	body = rr.Body.String()
 	if !strings.Contains(body, "Projects in this folder move to the parent and take that parent's policies and tags. Their own policies stay. Subfolders move up with their projects.") {
 		t.Fatalf("delete sentence missing: %s", body)
 	}

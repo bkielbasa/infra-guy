@@ -983,6 +983,11 @@ button.tag-filter-btn:hover {
   font-weight: 600;
   letter-spacing: -0.02em;
 }
+.projects-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .projects-topbar {
   display: flex;
   align-items: center;
@@ -1120,6 +1125,142 @@ button.tag-filter-btn:hover {
 }
 .projects-main {
   margin-bottom: 0;
+}
+.folder-filter {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 280px;
+  overflow: auto;
+}
+.folder-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.folder-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.folder-filter-item:has(input:checked) .folder-filter-row {
+  background: rgba(139, 124, 247, 0.16);
+}
+.folder-filter-row:hover {
+  background: #1f2432;
+}
+.folder-filter-row input {
+  margin: 0;
+  flex: 0 0 auto;
+}
+.folder-filter-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-filter-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--faint);
+}
+.folder-edit-btn {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.folder-edit-btn:hover {
+  color: var(--text);
+  background: transparent;
+}
+.folder-chip {
+  border: 1px solid var(--line);
+  background: var(--chip);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-chip:hover {
+  border-color: var(--accent);
+  background: #252b3d;
+}
+.projects-filter-empty {
+  margin: 14px 4px 4px;
+  color: var(--muted);
+}
+.folder-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(86vh, 760px);
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+.folder-dialog::backdrop {
+  background: rgba(8, 10, 16, 0.72);
+}
+.folder-dialog-form {
+  margin: 0;
+}
+.folder-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 0;
+}
+.folder-dialog-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.folder-dialog-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 8px;
+}
+.folder-dialog-body {
+  padding: 12px 18px 4px;
+  max-height: 58vh;
+  overflow: auto;
+}
+.folder-dialog .field input,
+.folder-dialog .field select {
+  width: 100%;
+  max-width: none;
+}
+.folder-dialog .check {
+  margin: 8px 0;
+}
+.folder-dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+}
+.folder-dialog-extra {
+  border-top: 1px solid var(--line);
 }
 .branch-badge {
   display: inline-block;

@@ -64,7 +64,7 @@ type projectRow struct {
 	ID, Name, Repo, Branch, Status, StatusClass, StatusCategory string
 	Tags                                                        []string
 	TagsCSV                                                     string
-	FolderID, FolderPath                                        string
+	FolderID, FolderPath, FolderName, FolderLabel               string
 	Drifted                                                     bool
 	DriftEnabled                                                bool
 	DriftStatus                                                 string
@@ -1811,10 +1811,26 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	tree, err := u.folderTree(r.Context(), tenantID, strings.TrimSpace(r.URL.Query().Get("folder")))
+	tree, err := u.folderTree(r.Context(), tenantID, "")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	selectedFolders := map[string]bool{}
+	for _, id := range r.URL.Query()["folder"] {
+		id = strings.TrimSpace(id)
+		if _, ok := tree.byID[id]; ok {
+			selectedFolders[id] = true
+		}
+	}
+	for i := range tree.nodes {
+		tree.nodes[i].Selected = selectedFolders[tree.nodes[i].ID]
+	}
+	newProjectFolder := ""
+	if len(selectedFolders) == 1 {
+		for id := range selectedFolders {
+			newProjectFolder = id
+		}
 	}
 	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
 	filterBranch := strings.TrimSpace(r.URL.Query().Get("branch"))
@@ -1827,9 +1843,13 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 		if !matchesProjectFilter(ps.Name, ps.DefaultBranch, tags, filterName, filterBranch, filterTag) {
 			continue
 		}
+		folderName, folderLabel := "", ""
+		if node, ok := tree.byID[ps.FolderID]; ok {
+			folderName, folderLabel = node.Name, node.NamePath
+		}
 		row := projectRow{
 			ID: string(ps.ID), Name: ps.Name, Repo: ps.Repo.String(), Branch: ps.DefaultBranch,
-			FolderID: ps.FolderID, FolderPath: tree.paths[ps.FolderID],
+			FolderID: ps.FolderID, FolderPath: tree.paths[ps.FolderID], FolderName: folderName, FolderLabel: folderLabel,
 			Tags: tags, TagsCSV: strings.Join(tags, ","),
 			DriftEnabled:     ps.DriftEnabled,
 			DriftStatus:      ps.DriftStatus,
@@ -1870,10 +1890,10 @@ func (u *ui) list(w http.ResponseWriter, r *http.Request) {
 	u.page(w, "Projects", "projects", map[string]any{
 		"Projects":           rows,
 		"Folders":            tree.nodes,
-		"SelectedFolder":     tree.selected,
 		"HasFolders":         len(tree.nodes) > 0,
+		"NewProjectFolder":   newProjectFolder,
 		"NewFolderFields":    folderFields{Policies: u.policyChoicesFor(r.Context(), tenantID, nil)},
-		"EditFolderFields":   folderFields{Policies: u.policyChoicesFor(r.Context(), tenantID, tree.selected.PolicyIDs), PassDown: tree.selected.PassDown, TagsSet: tree.selected.TagsSet, Tags: tree.selected.Tags, IsRoot: tree.selected.IsRoot},
+		"FolderPolicies":     u.policyChoicesFor(r.Context(), tenantID, nil),
 		"Policies":           u.policyChoices(r.Context(), tenantID, ""),
 		"FilterName":         filterName,
 		"FilterBranch":       filterBranch,
@@ -5475,12 +5495,13 @@ type folderFields struct {
 }
 
 type folderNode struct {
-	ID, ParentID, Name, Path, Label string
-	Depth, Indent                   int
-	Selected, IsRoot                bool
-	PassDown, TagsSet               bool
-	Tags                            string
-	PolicyIDs                       []string
+	ID, ParentID, Name, Path, NamePath, Label string
+	Depth, Indent                             int
+	Selected, IsRoot                          bool
+	PassDown, TagsSet                         bool
+	Tags                                      string
+	PolicyIDs                                 []string
+	PolicyIDsCSV                              string
 }
 
 type folderCrumb struct{ ID, Name string }
@@ -5539,19 +5560,24 @@ func (u *ui) folderTree(ctx context.Context, tenantID, selectedID string) (folde
 	if _, ok := byID[selectedID]; !ok {
 		selectedID = root.ID
 	}
-	var walk func(f folder.Snapshot, parentPath string, depth int)
-	walk = func(f folder.Snapshot, parentPath string, depth int) {
+	var walk func(f folder.Snapshot, parentPath, parentNames string, depth int)
+	walk = func(f folder.Snapshot, parentPath, parentNames string, depth int) {
 		path := f.ID
 		if parentPath != "" {
 			path = parentPath + "/" + f.ID
 		}
+		namePath := f.Name
+		if parentNames != "" {
+			namePath = parentNames + " / " + f.Name
+		}
 		node := folderNode{
-			ID: f.ID, ParentID: f.ParentID, Name: f.Name, Path: path,
+			ID: f.ID, ParentID: f.ParentID, Name: f.Name, Path: path, NamePath: namePath,
 			Label: strings.Repeat("\u2014 ", depth) + f.Name,
-			Depth: depth, Indent: depth * 16,
+			Depth: depth, Indent: depth * 14,
 			Selected: f.ID == selectedID, IsRoot: f.ParentID == "",
 			PassDown: f.PassDown, TagsSet: f.TagsSet,
 			Tags: project.FormatTags(f.Tags), PolicyIDs: append([]string(nil), f.PolicyIDs...),
+			PolicyIDsCSV: strings.Join(f.PolicyIDs, ","),
 		}
 		view.nodes = append(view.nodes, node)
 		view.paths[f.ID] = path
@@ -5560,11 +5586,11 @@ func (u *ui) folderTree(ctx context.Context, tenantID, selectedID string) (folde
 			view.selected = node
 		}
 		for _, child := range children[f.ID] {
-			walk(child, path, depth+1)
+			walk(child, path, namePath, depth+1)
 		}
 	}
 	for _, top := range children[""] {
-		walk(top, "", 0)
+		walk(top, "", "", 0)
 	}
 	return view, nil
 }
