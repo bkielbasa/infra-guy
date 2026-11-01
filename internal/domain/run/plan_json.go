@@ -16,13 +16,14 @@ type ParsedPlan struct {
 	Change           int
 	Replace          int
 	Destroy          int
+	Import           int
 	Resources        []ResourceDiff
 	Outputs          []OutputDiff
 	Cost             *CostEstimate
 }
 
 func (p *ParsedPlan) HasChanges() bool {
-	return p != nil && (len(p.Resources) > 0 || len(p.Outputs) > 0 || p.Add > 0 || p.Change > 0 || p.Replace > 0 || p.Destroy > 0)
+	return p != nil && (len(p.Resources) > 0 || len(p.Outputs) > 0 || p.Add > 0 || p.Change > 0 || p.Replace > 0 || p.Destroy > 0 || p.Import > 0)
 }
 
 type ResourceDiff struct {
@@ -36,6 +37,7 @@ type ResourceDiff struct {
 	ActionSymbol   string
 	ActionLabel    string
 	ActionReason   string
+	ImportingID    string
 	CostDiff       string
 	CostSKU        string
 	Attributes     []AttributeDiff
@@ -83,13 +85,18 @@ type rawResourceChange struct {
 }
 
 type rawChangeSpec struct {
-	Actions         []string `json:"actions"`
-	Before          any      `json:"before"`
-	After           any      `json:"after"`
-	AfterUnknown    any      `json:"after_unknown"`
-	BeforeSensitive any      `json:"before_sensitive"`
-	AfterSensitive  any      `json:"after_sensitive"`
-	ReplacePaths    []any    `json:"replace_paths"`
+	Actions         []string      `json:"actions"`
+	Before          any           `json:"before"`
+	After           any           `json:"after"`
+	AfterUnknown    any           `json:"after_unknown"`
+	BeforeSensitive any           `json:"before_sensitive"`
+	AfterSensitive  any           `json:"after_sensitive"`
+	ReplacePaths    []any         `json:"replace_paths"`
+	Importing       *rawImporting `json:"importing"`
+}
+
+type rawImporting struct {
+	ID string `json:"id"`
 }
 
 func ParsePlanSummaryJSON(raw []byte) (PlanSummary, bool) {
@@ -100,7 +107,7 @@ func ParsePlanSummaryJSON(raw []byte) (PlanSummary, bool) {
 	add := parsed.Add + parsed.Replace
 	change := parsed.Change
 	destroy := parsed.Destroy + parsed.Replace
-	if add == 0 && change == 0 && destroy == 0 && len(parsed.Outputs) == 0 {
+	if add == 0 && change == 0 && destroy == 0 && parsed.Import == 0 && len(parsed.Outputs) == 0 {
 		return PlanSummary{Present: false, noChangesSentence: true}, true
 	}
 	return PlanSummary{
@@ -108,6 +115,7 @@ func ParsePlanSummaryJSON(raw []byte) (PlanSummary, bool) {
 		Add:     add,
 		Change:  change,
 		Destroy: destroy,
+		Import:  parsed.Import,
 	}, true
 }
 
@@ -132,9 +140,19 @@ func ParsePlanJSON(raw []byte) (*ParsedPlan, error) {
 		}
 	}
 	for _, rc := range doc.ResourceChanges {
+		importingID := ""
+		if rc.Change.Importing != nil {
+			importingID = strings.TrimSpace(rc.Change.Importing.ID)
+		}
 		action, sym, label := classifyActions(rc.Change.Actions)
+		if importingID != "" && (action == "no-op" || action == "") {
+			action, sym, label = "import", "↓", "import"
+		}
 		if action == "no-op" || action == "" {
 			continue
+		}
+		if importingID != "" {
+			out.Import++
 		}
 		switch action {
 		case "create":
@@ -167,6 +185,7 @@ func ParsePlanJSON(raw []byte) (*ParsedPlan, error) {
 			ActionSymbol:   sym,
 			ActionLabel:    label,
 			ActionReason:   humanActionReason(rc.ActionReason),
+			ImportingID:    importingID,
 			CostDiff:       costDiff,
 			CostSKU:        costSKU,
 			Attributes:     changed,
@@ -297,6 +316,21 @@ func buildAttributeDiffs(action string, ch rawChangeSpec) (changed []AttributeDi
 		}
 
 		switch action {
+		case "import":
+			if !knownAfter && (!hasAfter || isEmptyValue(aVal)) {
+				continue
+			}
+			afterStr := formatValue(aVal)
+			if knownAfter {
+				afterStr = "(known after apply)"
+			}
+			changed = append(changed, AttributeDiff{
+				Name:            k,
+				Change:          "add",
+				Symbol:          "+",
+				After:           afterStr,
+				KnownAfterApply: knownAfter,
+			})
 		case "create":
 			if !knownAfter && (!hasAfter || isEmptyValue(aVal)) {
 				continue

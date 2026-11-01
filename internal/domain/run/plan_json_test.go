@@ -196,3 +196,86 @@ func TestParsePlanJSONAndSummary(t *testing.T) {
 		t.Fatalf("snapshot summary = present:%v +%d ~%d -%d", snap.SummaryPresent, snap.Add, snap.Change, snap.Destroy)
 	}
 }
+
+func TestParsePlanJSONImports(t *testing.T) {
+	raw := []byte(`{
+		"format_version": "1.2",
+		"resource_changes": [
+			{
+				"address": "aws_instance.pure",
+				"type": "aws_instance",
+				"name": "pure",
+				"change": {
+					"actions": ["no-op"],
+					"before": null,
+					"after": {"ami": "ami-123"},
+					"importing": {"id": "i-abc123"}
+				}
+			},
+			{
+				"address": "aws_instance.edited",
+				"type": "aws_instance",
+				"name": "edited",
+				"change": {
+					"actions": ["update"],
+					"before": {"ami": "ami-old"},
+					"after": {"ami": "ami-new"},
+					"importing": {"id": "i-def456"}
+				}
+			},
+			{
+				"address": "aws_vpc.quiet",
+				"type": "aws_vpc",
+				"name": "quiet",
+				"change": {
+					"actions": ["no-op"],
+					"before": {"cidr": "10.0.0.0/16"},
+					"after": {"cidr": "10.0.0.0/16"}
+				}
+			},
+			{
+				"address": "aws_instance.blank",
+				"type": "aws_instance",
+				"name": "blank",
+				"change": {
+					"actions": ["no-op"],
+					"importing": {"id": "  "}
+				}
+			}
+		]
+	}`)
+	parsed, err := ParsePlanJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Import != 2 || parsed.Change != 1 || parsed.Add != 0 || parsed.Destroy != 0 || parsed.Replace != 0 {
+		t.Fatalf("counts import=%d add=%d change=%d destroy=%d replace=%d", parsed.Import, parsed.Add, parsed.Change, parsed.Destroy, parsed.Replace)
+	}
+	if !parsed.HasChanges() {
+		t.Fatal("imports are changes")
+	}
+	if len(parsed.Resources) != 2 {
+		t.Fatalf("resources: %+v", parsed.Resources)
+	}
+	pure := parsed.Resources[0]
+	if pure.Address != "aws_instance.pure" || pure.Action != "import" || pure.ActionSymbol != "↓" || pure.ActionLabel != "import" || pure.ImportingID != "i-abc123" {
+		t.Fatalf("pure import: %+v", pure)
+	}
+	if len(pure.Attributes) != 1 || pure.Attributes[0].Name != "ami" || pure.Attributes[0].After != `"ami-123"` || pure.Attributes[0].Symbol != "+" {
+		t.Fatalf("pure import attributes: %+v", pure.Attributes)
+	}
+	edited := parsed.Resources[1]
+	if edited.Action != "update" || edited.ImportingID != "i-def456" {
+		t.Fatalf("update import: %+v", edited)
+	}
+	sum, ok := ParsePlanSummaryJSON(raw)
+	if !ok || !sum.Present || sum.Import != 2 || sum.Add != 0 || sum.Change != 1 || sum.Destroy != 0 || sum.NoChanges() {
+		t.Fatalf("summary: ok=%v %#v", ok, sum)
+	}
+
+	blankOnly := []byte(`{"format_version":"1.2","resource_changes":[{"address":"aws_instance.blank","change":{"actions":["no-op"],"importing":{"id":" "}}}]}`)
+	blankSum, ok := ParsePlanSummaryJSON(blankOnly)
+	if !ok || blankSum.Present || blankSum.Import != 0 || !blankSum.NoChanges() {
+		t.Fatalf("blank id: ok=%v %#v", ok, blankSum)
+	}
+}
