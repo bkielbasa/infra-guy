@@ -824,7 +824,7 @@ func (c *fakeWorkspaceCache) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func TestTickInitSavesToCacheAndPlanAndApplyRestoreWithoutRecloning(t *testing.T) {
+func TestTickKeepsLocalWorkspaceUntilPlanThenCachesForApply(t *testing.T) {
 	ctx := context.Background()
 	p := testProject(t)
 	r, err := run.Open(run.OpenInput{
@@ -839,26 +839,29 @@ func TestTickInitSavesToCacheAndPlanAndApplyRestoreWithoutRecloning(t *testing.T
 	fx := newFixture(t, r, p, &fakeQueue{claim: &Job{ID: 1, RunID: "run-cached", Step: run.StepInit}}, exec)
 	fx.w.Cache = cache
 	fx.exec.onRun = func(context.Context) {
-		_ = os.MkdirAll(fx.ws, 0o755)
+		_ = os.MkdirAll(filepath.Join(fx.ws, ".terraform"), 0o755)
 		_ = os.WriteFile(filepath.Join(fx.ws, ".terraform.lock.hcl"), []byte("lock-v1"), 0o644)
 	}
 
-	// 1. Run StepInit: clones repo, runs terraform init, saves workspace zip to cache, deletes local ws.
+	// Init clones and keeps the workspace locally. Nothing is uploaded yet.
 	if err := fx.w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	wantKey := "ten-1/p1/run-cached"
-	if cache.saved[wantKey] != "lock-v1" {
-		t.Fatalf("expected cache saved under %q, got %#v", wantKey, cache.saved)
+	if len(cache.saved) != 0 {
+		t.Fatalf("cache should not be saved after init, got %#v", cache.saved)
+	}
+	if len(cache.restored) != 0 {
+		t.Fatalf("cache should not be restored after init, got %v", cache.restored)
 	}
 	if fx.co.dest != fx.ws {
 		t.Fatalf("expected clone during init, got dest=%q", fx.co.dest)
 	}
-	if _, err := os.Stat(fx.ws); !os.IsNotExist(err) {
-		t.Fatalf("local workspace should be removed after StepInit when cache is active: %v", err)
+	if _, err := os.Stat(filepath.Join(fx.ws, ".terraform.lock.hcl")); err != nil {
+		t.Fatalf("local workspace should remain after init: %v", err)
 	}
 
-	// 2. Run StepPlan: restores from cache, does NOT clone again, keeps cache for StepApply.
+	// Plan reuses that workspace, then uploads it for a later apply.
 	fx.co.dest = ""
 	fx.queue.claim = &Job{ID: 2, RunID: "run-cached", Step: run.StepPlan}
 	fx.exec.res = Result{
@@ -876,16 +879,25 @@ func TestTickInitSavesToCacheAndPlanAndApplyRestoreWithoutRecloning(t *testing.T
 		t.Fatal(err)
 	}
 	if fx.co.dest != "" {
-		t.Fatalf("StepPlan should not clone when cache is configured, got dest=%q", fx.co.dest)
+		t.Fatalf("StepPlan should not clone when the initialized workspace is still local, got dest=%q", fx.co.dest)
+	}
+	if len(cache.restored) != 0 {
+		t.Fatalf("StepPlan should not restore from cache, got %v", cache.restored)
 	}
 	if planSawLockfile != "lock-v1" {
-		t.Fatalf("StepPlan did not see restored lockfile, got %q", planSawLockfile)
+		t.Fatalf("StepPlan did not see the local lockfile, got %q", planSawLockfile)
+	}
+	if cache.saved[wantKey] != "lock-v1" {
+		t.Fatalf("expected cache saved after plan under %q, got %#v", wantKey, cache.saved)
+	}
+	if _, err := os.Stat(fx.ws); !os.IsNotExist(err) {
+		t.Fatalf("local workspace should be removed after the plan upload: %v", err)
 	}
 	if len(cache.deleted) != 0 {
 		t.Fatalf("cache should not be deleted before apply, got deleted=%v", cache.deleted)
 	}
 
-	// 3. Run StepApply: restores from cache, does NOT clone, deletes cache when run succeeds.
+	// Apply restores the post-plan workspace and deletes the cache when the run finishes.
 	fx.queue.claim = &Job{ID: 3, RunID: "run-cached", Step: run.StepApply}
 	fx.exec.res = Result{ExitCode: 0, Logs: "Apply complete!"}
 	var applySawLockfile string
@@ -898,6 +910,9 @@ func TestTickInitSavesToCacheAndPlanAndApplyRestoreWithoutRecloning(t *testing.T
 	}
 	if fx.co.dest != "" {
 		t.Fatalf("StepApply should not clone when cache is configured, got dest=%q", fx.co.dest)
+	}
+	if len(cache.restored) != 1 || cache.restored[0] != wantKey {
+		t.Fatalf("StepApply should restore %q, got %v", wantKey, cache.restored)
 	}
 	if applySawLockfile != "lock-v1" {
 		t.Fatalf("StepApply did not see restored lockfile, got %q", applySawLockfile)

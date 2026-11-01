@@ -322,7 +322,9 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 
 	dest := filepath.Join(w.WorkDir, string(job.RunID))
 	cacheKey := WorkspaceCacheKey(ps.TenantID, string(ps.ID), string(job.RunID))
-	if w.Cache != nil {
+	// Init and plan share the local workspace. Apply may run later, so only that step
+	// drops the directory when it finishes; plan removes it after a successful upload.
+	if w.Cache != nil && job.Step == run.StepApply {
 		defer func() { _ = os.RemoveAll(dest) }()
 	}
 	logger := &stepLogger{
@@ -489,8 +491,8 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 	tfSpan.End()
 	telemetry.Default().RecordRunDuration(ps.TenantID, string(ps.ID), ps.Name, op, stepStatus, string(job.Step), execDur)
 	logger.SetExec(res.Logs)
-	if job.Step == run.StepInit && res.ExitCode == 0 && w.Cache != nil {
-		logger.LogAfterf("Uploading initialized workspace cache to S3 (%s)...", cacheKey)
+	if job.Step == run.StepPlan && res.ExitCode == 0 && w.Cache != nil {
+		logger.LogAfterf("Uploading workspace cache to S3 (%s)...", cacheKey)
 		if err := w.Cache.Save(ctx, cacheKey, dest); err != nil {
 			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "save workspace cache: "+err.Error()); ferr != nil {
 				return ferr
@@ -498,6 +500,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 			return w.completeAndCleanup(ctx, job)
 		}
 		logger.LogAfterf("Workspace cache uploaded")
+		_ = os.RemoveAll(dest)
 	}
 	if res.Version != "" {
 		if err := w.Service.SetTerraformVersion(ctx, job.RunID, res.Version); err != nil {
@@ -517,17 +520,9 @@ func (w *Worker) prepareWorkspace(ctx context.Context, job Job, ps project.Snaps
 	if len(sha) > 7 {
 		sha = sha[:7]
 	}
-	if w.Cache != nil {
+	if w.Cache != nil && job.Step == run.StepApply {
 		if err := os.RemoveAll(dest); err != nil {
 			return err
-		}
-		if job.Step == run.StepInit {
-			logger.LogBeforef("Cloning repository %s@%s...", ps.Repo.String(), sha)
-			if err := w.Checkout.Clone(ctx, dest, ps.Repo.CloneURL(), token, rs.SHA); err != nil {
-				return err
-			}
-			logger.LogBeforef("Repository cloned")
-			return nil
 		}
 		logger.LogBeforef("Restoring workspace cache from S3 (%s)...", cacheKey)
 		ok, err := w.Cache.Restore(ctx, cacheKey, dest)
