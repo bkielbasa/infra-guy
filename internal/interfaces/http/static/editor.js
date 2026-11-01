@@ -235,7 +235,85 @@
     const scope = root || document;
     scope.querySelectorAll('textarea[data-code-editor]').forEach(mountEditor);
     scope.querySelectorAll('code[data-code-highlight]').forEach(mountStaticHighlight);
+    pinFollowedLogs(scope);
   }
+
+  function pinFollowedLogs(scope) {
+    if (!scope || !scope.querySelectorAll) return;
+    scope.querySelectorAll('pre.log[data-follow="1"]').forEach(scrollLogToTail);
+  }
+
+  function setFollow(pre, on) {
+    if (!pre) return;
+    pre.dataset.follow = on ? '1' : '0';
+    const pane = pre.closest('.log-pane');
+    const btn = pane && pane.querySelector('[data-log-follow]');
+    if (btn) {
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      btn.title = on ? 'Following tail' : 'Follow tail';
+    }
+    if (on) scrollLogToTail(pre);
+  }
+
+  function scrollLogToTail(pre) {
+    if (!pre || pre.dataset.follow !== '1') return;
+    pre.dataset.followLock = '1';
+    pre.scrollTop = pre.scrollHeight;
+    pre.dataset.lastScroll = String(pre.scrollTop);
+    pre.dataset.followLock = '0';
+  }
+
+  function downloadLog(pre) {
+    const step = pre.dataset.logStep || 'log';
+    const panel = pre.closest('#run-panel');
+    const runID = ((panel && panel.dataset.runId) || 'run').replace(/[^\w.-]+/g, '_');
+    const blob = new Blob([pre.textContent || ''], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = runID + '-' + step + '.log';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  document.addEventListener('click', function (e) {
+    const download = e.target && e.target.closest ? e.target.closest('[data-log-download]') : null;
+    if (download) {
+      e.preventDefault();
+      const pre = download.closest('.log-pane') && download.closest('.log-pane').querySelector('pre.log');
+      if (pre) downloadLog(pre);
+      return;
+    }
+    const follow = e.target && e.target.closest ? e.target.closest('[data-log-follow]') : null;
+    if (!follow) return;
+    e.preventDefault();
+    const pre = follow.closest('.log-pane') && follow.closest('.log-pane').querySelector('pre.log');
+    if (!pre) return;
+    setFollow(pre, follow.getAttribute('aria-pressed') !== 'true');
+  });
+
+  document.addEventListener('scroll', function (e) {
+    const pre = e.target;
+    if (!pre || !pre.matches || !pre.matches('pre.log[data-log-step]')) return;
+    if (pre.dataset.follow !== '1' || pre.dataset.followLock === '1') {
+      pre.dataset.lastScroll = String(pre.scrollTop);
+      return;
+    }
+    const prev = Number(pre.dataset.lastScroll || '0');
+    const atBottom = (pre.scrollHeight - pre.scrollTop - pre.clientHeight) <= 32;
+    if (!atBottom && pre.scrollTop < prev - 1) {
+      setFollow(pre, false);
+    }
+    pre.dataset.lastScroll = String(pre.scrollTop);
+  }, true);
+
+  document.addEventListener('toggle', function (e) {
+    const details = e.target;
+    if (!details || !details.matches || !details.matches('details[data-step]') || !details.open) return;
+    scrollLogToTail(details.querySelector('pre.log[data-log-step]'));
+  }, true);
 
   const preservedDetails = new Map();
   const stepPrevStatus = new Map();
@@ -298,18 +376,18 @@
     const curPre = curDetails.querySelector('pre.log[data-log-step]');
     const incPre = incDetails.querySelector('pre.log[data-log-step]');
     if (curPre && incPre) {
+      if (prevStatus !== nextStatus && nextStatus === 'running') {
+        setFollow(curPre, true);
+      }
       const curText = curPre.textContent || '';
       const incText = incPre.textContent || '';
       if (incText !== curText) {
-        const atBottom = (curPre.scrollHeight - curPre.scrollTop - curPre.clientHeight) <= 32;
         if (incText.startsWith(curText)) {
           curPre.appendChild(document.createTextNode(incText.slice(curText.length)));
         } else {
           curPre.textContent = incText;
         }
-        if (nextStatus === 'running' && atBottom) {
-          curPre.scrollTop = curPre.scrollHeight;
-        }
+        scrollLogToTail(curPre);
       }
     }
   }
@@ -422,9 +500,10 @@
       stepPrevStatus.set(d.dataset.step, d.dataset.status || '');
     });
     target.querySelectorAll('pre.log[data-log-step]').forEach(function (pre) {
-      const step = pre.dataset.logStep;
-      const atBottom = (pre.scrollHeight - pre.scrollTop - pre.clientHeight) <= 32;
-      savedLogScroll.set(step, { scrollTop: pre.scrollTop, atBottom: atBottom });
+      savedLogScroll.set(pre.dataset.logStep, {
+        scrollTop: pre.scrollTop,
+        follow: pre.dataset.follow === '1',
+      });
     });
   });
 
@@ -446,15 +525,13 @@
       }
     });
     scope.querySelectorAll('pre.log[data-log-step]').forEach(function (pre) {
-      const step = pre.dataset.logStep;
-      const details = pre.closest('details[data-step]');
-      const isRunning = details && details.dataset.status === 'running';
-      const saved = savedLogScroll.get(step);
-      if (isRunning && (!saved || saved.atBottom)) {
-        pre.scrollTop = pre.scrollHeight;
-      } else if (saved) {
-        pre.scrollTop = saved.scrollTop;
+      const saved = savedLogScroll.get(pre.dataset.logStep);
+      if (saved && typeof saved.follow === 'boolean') {
+        setFollow(pre, saved.follow);
+        if (!saved.follow) pre.scrollTop = saved.scrollTop;
+        return;
       }
+      scrollLogToTail(pre);
     });
   }
 

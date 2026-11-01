@@ -364,6 +364,38 @@ summary:hover { color: #fff; }
 .tok-punct { color: #94a3b8; }
 .tok-comment { color: #636d83; font-style: italic; }
 
+.log-pane { margin-top: 8px; }
+.log-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+button.log-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  background: #161922;
+}
+button.log-icon:hover {
+  color: var(--text);
+  background: #222733;
+}
+button.log-icon[aria-pressed="true"] {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.log-pane pre.log {
+  max-height: min(60vh, 520px);
+  margin: 0;
+}
+
 details[data-status="running"] pre.log:empty::before {
   content: "Waiting for Terraform output...";
   color: var(--faint);

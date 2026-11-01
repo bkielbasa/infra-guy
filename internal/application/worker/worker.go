@@ -322,8 +322,8 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 
 	dest := filepath.Join(w.WorkDir, string(job.RunID))
 	cacheKey := WorkspaceCacheKey(ps.TenantID, string(ps.ID), string(job.RunID))
-	// Init and plan share the local workspace. Apply may run later, so only that step
-	// drops the directory when it finishes; plan removes it after a successful upload.
+	// Each step can run in its own pod, so the local directory does not survive.
+	// Apply removes its copy when it finishes. Plan removes it after uploading.
 	if w.Cache != nil && job.Step == run.StepApply {
 		defer func() { _ = os.RemoveAll(dest) }()
 	}
@@ -491,7 +491,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 	tfSpan.End()
 	telemetry.Default().RecordRunDuration(ps.TenantID, string(ps.ID), ps.Name, op, stepStatus, string(job.Step), execDur)
 	logger.SetExec(res.Logs)
-	if job.Step == run.StepPlan && res.ExitCode == 0 && w.Cache != nil {
+	if res.ExitCode == 0 && w.Cache != nil && (job.Step == run.StepInit || job.Step == run.StepPlan) {
 		logger.LogAfterf("Uploading workspace cache to S3 (%s)...", cacheKey)
 		if err := w.Cache.Save(ctx, cacheKey, dest); err != nil {
 			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "save workspace cache: "+err.Error()); ferr != nil {
@@ -500,7 +500,9 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 			return w.completeAndCleanup(ctx, job)
 		}
 		logger.LogAfterf("Workspace cache uploaded")
-		_ = os.RemoveAll(dest)
+		if job.Step == run.StepPlan {
+			_ = os.RemoveAll(dest)
+		}
 	}
 	if res.Version != "" {
 		if err := w.Service.SetTerraformVersion(ctx, job.RunID, res.Version); err != nil {
@@ -520,7 +522,11 @@ func (w *Worker) prepareWorkspace(ctx context.Context, job Job, ps project.Snaps
 	if len(sha) > 7 {
 		sha = sha[:7]
 	}
-	if w.Cache != nil && job.Step == run.StepApply {
+	if job.Step != run.StepInit && hasInitializedTerraform(dest, ps.WorkingDirectory) {
+		logger.LogBeforef("Reusing initialized local workspace")
+		return nil
+	}
+	if w.Cache != nil && job.Step != run.StepInit {
 		if err := os.RemoveAll(dest); err != nil {
 			return err
 		}
@@ -533,11 +539,6 @@ func (w *Worker) prepareWorkspace(ctx context.Context, job Job, ps project.Snaps
 			return errors.New("workspace cache not found for run")
 		}
 		logger.LogBeforef("Workspace cache restored")
-		return nil
-	}
-
-	if job.Step != run.StepInit && hasInitializedTerraform(dest, ps.WorkingDirectory) {
-		logger.LogBeforef("Reusing initialized local workspace")
 		return nil
 	}
 	if err := os.RemoveAll(dest); err != nil {

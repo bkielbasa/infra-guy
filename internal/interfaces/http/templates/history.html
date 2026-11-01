@@ -1,5 +1,5 @@
 {{define "history"}}
-<div id="run-panel"{{if .Poll}} hx-get="/runs/{{.ID}}/history" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
+<div id="run-panel" data-run-id="{{.ID}}"{{if .Poll}} hx-get="/runs/{{.ID}}/history" hx-trigger="every 2s"{{end}} hx-swap="outerHTML">
   <ol class="timeline">
     {{if .Terminal}}
     <li><span class="pill {{.StatusClass}}">{{.StatusLabel}}</span></li>
@@ -8,7 +8,7 @@
     <li>
       <details data-step="apply" data-status="{{.Apply.Status}}"{{if .Apply.Open}} open{{end}}>
         <summary>Applying{{if .Apply.Running}} <span class="step-live">streaming&hellip;</span>{{end}}</summary>
-        <pre class="log" data-log-step="apply">{{.Apply.Logs}}</pre>
+        {{template "stepLog" .Apply}}
       </details>
     </li>
     {{end}}
@@ -23,7 +23,7 @@
     <li>
       <details data-step="plan" data-status="{{.Plan.Status}}"{{if .Plan.Open}} open{{end}}>
         <summary>Planning{{if .Plan.Running}} <span class="step-live">streaming&hellip;</span>{{end}}</summary>
-        <pre class="log" data-log-step="plan">{{.Plan.Logs}}</pre>
+        {{template "stepLog" .Plan}}
       </details>
     </li>
     {{end}}
@@ -31,7 +31,7 @@
     <li>
       <details data-step="init" data-status="{{.Init.Status}}"{{if .Init.Open}} open{{end}}>
         <summary>Initializing{{if .Init.Running}} <span class="step-live">streaming&hellip;</span>{{end}}</summary>
-        <pre class="log" data-log-step="init">{{.Init.Logs}}</pre>
+        {{template "stepLog" .Init}}
       </details>
     </li>
     {{end}}
@@ -72,5 +72,19 @@
     {{end}}
   </div>
   {{end}}
+</div>
+{{end}}
+
+{{define "stepLog"}}
+<div class="log-pane">
+  <div class="log-toolbar">
+    <button type="button" class="log-icon" data-log-download title="Download logs" aria-label="Download logs">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2.5v7M5.2 7.2 8 10l2.8-2.8M3.5 13h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button type="button" class="log-icon" data-log-follow title="{{if .Running}}Following tail{{else}}Follow tail{{end}}" aria-label="Follow tail" aria-pressed="{{if .Running}}true{{else}}false{{end}}">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 3.5h10M8 3.5v7M5.2 8.2 8 11l2.8-2.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+  <pre class="log" data-log-step="{{.Name}}"{{if .Running}} data-follow="1"{{end}}>{{.Logs}}</pre>
 </div>
 {{end}}

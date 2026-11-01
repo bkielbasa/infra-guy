@@ -1736,6 +1736,11 @@ func TestRunPlanStepStaysOpenWhenUnconfirmedAndRendersParsedPlanJSON(t *testing.
 		`<details data-step="plan" data-status="running" open>`,
 		`streaming&hellip;`,
 		`data-log-step="plan"`,
+		`data-run-id="r-running"`,
+		`data-log-download`,
+		`data-log-follow`,
+		`aria-pressed="true"`,
+		`data-follow="1"`,
 		`aws_s3_bucket.assets: Refreshing state...`,
 	} {
 		if !strings.Contains(liveBody, want) {

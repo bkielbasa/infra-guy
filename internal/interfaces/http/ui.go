@@ -125,6 +125,7 @@ type stateSummaryView struct {
 }
 
 type stepView struct {
+	Name    string
 	Open    bool
 	Running bool
 	Status  string
@@ -3472,6 +3473,7 @@ func historyFrom(s run.Snapshot, evalView *runPolicyEvalView, currentLogin strin
 			st.Status == run.StepFailed ||
 			(st.Name == run.StepPlan && (s.Status == run.StatusNeedsApproval || s.Status == run.StatusPlanned))
 		sv := &stepView{
+			Name:    string(st.Name),
 			Open:    open,
 			Running: st.Status == run.StepRunning,
 			Status:  string(st.Status),
