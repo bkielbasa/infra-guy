@@ -293,7 +293,7 @@ func buildAttributeDiffs(action string, ch rawChangeSpec) (changed []AttributeDi
 				ForcesReplace: forcesReplace,
 			}
 			switch action {
-			case "create":
+			case "create", "import":
 				diff.Change = "add"
 				diff.Symbol = "+"
 				changed = append(changed, diff)

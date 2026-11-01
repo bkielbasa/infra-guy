@@ -1,6 +1,7 @@
 package run
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -277,5 +278,51 @@ func TestParsePlanJSONImports(t *testing.T) {
 	blankSum, ok := ParsePlanSummaryJSON(blankOnly)
 	if !ok || blankSum.Present || blankSum.Import != 0 || !blankSum.NoChanges() {
 		t.Fatalf("blank id: ok=%v %#v", ok, blankSum)
+	}
+}
+
+func TestParsePlanJSONImportSensitiveAttribute(t *testing.T) {
+	const secret = "s3cr3t-import-password"
+	raw := []byte(`{
+		"format_version": "1.2",
+		"resource_changes": [
+			{
+				"address": "aws_db_instance.imported",
+				"type": "aws_db_instance",
+				"name": "imported",
+				"change": {
+					"actions": ["no-op"],
+					"before": null,
+					"after": {"password": "` + secret + `"},
+					"after_sensitive": {"password": true},
+					"importing": {"id": "db-123"}
+				}
+			}
+		]
+	}`)
+	parsed, err := ParsePlanJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Import != 1 || len(parsed.Resources) != 1 {
+		t.Fatalf("import resource: import=%d resources=%d", parsed.Import, len(parsed.Resources))
+	}
+	res := parsed.Resources[0]
+	if res.Action != "import" || res.ImportingID != "db-123" {
+		t.Fatalf("pure import: %+v", res)
+	}
+	if len(res.Attributes) != 1 {
+		t.Fatalf("attributes: %+v", res.Attributes)
+	}
+	attr := res.Attributes[0]
+	if attr.Name != "password" || attr.Change != "add" || attr.Symbol != "+" || !attr.Sensitive {
+		t.Fatalf("sensitive import attribute: %+v", attr)
+	}
+	if attr.Before != "(sensitive value)" || attr.After != "(sensitive value)" {
+		t.Fatalf("sensitive import attribute: %+v", attr)
+	}
+	rendered := attr.Name + attr.Change + attr.Symbol + attr.Before + attr.After
+	if strings.Contains(rendered, secret) {
+		t.Fatalf("raw secret leaked: %+v", attr)
 	}
 }
