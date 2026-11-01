@@ -177,7 +177,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := opened.CompleteStep(run.StepPlan, run.StepResult{
-		PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n",
+		PlanText: "Plan: 2 to import, 1 to add, 0 to change, 0 to destroy.\n",
 		PlanFile: []byte("tfplan-bytes"),
 		PlanJSON: []byte(`{"format_version":"1.2"}`),
 	}, now); err != nil {
@@ -187,7 +187,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	savedRun, err := runs.Get(ctx, opened.Snapshot().ID)
-	if err != nil || savedRun == nil || savedRun.Snapshot().TerraformVersion != "1.9.0" || string(savedRun.Snapshot().PlanJSON) != `{"format_version":"1.2"}` {
+	if err != nil || savedRun == nil || savedRun.Snapshot().TerraformVersion != "1.9.0" || savedRun.Snapshot().Import != 2 || string(savedRun.Snapshot().PlanJSON) != `{"format_version":"1.2"}` {
 		t.Fatalf("save/get: %v %#v", err, savedRun)
 	}
 
@@ -196,7 +196,7 @@ func TestProjectRunAndStateRoundTrip(t *testing.T) {
 		t.Fatalf("ListSummariesByTenant: err=%v len=%d", err, len(summaries))
 	}
 	sumSnap := summaries[0].Snapshot()
-	if sumSnap.ID != opened.Snapshot().ID || sumSnap.Add != 1 || len(sumSnap.Steps) != 3 ||
+	if sumSnap.ID != opened.Snapshot().ID || sumSnap.Add != 1 || sumSnap.Import != 2 || len(sumSnap.Steps) != 3 ||
 		sumSnap.CommittedAt == nil || !sumSnap.CommittedAt.Equal(committedAt) ||
 		sumSnap.PlanText != "" || len(sumSnap.PlanFile) != 0 || len(sumSnap.PlanJSON) != 0 {
 		t.Fatalf("unexpected summary snapshot: %#v", sumSnap)

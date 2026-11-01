@@ -1,0 +1,1 @@
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS import_count integer NOT NULL DEFAULT 0;

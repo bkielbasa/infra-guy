@@ -62,12 +62,12 @@ func (r *RunRepo) sealPlanArtifacts(s run.Snapshot) (planFile, planJSON []byte, 
 
 const runColumns = `id, project_id, trigger, status, commit_sha, branch, commit_message, author,
 	triggered_by, pr_number, pr_title, plan_only, auto_approve, destroy, plan_text, plan_file, plan_json, add_count,
-	change_count, destroy_count, summary_present, monthly_cost, diff_monthly_cost, terraform_version, error, approved_by, approved_at,
+	change_count, destroy_count, import_count, summary_present, monthly_cost, diff_monthly_cost, terraform_version, error, approved_by, approved_at,
 	committed_at, created_at, started_at, finished_at, helm_rollback_revision`
 
 const runSummaryColumns = `r.id, r.project_id, r.trigger, r.status, r.commit_sha, r.branch, r.commit_message, r.author,
 	r.triggered_by, r.pr_number, r.pr_title, r.plan_only, r.auto_approve, r.destroy, r.add_count,
-	r.change_count, r.destroy_count, r.summary_present, r.monthly_cost, r.diff_monthly_cost, r.terraform_version, r.error, r.approved_by, r.approved_at,
+	r.change_count, r.destroy_count, r.import_count, r.summary_present, r.monthly_cost, r.diff_monthly_cost, r.terraform_version, r.error, r.approved_by, r.approved_at,
 	r.committed_at, r.created_at, r.started_at, r.finished_at`
 
 const insertIfAbsentSQL = `
@@ -136,14 +136,14 @@ func (r *RunRepo) Save(ctx context.Context, in *run.Run) error {
 			project_id = $2, trigger = $3, status = $4, commit_sha = $5, branch = $6,
 			commit_message = $7, author = $8, triggered_by = $9, pr_number = $10, pr_title = $11,
 			plan_only = $12, auto_approve = $13, destroy = $14, plan_text = $15, plan_file = $16, plan_json = $17,
-			add_count = $18, change_count = $19, destroy_count = $20, summary_present = $21,
-			monthly_cost = $22, diff_monthly_cost = $23,
-			terraform_version = $24, error = $25, approved_by = $26, approved_at = $27,
-			committed_at = $28, created_at = $29, started_at = $30, finished_at = $31
+			add_count = $18, change_count = $19, destroy_count = $20, import_count = $21, summary_present = $22,
+			monthly_cost = $23, diff_monthly_cost = $24,
+			terraform_version = $25, error = $26, approved_by = $27, approved_at = $28,
+			committed_at = $29, created_at = $30, started_at = $31, finished_at = $32
 		WHERE id = $1`,
 		s.ID, s.ProjectID, s.Trigger, s.Status, s.SHA, s.Branch, s.Message, s.Author,
 		s.TriggeredBy, s.PRNumber, s.PRTitle, s.PlanOnly, s.AutoApprove, s.IsDestroy, s.PlanText, planFile, planJSON,
-		s.Add, s.Change, s.Destroy, s.SummaryPresent, s.MonthlyCost, s.DiffMonthlyCost,
+		s.Add, s.Change, s.Destroy, s.Import, s.SummaryPresent, s.MonthlyCost, s.DiffMonthlyCost,
 		s.TerraformVersion, s.Error, s.ApprovedBy, s.ApprovedAt, s.CommittedAt, s.CreatedAt, s.StartedAt, s.FinishedAt,
 	); err != nil {
 		var pgErr *pgconn.PgError
@@ -410,7 +410,7 @@ func (r *RunRepo) scanRun(row runScanner) (run.Snapshot, error) {
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Trigger, &s.Status, &s.SHA, &s.Branch, &s.Message, &s.Author,
 		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.IsDestroy, &s.PlanText, &s.PlanFile, &s.PlanJSON,
-		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.MonthlyCost, &s.DiffMonthlyCost, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
+		&s.Add, &s.Change, &s.Destroy, &s.Import, &s.SummaryPresent, &s.MonthlyCost, &s.DiffMonthlyCost, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
 		&approved, &committed, &created, &started, &finished, &s.HelmRollbackRevision,
 	)
 	if err != nil {
@@ -447,7 +447,7 @@ func scanRunSummary(row runScanner) (run.Snapshot, error) {
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Trigger, &s.Status, &s.SHA, &s.Branch, &s.Message, &s.Author,
 		&s.TriggeredBy, &s.PRNumber, &s.PRTitle, &s.PlanOnly, &s.AutoApprove, &s.IsDestroy,
-		&s.Add, &s.Change, &s.Destroy, &s.SummaryPresent, &s.MonthlyCost, &s.DiffMonthlyCost, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
+		&s.Add, &s.Change, &s.Destroy, &s.Import, &s.SummaryPresent, &s.MonthlyCost, &s.DiffMonthlyCost, &s.TerraformVersion, &s.Error, &s.ApprovedBy,
 		&approved, &committed, &created, &started, &finished,
 	)
 	if err != nil {
