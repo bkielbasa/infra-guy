@@ -4435,3 +4435,113 @@ func TestProjectFolderPoliciesApplyAtConfirm(t *testing.T) {
 		t.Fatalf("confirm without inherited policy = %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestDeltaIncludesImportWhenPositive(t *testing.T) {
+	with := delta(run.Snapshot{SummaryPresent: true, Import: 17, Add: 0, Change: 19, Destroy: 0})
+	if with != "\u219317 +0 ~19 \u22120" {
+		t.Fatalf("delta = %q", with)
+	}
+	without := delta(run.Snapshot{SummaryPresent: true, Add: 1, Change: 0, Destroy: 2})
+	if without != "+1 ~0 \u22122" {
+		t.Fatalf("delta = %q", without)
+	}
+	if delta(run.Snapshot{Import: 4}) != "" {
+		t.Fatal("missing summary must stay blank")
+	}
+}
+
+func TestChangesPageShowsImport(t *testing.T) {
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	snap := needsApprovalSnap("r-import")
+	snap.SummaryPresent = true
+	snap.Import = 2
+	snap.Change = 1
+	snap.PlanText = "Plan: 2 to import, 0 to add, 1 to change, 0 to destroy."
+	snap.PlanJSON = []byte(`{
+		"format_version": "1.2",
+		"resource_changes": [
+			{
+				"address": "aws_instance.pure",
+				"type": "aws_instance",
+				"name": "pure",
+				"change": {
+					"actions": ["no-op"],
+					"before": null,
+					"after": {"ami": "ami-123"},
+					"importing": {"id": "i-abc123"}
+				}
+			},
+			{
+				"address": "aws_instance.edited",
+				"type": "aws_instance",
+				"name": "edited",
+				"change": {
+					"actions": ["update"],
+					"before": {"ami": "ami-old"},
+					"after": {"ami": "ami-new"},
+					"importing": {"id": "i-def456"}
+				}
+			},
+			{
+				"address": "aws_vpc.quiet",
+				"type": "aws_vpc",
+				"name": "quiet",
+				"change": {
+					"actions": ["no-op"],
+					"before": {"cidr": "10.0.0.0/16"},
+					"after": {"cidr": "10.0.0.0/16"}
+				}
+			}
+		]
+	}`)
+	runs := &memRuns{items: map[run.ID]*run.Run{"r-import": run.Restore(snap)}}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "")
+	rr := getUI(t, h, "/runs/r-import/changes")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, body)
+	}
+	for _, want := range []string{
+		"\u21932 +0 ~1 \u22120",
+		`plan-badge-import`,
+		"\u21932 to import",
+		`plan-resource-import`,
+		"\u2193 import",
+		"imported from",
+		"i-abc123",
+		"ami-123",
+		`plan-resource-update`,
+		"i-def456",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %q in:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "aws_vpc.quiet") {
+		t.Fatal("no-op without an import id must stay hidden")
+	}
+	if strings.Contains(body, "No infrastructure changes") {
+		t.Fatal("import plan must not use the empty badge")
+	}
+}
+
+func TestAnalyticsHighChurnIncludesImportOnly(t *testing.T) {
+	now := time.Now().UTC()
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": testProject(t)}}
+	created := now.Add(-time.Hour)
+	snap := run.Snapshot{
+		ID: "r-import-only", ProjectID: "p1", Trigger: run.TriggerPush, Status: run.StatusSucceeded,
+		SHA: "abc1234def", Message: "import only", SummaryPresent: true, Import: 17,
+		CreatedAt: created, StartedAt: &created, FinishedAt: &now,
+	}
+	runs := &memRuns{items: map[run.ID]*run.Run{"r-import-only": run.Restore(snap)}}
+	h := uiHandler(t, projects, runs, &memStates{items: map[string]*state.State{}}, "")
+	rr := getUI(t, h, "/analytics?tab=metrics&window=30d")
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, body)
+	}
+	if !strings.Contains(body, "Highest blast-radius runs") || !strings.Contains(body, "\u219317 +0 ~0 \u22120") {
+		t.Fatalf("import-only run missing from high churn:\n%s", body)
+	}
+}

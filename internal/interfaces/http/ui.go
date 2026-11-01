@@ -1248,7 +1248,7 @@ func (u *ui) analytics(w http.ResponseWriter, r *http.Request) {
 			if rs.Destroy > 0 {
 				destructiveRunCount++
 			}
-			if churn := rs.Add + rs.Change + rs.Destroy; churn > 0 {
+			if churn := rs.Add + rs.Change + rs.Destroy + rs.Import; churn > 0 {
 				highChurnRuns = append(highChurnRuns, analyticsHighChurnRun{
 					RunID:       string(rs.ID),
 					ProjectID:   string(ps.ID),
@@ -3601,7 +3601,11 @@ func delta(s run.Snapshot) string {
 	if !s.SummaryPresent {
 		return ""
 	}
-	return fmt.Sprintf("+%d ~%d \u2212%d", s.Add, s.Change, s.Destroy)
+	base := fmt.Sprintf("+%d ~%d \u2212%d", s.Add, s.Change, s.Destroy)
+	if s.Import > 0 {
+		return fmt.Sprintf("\u2193%d %s", s.Import, base)
+	}
+	return base
 }
 
 func shortSHA(sha string) string {

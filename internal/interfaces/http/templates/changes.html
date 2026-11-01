@@ -23,6 +23,7 @@
 <div class="plan-diff">
   <div class="plan-summary-bar">
     {{if .HasChanges}}
+      {{if .Import}}<span class="plan-badge plan-badge-import">↓{{.Import}} to import</span>{{end}}
       {{if .Add}}<span class="plan-badge plan-badge-create">+{{.Add}} to create</span>{{end}}
       {{if .Change}}<span class="plan-badge plan-badge-update">~{{.Change}} to update</span>{{end}}
       {{if .Replace}}<span class="plan-badge plan-badge-replace">-/+ {{.Replace}} to replace</span>{{end}}
@@ -71,6 +72,7 @@
       <span class="plan-action plan-action-{{.Action}}">{{.ActionSymbol}} {{.ActionLabel}}</span>
       <code class="plan-address">{{.Address}}</code>
       {{if .ActionReason}}<span class="plan-reason">({{.ActionReason}})</span>{{end}}
+      {{if .ImportingID}}<span class="plan-reason">(imported from "{{.ImportingID}}")</span>{{end}}
       {{if .ProviderName}}<span class="plan-provider">{{.ProviderName}}</span>{{end}}
     </summary>
     <div class="plan-resource-body">

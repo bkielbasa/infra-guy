@@ -404,6 +404,7 @@ details[data-status="running"] pre.log:empty::before {
 .plan-badge-update, .plan-action-update, .plan-action-read { background: #3b2e12; color: #ffd479; }
 .plan-badge-replace, .plan-action-replace { background: #38203f; color: #f0abfc; }
 .plan-badge-delete, .plan-action-delete { background: #3d1c1c; color: #ffb4ab; }
+.plan-badge-import, .plan-action-import { background: #12283b; color: #9fd4ff; }
 .plan-badge-noop { background: #222733; color: var(--muted); }
 
 .plan-resource {
