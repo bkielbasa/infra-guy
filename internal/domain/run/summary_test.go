@@ -20,6 +20,35 @@ func TestParsePlanSummary(t *testing.T) {
 	}
 }
 
+func TestParsePlanSummaryImport(t *testing.T) {
+	got := ParsePlanSummary("Plan: 17 to import, 0 to add, 19 to change, 0 to destroy.\n")
+	if !got.Present || got.Import != 17 || got.Add != 0 || got.Change != 19 || got.Destroy != 0 {
+		t.Fatalf("%#v", got)
+	}
+	if got.NoChanges() {
+		t.Fatal("imports are changes")
+	}
+	only := ParsePlanSummary("Plan: 2 to import, 0 to add, 0 to change, 0 to destroy.")
+	if !only.Present || only.Import != 2 || only.NoChanges() {
+		t.Fatalf("import-only: %#v", only)
+	}
+	plain := ParsePlanSummary("Plan: 12 to add, 0 to change, 1 to destroy.\n")
+	if !plain.Present || plain.Import != 0 || plain.Add != 12 || plain.Change != 0 || plain.Destroy != 1 {
+		t.Fatalf("line without import clause: %#v", plain)
+	}
+	if ParsePlanSummary("Plan: 0 to add, 0 to change, 0 to destroy.\n").NoChanges() != true {
+		t.Fatal("all-zero line must stay no-changes")
+	}
+	partial := ParsePlanSummary("Plan: 17 to import, 0 to add")
+	if partial.Present || partial.Import != 0 || partial.NoChanges() {
+		t.Fatalf("partial line must not match: %#v", partial)
+	}
+	first := ParsePlanSummary("Plan: 1 to import, 0 to add, 0 to change, 0 to destroy.\nPlan: 9 to import, 0 to add, 0 to change, 0 to destroy.\n")
+	if first.Import != 1 {
+		t.Fatalf("first summary line wins, got %#v", first)
+	}
+}
+
 func TestNoChangesSentences(t *testing.T) {
 	if !ParsePlanSummary("Plan: 0 to add, 0 to change, 0 to destroy.\n").NoChanges() {
 		t.Fatal("zero plan line must be no-changes")
