@@ -355,4 +355,3 @@ func TestSummaryBracketImport(t *testing.T) {
 		t.Fatal("HasChanges")
 	}
 }
-

@@ -262,7 +262,7 @@ func TestParsePlanJSONImports(t *testing.T) {
 	if pure.Address != "aws_instance.pure" || pure.Action != "import" || pure.ActionSymbol != "↓" || pure.ActionLabel != "import" || pure.ImportingID != "i-abc123" {
 		t.Fatalf("pure import: %+v", pure)
 	}
-	if len(pure.Attributes) != 1 || pure.Attributes[0].Name != "ami" || pure.Attributes[0].After != `"ami-123"` || pure.Attributes[0].Symbol != "+" {
+	if len(pure.Attributes) != 1 || pure.Attributes[0].Name != "ami" || pure.Attributes[0].After != `"ami-123"` || pure.Attributes[0].Symbol != "+" || pure.Attributes[0].Change != "add" {
 		t.Fatalf("pure import attributes: %+v", pure.Attributes)
 	}
 	edited := parsed.Resources[1]
