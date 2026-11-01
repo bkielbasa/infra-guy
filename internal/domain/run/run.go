@@ -155,6 +155,7 @@ type Snapshot struct {
 	Add                  int
 	Change               int
 	Destroy              int
+	Import               int
 	SummaryPresent       bool
 	MonthlyCost          float64
 	DiffMonthlyCost      float64
@@ -220,11 +221,14 @@ func (r *Run) PlanJSON() []byte {
 }
 
 func (s Snapshot) HasChanges() bool {
-	return s.Add > 0 || s.Change > 0 || s.Destroy > 0
+	return s.Add > 0 || s.Change > 0 || s.Destroy > 0 || s.Import > 0
 }
 
 func (s Snapshot) SummaryBracket() string {
 	var parts []string
+	if s.Import > 0 {
+		parts = append(parts, fmt.Sprintf("import: %d", s.Import))
+	}
 	if s.Add > 0 {
 		parts = append(parts, fmt.Sprintf("add: %d", s.Add))
 	}
@@ -334,7 +338,7 @@ func (r *Run) CompleteStep(name StepName, result StepResult, now time.Time) (Dec
 			}
 		}
 		r.s.SummaryPresent = sum.Present
-		r.s.Add, r.s.Change, r.s.Destroy = sum.Add, sum.Change, sum.Destroy
+		r.s.Add, r.s.Change, r.s.Destroy, r.s.Import = sum.Add, sum.Change, sum.Destroy, sum.Import
 		if r.s.PlanOnly {
 			r.s.Status = StatusPlanned
 			r.s.FinishedAt = &now

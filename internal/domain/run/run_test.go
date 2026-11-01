@@ -239,3 +239,120 @@ func TestSummaryBracket(t *testing.T) {
 	}
 }
 
+func TestImportOnlyPlanWaitsForApproval(t *testing.T) {
+	r := openFull(false)
+	now := time.Unix(10, 0).UTC()
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	d := completeStep(t, r, StepPlan, StepResult{PlanText: "Plan: 17 to import, 0 to add, 19 to change, 0 to destroy.\n"}, now)
+	if d.Kind != DecisionWaitApproval {
+		t.Fatalf("%#v", d)
+	}
+	snap := r.Snapshot()
+	if snap.Status != StatusNeedsApproval || !snap.SummaryPresent || snap.Import != 17 || snap.Add != 0 || snap.Change != 19 || snap.Destroy != 0 {
+		t.Fatalf("%#v", snap)
+	}
+	if !snap.HasChanges() {
+		t.Fatal("import count must count as changes")
+	}
+}
+
+func TestImportOnlyAutoApproveEnqueuesApply(t *testing.T) {
+	r := openFull(true)
+	now := time.Unix(10, 0).UTC()
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	d := completeStep(t, r, StepPlan, StepResult{PlanText: "Plan: 1 to import, 0 to add, 0 to change, 0 to destroy.\n"}, now)
+	if d.Kind != DecisionEnqueue || d.Step != StepApply {
+		t.Fatalf("%#v", d)
+	}
+	if r.Snapshot().Import != 1 {
+		t.Fatalf("%#v", r.Snapshot())
+	}
+}
+
+func TestImportOnlyPlanOnlyFinishesPlanned(t *testing.T) {
+	r, err := Open(OpenInput{ID: "r", ProjectID: "p", PlanOnly: true, Trigger: TriggerPullRequest, SHA: "abc", Now: time.Unix(0, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(10, 0).UTC()
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	d := completeStep(t, r, StepPlan, StepResult{PlanText: "Plan: 4 to import, 0 to add, 0 to change, 0 to destroy.\n"}, now)
+	if d.Kind != DecisionFinishPlanned || r.Snapshot().Status != StatusPlanned || r.Snapshot().Import != 4 {
+		t.Fatalf("decision %#v snapshot %#v", d, r.Snapshot())
+	}
+}
+
+func TestImportOnlyJSONSummaryIsNotNoChanges(t *testing.T) {
+	r := openFull(false)
+	now := time.Unix(10, 0).UTC()
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	raw := []byte(`{"format_version":"1.2","resource_changes":[{"address":"aws_instance.pure","change":{"actions":["no-op"],"after":{"ami":"ami-123"},"importing":{"id":"i-abc123"}}}]}`)
+	d := completeStep(t, r, StepPlan, StepResult{PlanJSON: raw}, now)
+	if d.Kind != DecisionWaitApproval {
+		t.Fatalf("%#v", d)
+	}
+	snap := r.Snapshot()
+	if !snap.SummaryPresent || snap.Import != 1 || snap.Add != 0 || snap.Change != 0 || snap.Destroy != 0 {
+		t.Fatalf("%#v", snap)
+	}
+}
+
+func TestPlanTextCountsWinOverJSON(t *testing.T) {
+	r := openFull(false)
+	now := time.Unix(10, 0).UTC()
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	raw := []byte(`{"format_version":"1.2","resource_changes":[{"address":"aws_instance.pure","change":{"actions":["no-op"],"after":{"ami":"ami-123"},"importing":{"id":"i-abc123"}}}]}`)
+	d := completeStep(t, r, StepPlan, StepResult{
+		PlanText: "Plan: 17 to import, 0 to add, 19 to change, 0 to destroy.\n",
+		PlanJSON: raw,
+	}, now)
+	if d.Kind != DecisionWaitApproval {
+		t.Fatalf("%#v", d)
+	}
+	snap := r.Snapshot()
+	if snap.Import != 17 || snap.Change != 19 || snap.Add != 0 {
+		t.Fatalf("text summary must win over JSON counts: %#v", snap)
+	}
+}
+
+func TestInvalidPlanJSONDoesNotInventCounts(t *testing.T) {
+	r := openFull(false)
+	now := time.Unix(10, 0).UTC()
+	beginStep(t, r, StepInit, now)
+	completeStep(t, r, StepInit, StepResult{}, now)
+	beginStep(t, r, StepPlan, now)
+	d := completeStep(t, r, StepPlan, StepResult{PlanText: "Terraform plan output without a summary line", PlanJSON: []byte(`{`)}, now)
+	if d.Kind != DecisionWaitApproval {
+		t.Fatalf("%#v", d)
+	}
+	snap := r.Snapshot()
+	if snap.SummaryPresent || snap.Import != 0 || snap.Add != 0 || snap.Change != 0 || snap.Destroy != 0 {
+		t.Fatalf("invalid JSON must not invent counts: %#v", snap)
+	}
+}
+
+func TestSummaryBracketImport(t *testing.T) {
+	if got := (Snapshot{Import: 17, Change: 19}).SummaryBracket(); got != "[import: 17, change: 19]" {
+		t.Fatalf("got %q", got)
+	}
+	if got := (Snapshot{Import: 2}).SummaryBracket(); got != "[import: 2]" {
+		t.Fatalf("got %q", got)
+	}
+	if got := (Snapshot{}).SummaryBracket(); got != "No changes" {
+		t.Fatalf("got %q", got)
+	}
+	if (Snapshot{Import: 1}).HasChanges() != true || (Snapshot{}).HasChanges() {
+		t.Fatal("HasChanges")
+	}
+}
+
