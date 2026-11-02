@@ -5,54 +5,7 @@
       <h1>Policies</h1>
       <p class="settings-card-desc">Rego approval and guard policies evaluated against Terraform plans.</p>
     </div>
-    <button type="button" class="btn btn-trigger" id="toggle-new-policy">New policy</button>
-  </div>
-
-  <div id="new-policy-panel" class="panel form-panel" style="margin-bottom: 18px;"{{if .Policies}} hidden{{end}}>
-    <div class="form-header">
-      <h2>New policy</h2>
-      <p class="sub">Write and test an Open Policy Agent (Rego) policy before attaching it to projects.</p>
-    </div>
-    <form method="post" action="/policies" class="project-form">
-      <section class="form-section">
-        <div class="form-grid">
-          <div class="field">
-            <label for="policy-name">Name</label>
-            <input id="policy-name" type="text" name="name" placeholder="e.g. prod-approval" required>
-          </div>
-          <div class="field">
-            <label for="policy-description">Description</label>
-            <input id="policy-description" type="text" name="description" placeholder="Optional summary">
-          </div>
-        </div>
-        <div class="field" style="margin-top: 14px;">
-          <label for="tags-input">Tags (key:value)</label>
-          <div class="repo-Combobox" id="tag-combobox">
-            <input type="text" id="tags-input" name="tags" placeholder="env:prod, compliance:soc2" autocomplete="off">
-            <div id="tag-results" class="repo-results" role="listbox"></div>
-            <div id="known-tags-data" hidden>
-              {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
-            </div>
-          </div>
-          <div id="tags-preview" class="tag-pills"></div>
-          <span class="field-hint">Optional comma-separated <code>key:value</code> pairs.</span>
-        </div>
-        <div class="field" style="margin-top: 14px;">
-          <label for="policy-rego">Rego</label>
-          <textarea id="policy-rego" name="rego" rows="12" data-code-editor="rego" required>{{.DefaultRego}}</textarea>
-        </div>
-        <details>
-          <summary>Test input JSON</summary>
-          <textarea id="policy-input-json" name="input_json" rows="10" data-code-editor="json">{{.SampleInputJSON}}</textarea>
-        </details>
-      </section>
-      <div class="actions">
-        <button type="submit" class="btn-trigger">Create</button>
-        <button type="button" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
-        <button type="button" class="btn" id="cancel-new-policy">Cancel</button>
-      </div>
-      <div id="policy-test-result" class="meta"></div>
-    </form>
+    <button type="button" class="btn btn-trigger" id="toggle-new-policy" data-open-create="new-policy-dialog">New policy</button>
   </div>
 
   <div class="projects-topbar">
@@ -124,7 +77,7 @@
           </tr>
           {{else}}
           <tr>
-            <td colspan="4" class="empty">No policies created yet.</td>
+            <td colspan="4" class="empty">No policies created yet. <button type="button" class="btn btn-trigger" id="open-new-policy-empty" data-open-create="new-policy-dialog">New policy</button></td>
           </tr>
           {{end}}
         </tbody>
@@ -132,6 +85,57 @@
     </div>
   </div>
 </div>
+
+<dialog id="new-policy-dialog" class="create-dialog create-dialog-wide" data-create-dialog aria-labelledby="new-policy-title"{{if .Create.Open}} data-open-on-load{{end}}>
+  <form method="post" action="/policies" class="create-dialog-form">
+    <div class="create-dialog-head">
+      <div>
+        <h2 id="new-policy-title">New policy</h2>
+        <p class="sub">Write and test an Open Policy Agent (Rego) policy before attaching it to projects.</p>
+      </div>
+      <button type="button" class="create-dialog-close" data-close-dialog aria-label="Close">Close</button>
+    </div>
+    <div class="create-dialog-body">
+      {{if .Create.Error}}<p class="create-dialog-error" role="alert">{{.Create.Error}}</p>{{end}}
+      <div class="form-grid">
+        <div class="field">
+          <label for="policy-name">Name</label>
+          <input id="policy-name" data-create-focus type="text" name="name" value="{{.Create.Name}}" placeholder="e.g. prod-approval" required>
+        </div>
+        <div class="field">
+          <label for="policy-description">Description</label>
+          <input id="policy-description" type="text" name="description" value="{{.Create.Description}}" placeholder="Optional summary">
+        </div>
+      </div>
+      <div class="field">
+        <label for="tags-input">Tags (key:value)</label>
+        <div class="repo-Combobox" id="tag-combobox">
+          <input type="text" id="tags-input" name="tags" value="{{.Create.Tags}}" placeholder="env:prod, compliance:soc2" autocomplete="off">
+          <div id="tag-results" class="repo-results" role="listbox"></div>
+          <div id="known-tags-data" hidden>
+            {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
+          </div>
+        </div>
+        <div id="tags-preview" class="tag-pills"></div>
+        <span class="field-hint">Optional comma-separated <code>key:value</code> pairs.</span>
+      </div>
+      <div class="field">
+        <label for="policy-rego">Rego</label>
+        <textarea id="policy-rego" name="rego" rows="12" data-code-editor="rego" required>{{.Create.Rego}}</textarea>
+      </div>
+      <details>
+        <summary>Test input JSON</summary>
+        <textarea id="policy-input-json" name="input_json" rows="10" data-code-editor="json">{{.Create.InputJSON}}</textarea>
+      </details>
+      <div id="policy-test-result" class="meta"></div>
+    </div>
+    <div class="create-dialog-foot">
+      <button type="button" class="btn" id="btn-test-policy" onclick="runPolicyTest()">Test Policy</button>
+      <button type="button" class="btn" data-close-dialog>Cancel</button>
+      <button type="submit" class="btn btn-trigger">Create</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 function setPolicyTestResult(resultEl, pillClass, pillText, detailText) {
@@ -178,22 +182,6 @@ async function runPolicyTest() {
 }
 
 (function() {
-  const toggleBtn = document.getElementById('toggle-new-policy');
-  const cancelBtn = document.getElementById('cancel-new-policy');
-  const panel = document.getElementById('new-policy-panel');
-  const nameField = document.getElementById('policy-name');
-  if (toggleBtn && panel) {
-    toggleBtn.addEventListener('click', () => {
-      panel.hidden = !panel.hidden;
-      if (!panel.hidden && nameField) nameField.focus();
-    });
-  }
-  if (cancelBtn && panel) {
-    cancelBtn.addEventListener('click', () => {
-      panel.hidden = true;
-    });
-  }
-
   const queryInput = document.getElementById('filter-query');
   const nameInput = document.getElementById('filter-name');
   const descInput = document.getElementById('filter-description');
@@ -400,4 +388,5 @@ async function runPolicyTest() {
   }
 })();
 </script>
+{{template "create_dialog_script"}}
 {{end}}

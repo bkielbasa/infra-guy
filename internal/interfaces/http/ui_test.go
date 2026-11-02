@@ -1497,15 +1497,27 @@ deny contains "Cannot destroy S3 buckets" if {
 		"name": {"broken"},
 		"rego": {"not valid rego"},
 	}.Encode()))
+	invalidBody := rrInvalidCreate.Body.String()
 	if rrInvalidCreate.Code != http.StatusBadRequest {
-		t.Fatalf("POST /policies invalid rego = %d, want 400", rrInvalidCreate.Code)
+		t.Fatalf("POST /policies invalid rego = %d, want 400: %s", rrInvalidCreate.Code, invalidBody)
+	}
+	for _, want := range []string{
+		`data-open-on-load`,
+		`role="alert"`,
+		"policy rego code is invalid",
+		"not valid rego",
+		`value="broken"`,
+	} {
+		if !strings.Contains(invalidBody, want) {
+			t.Fatalf("expected invalid policy create to contain %q, got:\n%s", want, invalidBody)
+		}
 	}
 
 	rrCreate := postUI(t, h, "/policies", strings.NewReader(url.Values{
 		"name": {"no-s3-delete"},
 		"rego": {denyRego},
 	}.Encode()))
-	if rrCreate.Code != http.StatusSeeOther || rrCreate.Header().Get("Location") != "/policies/pol-2" {
+	if rrCreate.Code != http.StatusSeeOther || rrCreate.Header().Get("Location") != "/policies" {
 		t.Fatalf("POST /policies = %d (loc=%q): %s", rrCreate.Code, rrCreate.Header().Get("Location"), rrCreate.Body.String())
 	}
 
@@ -1600,7 +1612,7 @@ allow if {
 		"name": {"quorum-3"},
 		"rego": {quorumRego},
 	}.Encode()))
-	if rrCreateQuorum.Code != http.StatusSeeOther || rrCreateQuorum.Header().Get("Location") != "/policies/pol-3" {
+	if rrCreateQuorum.Code != http.StatusSeeOther || rrCreateQuorum.Header().Get("Location") != "/policies" {
 		t.Fatalf("POST /policies (quorum-3) = %d: %s", rrCreateQuorum.Code, rrCreateQuorum.Body.String())
 	}
 	rrAssignQuorum := postUI(t, h, "/projects/p1/policy", strings.NewReader("approval_policy_id=pol-3"))
@@ -2886,6 +2898,26 @@ func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
 		t.Fatalf("empty /contexts opened the dialog or kept the inline panel:\n%s", emptyBody)
 	}
 
+	rrEmptyPol := getUI(t, h, "/policies")
+	emptyPol := rrEmptyPol.Body.String()
+	if rrEmptyPol.Code != http.StatusOK {
+		t.Fatalf("GET /policies empty = %d: %s", rrEmptyPol.Code, emptyPol)
+	}
+	for _, want := range []string{
+		`id="new-policy-dialog"`,
+		`create-dialog-wide`,
+		`id="open-new-policy-empty"`,
+		`data-open-create="new-policy-dialog"`,
+		"No policies created yet.",
+	} {
+		if !strings.Contains(emptyPol, want) {
+			t.Fatalf("expected empty /policies to contain %q, got:\n%s", want, emptyPol)
+		}
+	}
+	if strings.Contains(emptyPol, `id="new-policy-panel"`) || strings.Contains(emptyPol, `data-open-on-load`) {
+		t.Fatalf("empty /policies opened the dialog or kept the inline panel:\n%s", emptyPol)
+	}
+
 	// 1. Create two contexts with tags
 	rrAWS := postUI(t, h, "/contexts", strings.NewReader("name=aws-prod&tags=env%3Aprod%2C+cloud%3Aaws"))
 	if rrAWS.Code != http.StatusSeeOther || rrAWS.Header().Get("Location") != "/contexts" {
@@ -2991,22 +3023,23 @@ func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
 
 	// 5. Create two policies with tags
 	validRego := "package infraguy.approval\nimport rego.v1\ndefault allow := true\n"
-	rr = postUI(t, h, "/policies", strings.NewReader(url.Values{
+	rrProd := postUI(t, h, "/policies", strings.NewReader(url.Values{
 		"name":        {"prod-guard"},
 		"description": {"Production guardrails"},
 		"tags":        {"env:prod, compliance:soc2"},
 		"rego":        {validRego},
 	}.Encode()))
-	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/policies/pol-1" {
-		t.Fatalf("create policy prod-guard = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	if rrProd.Code != http.StatusSeeOther || rrProd.Header().Get("Location") != "/policies" {
+		t.Fatalf("create policy prod-guard = %d (loc=%q): %s", rrProd.Code, rrProd.Header().Get("Location"), rrProd.Body.String())
 	}
+	prodFlash := flashSetCookie(t, rrProd)
 	rr = postUI(t, h, "/policies", strings.NewReader(url.Values{
 		"name":        {"staging-guard"},
 		"description": {"Staging guardrails"},
 		"tags":        {"env:staging"},
 		"rego":        {validRego},
 	}.Encode()))
-	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/policies/pol-2" {
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/policies" {
 		t.Fatalf("create policy staging-guard = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
 	}
 
@@ -3032,6 +3065,22 @@ func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
 		if !strings.Contains(polListBody, want) {
 			t.Fatalf("expected GET /policies to contain %q, got:\n%s", want, polListBody)
 		}
+	}
+
+	rrPolFlash := getUICookie(t, h, "/policies", prodFlash)
+	polFlashBody := rrPolFlash.Body.String()
+	for _, want := range []string{
+		`id="flash"`,
+		"Created prod-guard.",
+		`href="/policies/pol-1"`,
+		">Open<",
+	} {
+		if !strings.Contains(polFlashBody, want) {
+			t.Fatalf("expected policy flash to contain %q, got:\n%s", want, polFlashBody)
+		}
+	}
+	if !flashCleared(rrPolFlash) {
+		t.Fatal("displaying the policy flash did not expire the cookie")
 	}
 
 	// 7. Filter policies by multi-tag query and description

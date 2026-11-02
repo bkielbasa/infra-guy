@@ -4244,6 +4244,10 @@ func (u *ui) policies(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
 	}
+	u.renderPolicies(w, r, tenantID, http.StatusOK, createDialog{})
+}
+
+func (u *ui) renderPolicies(w http.ResponseWriter, r *http.Request, tenantID string, status int, draft createDialog) {
 	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
 	filterDescription := strings.TrimSpace(r.URL.Query().Get("description"))
 	filterTag := strings.TrimSpace(strings.Join(r.URL.Query()["tag"], ", "))
@@ -4271,16 +4275,21 @@ func (u *ui) policies(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	u.page(w, "Policies", "policies", map[string]any{
+	if !draft.Open {
+		draft.Rego = defaultSampleRego
+		draft.InputJSON = defaultSampleInputJSON
+	}
+	u.pageWithStatus(w, status, "Policies", "policies", map[string]any{
 		"Policies":          rows,
 		"FilterName":        filterName,
 		"FilterDescription": filterDescription,
 		"FilterTag":         filterTag,
 		"KnownTags":         u.knownTags(r.Context(), tenantID),
 		"CountAll":          len(rows),
-		"DefaultRego":       defaultSampleRego,
+		"DefaultRego":       draft.Rego,
 		"SampleRego":        defaultSampleRego,
-		"SampleInputJSON":   defaultSampleInputJSON,
+		"SampleInputJSON":   draft.InputJSON,
+		"Create":            draft,
 	})
 }
 
@@ -4298,27 +4307,40 @@ func (u *ui) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "policies service not configured", http.StatusInternalServerError)
 		return
 	}
-	tags, err := project.ParseTags(r.FormValue("tags"))
+	draft := createDialog{
+		Open:        true,
+		Name:        r.FormValue("name"),
+		Description: r.FormValue("description"),
+		Tags:        r.FormValue("tags"),
+		Rego:        r.FormValue("rego"),
+		InputJSON:   r.FormValue("input_json"),
+	}
+	tags, err := project.ParseTags(draft.Tags)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		draft.Error = err.Error()
+		u.renderPolicies(w, r, tenantID, http.StatusBadRequest, draft)
 		return
 	}
 	p, err := u.cfg.Policies.Create(r.Context(), policyapp.CreateInput{
 		TenantID:    tenantID,
-		Name:        r.FormValue("name"),
-		Description: r.FormValue("description"),
-		Rego:        r.FormValue("rego"),
+		Name:        draft.Name,
+		Description: draft.Description,
+		Rego:        draft.Rego,
 		Tags:        tags,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		draft.Error = err.Error()
+		u.renderPolicies(w, r, tenantID, http.StatusBadRequest, draft)
 		return
 	}
 	ps := p.Snapshot()
 	u.recordAudit(r, tenantID, "policy.created", "policy", string(ps.ID), ps.Name,
 		fmt.Sprintf("Created OPA policy %s", ps.Name),
 		map[string]any{"tags": project.FormatTags(tags)})
-	http.Redirect(w, r, "/policies/"+string(ps.ID), http.StatusSeeOther)
+	setFlash(w, u.cfg.PublicBaseURL, flashMessage{
+		Kind: "success", Text: "Created " + ps.Name + ".", Href: "/policies/" + string(ps.ID), Label: "Open",
+	})
+	http.Redirect(w, r, "/policies", http.StatusSeeOther)
 }
 
 func (u *ui) testPolicy(w http.ResponseWriter, r *http.Request) {
