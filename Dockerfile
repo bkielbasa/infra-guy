@@ -28,8 +28,9 @@ RUN go mod download \
        github.com/open-policy-agent/opa/v1/rego
 COPY cmd ./cmd
 COPY internal ./internal
+ARG APP_VERSION=dev
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server \
+    go build -trimpath -ldflags="-s -w -X infra-guy/internal/version.Version=${APP_VERSION}" -o /out/server ./cmd/server \
  && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 

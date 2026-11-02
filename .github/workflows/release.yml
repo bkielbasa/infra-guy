@@ -53,6 +53,15 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest
 
+      - name: Resolve version
+        id: appver
+        run: |
+          if tag="$(git describe --exact-match --tags HEAD 2>/dev/null)"; then
+            echo "version=${tag}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -61,6 +70,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           provenance: false
           sbom: false
+          build-args: |
+            APP_VERSION=${{ steps.appver.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache

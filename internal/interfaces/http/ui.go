@@ -36,6 +36,7 @@ import (
 	"infra-guy/internal/domain/state"
 	"infra-guy/internal/domain/tfcontext"
 	"infra-guy/internal/infrastructure/terraform"
+	"infra-guy/internal/version"
 )
 
 //go:embed templates/*.html static/*
@@ -53,6 +54,7 @@ type layoutData struct {
 	TenantID  string
 	AvatarURL string
 	Flash     *flashMessage
+	Version   string
 }
 
 type metaView struct {
@@ -298,7 +300,7 @@ func (u *ui) pageWithStatus(w http.ResponseWriter, status int, title, name strin
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	ld := layoutData{Title: title, Body: template.HTML(buf.String())}
+	ld := layoutData{Title: title, Body: template.HTML(buf.String()), Version: version.Current()}
 	if sp, ok := responsePrincipal(w); ok {
 		ld.UserLogin = sp.Login
 		ld.UserRole = sp.Role

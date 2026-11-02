@@ -34,6 +34,12 @@ a:hover { text-decoration: underline; }
   padding: 28px clamp(20px, 3vw, 56px) 64px;
 }
 
+.site-footer {
+  margin-top: 36px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .topbar {
   display: flex;
   align-items: center;

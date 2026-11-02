@@ -37,6 +37,7 @@ import (
 	"infra-guy/internal/domain/tfcontext"
 	"infra-guy/internal/domain/user"
 	"infra-guy/internal/infrastructure/opa"
+	"infra-guy/internal/version"
 )
 
 type memRuns struct {
@@ -272,6 +273,9 @@ func TestUI(t *testing.T) {
 	rr := getUI(t, h, "/")
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "payments") {
 		t.Fatalf("list %d %s", rr.Code, rr.Body.Bytes())
+	}
+	if !strings.Contains(rr.Body.String(), `<footer class="site-footer">`+version.Current()+`</footer>`) {
+		t.Fatalf("footer version %q missing: %s", version.Current(), rr.Body.String())
 	}
 
 	rr = getUI(t, h, "/projects/p1")
