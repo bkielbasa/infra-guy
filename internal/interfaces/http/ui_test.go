@@ -3889,6 +3889,65 @@ func TestMilestone3OIDCDiscoveryAndCloudIntegrations(t *testing.T) {
 	}
 
 	// 2. Create AWS OIDC Cloud Integration
+	rrEmptyCI := getUI(t, h, "/cloud-integrations")
+	emptyCI := rrEmptyCI.Body.String()
+	if rrEmptyCI.Code != http.StatusOK {
+		t.Fatalf("GET /cloud-integrations empty = %d: %s", rrEmptyCI.Code, emptyCI)
+	}
+	for _, want := range []string{
+		`id="new-integration-dialog"`,
+		`create-dialog-wide`,
+		`id="open-new-integration-empty"`,
+		`data-open-create="new-integration-dialog"`,
+		"No cloud integrations configured yet.",
+		"https://infra-guy.example.com",
+	} {
+		if !strings.Contains(emptyCI, want) {
+			t.Fatalf("expected empty /cloud-integrations to contain %q, got:\n%s", want, emptyCI)
+		}
+	}
+	if strings.Contains(emptyCI, `id="new-integration-panel"`) || strings.Contains(emptyCI, `data-open-on-load`) {
+		t.Fatalf("empty /cloud-integrations opened the dialog or kept the inline panel:\n%s", emptyCI)
+	}
+
+	badForm := url.Values{
+		"name":                     {"aws-missing-role"},
+		"provider":                 {"aws"},
+		"auth_method":              {"oidc"},
+		"role_arn":                 {""},
+		"region":                   {"eu-central-1"},
+		"session_duration_seconds": {"1800"},
+		"gcp_project_id":           {"proj-echo"},
+		"tags":                     {"env:prod"},
+	}
+	rrBadCI := postUI(t, h, "/cloud-integrations", strings.NewReader(badForm.Encode()))
+	badCI := rrBadCI.Body.String()
+	if rrBadCI.Code != http.StatusBadRequest {
+		t.Fatalf("POST /cloud-integrations missing role = %d, want 400: %s", rrBadCI.Code, badCI)
+	}
+	for _, want := range []string{
+		`data-open-on-load`,
+		`role="alert"`,
+		"AWS IAM Role ARN is required",
+		`value="aws-missing-role"`,
+		`value="eu-central-1"`,
+		`value="1800"`,
+		`value="proj-echo"`,
+		`value="env:prod"`,
+		`id="gcp-fields" class="provider-section" hidden`,
+		`id="azure-fields" class="provider-section" hidden`,
+	} {
+		if !strings.Contains(badCI, want) {
+			t.Fatalf("expected invalid cloud create to contain %q, got:\n%s", want, badCI)
+		}
+	}
+	if strings.Contains(badCI, `id="aws-fields" class="provider-section" hidden`) {
+		t.Fatalf("AWS fields were hidden for provider aws:\n%s", badCI)
+	}
+	if items, err := ciSvc.List(context.Background(), "ten"); err != nil || len(items) != 0 {
+		t.Fatalf("invalid cloud integration was saved: %v len=%d", err, len(items))
+	}
+
 	form := url.Values{
 		"name":                     {"aws-prod-oidc"},
 		"provider":                 {"aws"},
@@ -3899,9 +3958,10 @@ func TestMilestone3OIDCDiscoveryAndCloudIntegrations(t *testing.T) {
 		"tags":                     {"env:prod, cloud:aws"},
 	}
 	rrCreate := postUI(t, h, "/cloud-integrations", strings.NewReader(form.Encode()))
-	if rrCreate.Code != http.StatusSeeOther || rrCreate.Header().Get("Location") != "/cloud-integrations/ci-1" {
+	if rrCreate.Code != http.StatusSeeOther || rrCreate.Header().Get("Location") != "/cloud-integrations" {
 		t.Fatalf("POST /cloud-integrations = %d (loc=%q): %s", rrCreate.Code, rrCreate.Header().Get("Location"), rrCreate.Body.String())
 	}
+	ciFlash := flashSetCookie(t, rrCreate)
 
 	// 3. List Cloud Integrations
 	rrList := getUI(t, h, "/cloud-integrations")
@@ -3917,6 +3977,22 @@ func TestMilestone3OIDCDiscoveryAndCloudIntegrations(t *testing.T) {
 		if !strings.Contains(rrList.Body.String(), want) {
 			t.Fatalf("expected /cloud-integrations to contain %q, got:\n%s", want, rrList.Body.String())
 		}
+	}
+
+	rrCIFlash := getUICookie(t, h, "/cloud-integrations", ciFlash)
+	ciFlashBody := rrCIFlash.Body.String()
+	for _, want := range []string{
+		`id="flash"`,
+		"Created aws-prod-oidc.",
+		`href="/cloud-integrations/ci-1"`,
+		">Open<",
+	} {
+		if !strings.Contains(ciFlashBody, want) {
+			t.Fatalf("expected cloud flash to contain %q, got:\n%s", want, ciFlashBody)
+		}
+	}
+	if !flashCleared(rrCIFlash) {
+		t.Fatal("displaying the cloud flash did not expire the cookie")
 	}
 
 	// 4. Update Cloud Integration

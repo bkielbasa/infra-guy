@@ -5,7 +5,7 @@
       <h1>Cloud Integrations</h1>
       <p class="settings-card-desc">Dynamically generate short-lived cloud credentials and OIDC tokens (AWS, GCP, Azure) for workspace runs without storing static keys.</p>
     </div>
-    <button type="button" class="btn btn-trigger" id="toggle-new-integration">New integration</button>
+    <button type="button" class="btn btn-trigger" id="toggle-new-integration" data-open-create="new-integration-dialog">New integration</button>
   </div>
 
   {{if .OIDCIssuer}}
@@ -22,120 +22,6 @@
     </div>
   </div>
   {{end}}
-
-  <div id="new-integration-panel" class="panel form-panel" style="margin-bottom: 18px;"{{if .Integrations}} hidden{{end}}>
-    <div class="form-header">
-      <h2>New Cloud Integration</h2>
-      <p class="sub">Configure dynamic OIDC federation or AWS STS role assumption for Terraform runs.</p>
-    </div>
-    <form method="post" action="/cloud-integrations" class="project-form">
-      <section class="form-section">
-        <div class="form-grid">
-          <div class="field">
-            <label for="ci-name">Name</label>
-            <input type="text" id="ci-name" name="name" placeholder="e.g. aws-prod-admin" required>
-            <span class="field-hint">Unique identifier within your organization.</span>
-          </div>
-          <div class="field">
-            <label for="ci-provider">Cloud Provider</label>
-            <select id="ci-provider" name="provider" required>
-              <option value="aws">Amazon Web Services (AWS)</option>
-              <option value="gcp">Google Cloud Platform (GCP)</option>
-              <option value="azure">Microsoft Azure</option>
-            </select>
-          </div>
-        </div>
-
-        <div id="aws-fields" class="provider-section">
-          <div class="form-grid">
-            <div class="field">
-              <label for="ci-auth-method">AWS Authentication Method</label>
-              <select id="ci-auth-method" name="auth_method">
-                <option value="oidc">OIDC Federation (STS AssumeRoleWithWebIdentity)</option>
-                <option value="sts_assume_role">IAM Role Chaining (STS AssumeRole)</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="ci-role-arn">IAM Role ARN</label>
-              <input type="text" id="ci-role-arn" name="role_arn" placeholder="arn:aws:iam::123456789012:role/infra-guy-deployer">
-            </div>
-          </div>
-          <div class="form-grid">
-            <div class="field">
-              <label for="ci-region">Default AWS Region</label>
-              <input type="text" id="ci-region" name="region" value="us-east-1" placeholder="us-east-1">
-            </div>
-            <div class="field">
-              <label for="ci-session-duration">Session Duration (seconds)</label>
-              <input type="number" id="ci-session-duration" name="session_duration_seconds" value="3600" min="900" max="43200">
-              <span class="field-hint">Short-lived STS token lifetime (900s to 43200s).</span>
-            </div>
-            <div class="field">
-              <label for="ci-external-id">External ID (optional)</label>
-              <input type="text" id="ci-external-id" name="external_id" placeholder="Optional STS ExternalId">
-            </div>
-          </div>
-        </div>
-
-        <div id="gcp-fields" class="provider-section" hidden>
-          <div class="form-grid">
-            <div class="field">
-              <label for="ci-gcp-wip">Workload Identity Provider Resource Name</label>
-              <input type="text" id="ci-gcp-wip" name="gcp_workload_identity_provider" placeholder="projects/123456/locations/global/workloadIdentityPools/infra-guy/providers/oidc">
-            </div>
-            <div class="field">
-              <label for="ci-gcp-sa">Service Account Email (optional)</label>
-              <input type="text" id="ci-gcp-sa" name="gcp_service_account_email" placeholder="terraform@my-gcp-project.iam.gserviceaccount.com">
-            </div>
-            <div class="field">
-              <label for="ci-gcp-project">GCP Project ID (optional)</label>
-              <input type="text" id="ci-gcp-project" name="gcp_project_id" placeholder="my-gcp-project">
-            </div>
-          </div>
-        </div>
-
-        <div id="azure-fields" class="provider-section" hidden>
-          <div class="form-grid">
-            <div class="field">
-              <label for="ci-azure-tenant">Azure Tenant ID</label>
-              <input type="text" id="ci-azure-tenant" name="azure_tenant_id" placeholder="00000000-0000-0000-0000-000000000000">
-            </div>
-            <div class="field">
-              <label for="ci-azure-client">Azure Client ID (Application ID)</label>
-              <input type="text" id="ci-azure-client" name="azure_client_id" placeholder="11111111-1111-1111-1111-111111111111">
-            </div>
-            <div class="field">
-              <label for="ci-azure-sub">Azure Subscription ID (optional)</label>
-              <input type="text" id="ci-azure-sub" name="azure_subscription_id" placeholder="22222222-2222-2222-2222-222222222222">
-            </div>
-          </div>
-        </div>
-
-        <div class="form-grid">
-          <div class="field">
-            <label for="ci-audience">OIDC Audience Override (optional)</label>
-            <input type="text" id="ci-audience" name="audience" placeholder="Defaults to {{.OIDCAudience}} (or sts.amazonaws.com)">
-          </div>
-          <div class="field">
-            <label for="tags-input">Auto-Bind Tags (key:value)</label>
-            <div class="repo-Combobox" id="tag-combobox">
-              <input type="text" id="tags-input" name="tags" placeholder="env:prod, cloud:aws" autocomplete="off">
-              <div id="tag-results" class="repo-results" role="listbox"></div>
-              <div id="known-tags-data" hidden>
-                {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
-              </div>
-            </div>
-            <div id="tags-preview" class="tag-pills"></div>
-            <span class="field-hint">Workspaces matching all tags on this integration automatically receive its dynamic credentials.</span>
-          </div>
-        </div>
-      </section>
-      <div class="actions">
-        <button type="submit" class="btn-trigger">Create integration</button>
-        <button type="button" class="btn" id="cancel-new-integration">Cancel</button>
-      </div>
-    </form>
-  </div>
 
   <div class="projects-topbar">
     <div class="projects-search-wrap">
@@ -201,7 +87,7 @@
           </tr>
           {{else}}
           <tr>
-            <td colspan="6" class="empty">No cloud integrations configured yet.</td>
+            <td colspan="6" class="empty">No cloud integrations configured yet. <button type="button" class="btn btn-trigger" id="open-new-integration-empty" data-open-create="new-integration-dialog">New integration</button></td>
           </tr>
           {{end}}
         </tbody>
@@ -209,24 +95,121 @@
     </div>
   </div>
 </div>
+<dialog id="new-integration-dialog" class="create-dialog create-dialog-wide" data-create-dialog aria-labelledby="new-integration-title"{{if .Create.Open}} data-open-on-load{{end}}>
+  <form method="post" action="/cloud-integrations" class="create-dialog-form">
+    <div class="create-dialog-head">
+      <div>
+        <h2 id="new-integration-title">New Cloud Integration</h2>
+        <p class="sub">Configure dynamic OIDC federation or AWS STS role assumption for Terraform runs.</p>
+      </div>
+      <button type="button" class="create-dialog-close" data-close-dialog aria-label="Close">Close</button>
+    </div>
+    <div class="create-dialog-body">
+      {{if .Create.Error}}<p class="create-dialog-error" role="alert">{{.Create.Error}}</p>{{end}}
+      <div class="form-grid">
+        <div class="field">
+          <label for="ci-name">Name</label>
+          <input type="text" id="ci-name" name="name" data-create-focus value="{{.Create.Name}}" placeholder="e.g. aws-prod-admin" required>
+          <span class="field-hint">Unique identifier within your organization.</span>
+        </div>
+        <div class="field">
+          <label for="ci-provider">Cloud Provider</label>
+          <select id="ci-provider" name="provider" required>
+            <option value="aws"{{if eq .Create.Provider "aws"}} selected{{end}}>Amazon Web Services (AWS)</option>
+            <option value="gcp"{{if eq .Create.Provider "gcp"}} selected{{end}}>Google Cloud Platform (GCP)</option>
+            <option value="azure"{{if eq .Create.Provider "azure"}} selected{{end}}>Microsoft Azure</option>
+          </select>
+        </div>
+      </div>
+      <div id="aws-fields" class="provider-section"{{if ne .Create.Provider "aws"}} hidden{{end}}>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-auth-method">AWS Authentication Method</label>
+            <select id="ci-auth-method" name="auth_method">
+              <option value="oidc"{{if eq .Create.AuthMethod "oidc"}} selected{{end}}>OIDC Federation (STS AssumeRoleWithWebIdentity)</option>
+              <option value="sts_assume_role"{{if eq .Create.AuthMethod "sts_assume_role"}} selected{{end}}>IAM Role Chaining (STS AssumeRole)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ci-role-arn">IAM Role ARN</label>
+            <input type="text" id="ci-role-arn" name="role_arn" value="{{.Create.RoleARN}}" placeholder="arn:aws:iam::123456789012:role/infra-guy-deployer">
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-region">Default AWS Region</label>
+            <input type="text" id="ci-region" name="region" value="{{.Create.Region}}" placeholder="us-east-1">
+          </div>
+          <div class="field">
+            <label for="ci-session-duration">Session Duration (seconds)</label>
+            <input type="number" id="ci-session-duration" name="session_duration_seconds" value="{{.Create.SessionDuration}}" min="900" max="43200">
+            <span class="field-hint">Short-lived STS token lifetime (900s to 43200s).</span>
+          </div>
+          <div class="field">
+            <label for="ci-external-id">External ID (optional)</label>
+            <input type="text" id="ci-external-id" name="external_id" value="{{.Create.ExternalID}}" placeholder="Optional STS ExternalId">
+          </div>
+        </div>
+      </div>
+      <div id="gcp-fields" class="provider-section"{{if ne .Create.Provider "gcp"}} hidden{{end}}>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-gcp-wip">Workload Identity Provider Resource Name</label>
+            <input type="text" id="ci-gcp-wip" name="gcp_workload_identity_provider" value="{{.Create.GCPWorkloadIdentityProvider}}" placeholder="projects/123456/locations/global/workloadIdentityPools/infra-guy/providers/oidc">
+          </div>
+          <div class="field">
+            <label for="ci-gcp-sa">Service Account Email (optional)</label>
+            <input type="text" id="ci-gcp-sa" name="gcp_service_account_email" value="{{.Create.GCPServiceAccountEmail}}" placeholder="terraform@my-gcp-project.iam.gserviceaccount.com">
+          </div>
+          <div class="field">
+            <label for="ci-gcp-project">GCP Project ID (optional)</label>
+            <input type="text" id="ci-gcp-project" name="gcp_project_id" value="{{.Create.GCPProjectID}}" placeholder="my-gcp-project">
+          </div>
+        </div>
+      </div>
+      <div id="azure-fields" class="provider-section"{{if ne .Create.Provider "azure"}} hidden{{end}}>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ci-azure-tenant">Azure Tenant ID</label>
+            <input type="text" id="ci-azure-tenant" name="azure_tenant_id" value="{{.Create.AzureTenantID}}" placeholder="00000000-0000-0000-0000-000000000000">
+          </div>
+          <div class="field">
+            <label for="ci-azure-client">Azure Client ID (Application ID)</label>
+            <input type="text" id="ci-azure-client" name="azure_client_id" value="{{.Create.AzureClientID}}" placeholder="11111111-1111-1111-1111-111111111111">
+          </div>
+          <div class="field">
+            <label for="ci-azure-sub">Azure Subscription ID (optional)</label>
+            <input type="text" id="ci-azure-sub" name="azure_subscription_id" value="{{.Create.AzureSubscriptionID}}" placeholder="22222222-2222-2222-2222-222222222222">
+          </div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="ci-audience">OIDC Audience Override (optional)</label>
+          <input type="text" id="ci-audience" name="audience" value="{{.Create.Audience}}" placeholder="Defaults to {{.OIDCAudience}} (or sts.amazonaws.com)">
+        </div>
+        <div class="field">
+          <label for="tags-input">Auto-Bind Tags (key:value)</label>
+          <div class="repo-Combobox" id="tag-combobox">
+            <input type="text" id="tags-input" name="tags" value="{{.Create.Tags}}" placeholder="env:prod, cloud:aws" autocomplete="off">
+            <div id="tag-results" class="repo-results" role="listbox"></div>
+            <div id="known-tags-data" hidden>
+              {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
+            </div>
+          </div>
+          <div id="tags-preview" class="tag-pills"></div>
+          <span class="field-hint">Workspaces matching all tags on this integration automatically receive its dynamic credentials.</span>
+        </div>
+      </div>
+    </div>
+    <div class="create-dialog-foot">
+      <button type="button" class="btn" data-close-dialog>Cancel</button>
+      <button type="submit" class="btn btn-trigger">Create integration</button>
+    </div>
+  </form>
+</dialog>
 <script>
 (function() {
-  const toggleBtn = document.getElementById('toggle-new-integration');
-  const cancelBtn = document.getElementById('cancel-new-integration');
-  const panel = document.getElementById('new-integration-panel');
-  const nameField = document.getElementById('ci-name');
-  if (toggleBtn && panel) {
-    toggleBtn.addEventListener('click', () => {
-      panel.hidden = !panel.hidden;
-      if (!panel.hidden && nameField) nameField.focus();
-    });
-  }
-  if (cancelBtn && panel) {
-    cancelBtn.addEventListener('click', () => {
-      panel.hidden = true;
-    });
-  }
-
   const providerSelect = document.getElementById('ci-provider');
   const awsFields = document.getElementById('aws-fields');
   const gcpFields = document.getElementById('gcp-fields');
@@ -318,4 +301,5 @@
   syncTagButtons();
 })();
 </script>
+{{template "create_dialog_script"}}
 {{end}}

@@ -5223,6 +5223,10 @@ func (u *ui) cloudIntegrations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
 	}
+	u.renderCloudIntegrations(w, r, tenantID, http.StatusOK, createDialog{})
+}
+
+func (u *ui) renderCloudIntegrations(w http.ResponseWriter, r *http.Request, tenantID string, status int, draft createDialog) {
 	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
 	filterTag := strings.TrimSpace(strings.Join(r.URL.Query()["tag"], ", "))
 	var rows []cloudIntegrationRow
@@ -5258,7 +5262,13 @@ func (u *ui) cloudIntegrations(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	u.page(w, "Cloud Integrations", "cloud_integrations", map[string]any{
+	if !draft.Open {
+		draft.Provider = "aws"
+		draft.AuthMethod = "oidc"
+		draft.Region = "us-east-1"
+		draft.SessionDuration = "3600"
+	}
+	u.pageWithStatus(w, status, "Cloud Integrations", "cloud_integrations", map[string]any{
 		"Integrations": rows,
 		"FilterName":   filterName,
 		"FilterTag":    filterTag,
@@ -5266,6 +5276,7 @@ func (u *ui) cloudIntegrations(w http.ResponseWriter, r *http.Request) {
 		"CountAll":     len(rows),
 		"OIDCIssuer":   issuer,
 		"OIDCAudience": audience,
+		"Create":       draft,
 	})
 }
 
@@ -5283,41 +5294,64 @@ func (u *ui) createCloudIntegration(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cloud integrations service not configured", http.StatusInternalServerError)
 		return
 	}
-	tags, err := project.ParseTags(r.FormValue("tags"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	durationS, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("session_duration_seconds")))
-	authMode := normalizeCIAuthMode(firstNonEmpty(r.FormValue("auth_mode"), r.FormValue("auth_method")))
-	ci, err := u.cfg.CloudIntegrations.Create(r.Context(), cloudintegration.Snapshot{
-		TenantID:                    tenantID,
+	draft := createDialog{
+		Open:                        true,
 		Name:                        r.FormValue("name"),
+		Tags:                        r.FormValue("tags"),
 		Provider:                    r.FormValue("provider"),
-		AuthMode:                    authMode,
+		AuthMethod:                  r.FormValue("auth_method"),
 		RoleARN:                     r.FormValue("role_arn"),
 		Region:                      r.FormValue("region"),
-		SessionDurationSeconds:      durationS,
+		SessionDuration:             r.FormValue("session_duration_seconds"),
 		ExternalID:                  r.FormValue("external_id"),
-		AccessKeyID:                 r.FormValue("access_key_id"),
-		SecretAccessKey:             r.FormValue("secret_access_key"),
 		Audience:                    r.FormValue("audience"),
 		GCPWorkloadIdentityProvider: r.FormValue("gcp_workload_identity_provider"),
 		GCPServiceAccountEmail:      r.FormValue("gcp_service_account_email"),
+		GCPProjectID:                r.FormValue("gcp_project_id"),
 		AzureTenantID:               r.FormValue("azure_tenant_id"),
 		AzureClientID:               r.FormValue("azure_client_id"),
 		AzureSubscriptionID:         r.FormValue("azure_subscription_id"),
+	}
+	tags, err := project.ParseTags(draft.Tags)
+	if err != nil {
+		draft.Error = err.Error()
+		u.renderCloudIntegrations(w, r, tenantID, http.StatusBadRequest, draft)
+		return
+	}
+	durationS, _ := strconv.Atoi(strings.TrimSpace(draft.SessionDuration))
+	authMode := normalizeCIAuthMode(firstNonEmpty(r.FormValue("auth_mode"), draft.AuthMethod))
+	ci, err := u.cfg.CloudIntegrations.Create(r.Context(), cloudintegration.Snapshot{
+		TenantID:                    tenantID,
+		Name:                        draft.Name,
+		Provider:                    draft.Provider,
+		AuthMode:                    authMode,
+		RoleARN:                     draft.RoleARN,
+		Region:                      draft.Region,
+		SessionDurationSeconds:      durationS,
+		ExternalID:                  draft.ExternalID,
+		AccessKeyID:                 r.FormValue("access_key_id"),
+		SecretAccessKey:             r.FormValue("secret_access_key"),
+		Audience:                    draft.Audience,
+		GCPWorkloadIdentityProvider: draft.GCPWorkloadIdentityProvider,
+		GCPServiceAccountEmail:      draft.GCPServiceAccountEmail,
+		AzureTenantID:               draft.AzureTenantID,
+		AzureClientID:               draft.AzureClientID,
+		AzureSubscriptionID:         draft.AzureSubscriptionID,
 		Tags:                        tags,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		draft.Error = err.Error()
+		u.renderCloudIntegrations(w, r, tenantID, http.StatusBadRequest, draft)
 		return
 	}
 	cs := ci.Snapshot()
 	u.recordAudit(r, tenantID, "cloud_integration.created", "cloud_integration", string(cs.ID), cs.Name,
 		fmt.Sprintf("Created %s cloud integration %s (%s)", ciProviderLabel(cs.Provider), cs.Name, ciTargetSummary(cs)),
 		map[string]any{"provider": cs.Provider, "auth_mode": cs.AuthMode, "target": ciTargetSummary(cs), "tags": project.FormatTags(tags)})
-	http.Redirect(w, r, "/cloud-integrations/"+string(cs.ID), http.StatusSeeOther)
+	setFlash(w, u.cfg.PublicBaseURL, flashMessage{
+		Kind: "success", Text: "Created " + cs.Name + ".", Href: "/cloud-integrations/" + string(cs.ID), Label: "Open",
+	})
+	http.Redirect(w, r, "/cloud-integrations", http.StatusSeeOther)
 }
 
 func (u *ui) cloudIntegrationDetails(w http.ResponseWriter, r *http.Request) {
