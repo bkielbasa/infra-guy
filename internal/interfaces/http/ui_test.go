@@ -2894,7 +2894,7 @@ func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
 			t.Fatalf("expected empty /contexts to contain %q, got:\n%s", want, emptyBody)
 		}
 	}
-	if strings.Contains(emptyBody, `id="new-context-panel"`) || strings.Contains(emptyBody, `data-open-on-load`) || strings.Contains(emptyBody, `id="flash"`) {
+	if strings.Contains(emptyBody, `id="new-context-panel"`) || strings.Contains(emptyBody, `id="new-context-dialog" class="create-dialog" data-create-dialog aria-labelledby="new-context-title" data-open-on-load`) || strings.Contains(emptyBody, `id="flash"`) {
 		t.Fatalf("empty /contexts opened the dialog or kept the inline panel:\n%s", emptyBody)
 	}
 
@@ -2914,7 +2914,7 @@ func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
 			t.Fatalf("expected empty /policies to contain %q, got:\n%s", want, emptyPol)
 		}
 	}
-	if strings.Contains(emptyPol, `id="new-policy-panel"`) || strings.Contains(emptyPol, `data-open-on-load`) {
+	if strings.Contains(emptyPol, `id="new-policy-panel"`) || strings.Contains(emptyPol, `id="new-policy-dialog" class="create-dialog create-dialog-wide" data-create-dialog aria-labelledby="new-policy-title" data-open-on-load`) {
 		t.Fatalf("empty /policies opened the dialog or kept the inline panel:\n%s", emptyPol)
 	}
 
@@ -3906,7 +3906,7 @@ func TestMilestone3OIDCDiscoveryAndCloudIntegrations(t *testing.T) {
 			t.Fatalf("expected empty /cloud-integrations to contain %q, got:\n%s", want, emptyCI)
 		}
 	}
-	if strings.Contains(emptyCI, `id="new-integration-panel"`) || strings.Contains(emptyCI, `data-open-on-load`) {
+	if strings.Contains(emptyCI, `id="new-integration-panel"`) || strings.Contains(emptyCI, `id="new-integration-dialog" class="create-dialog create-dialog-wide" data-create-dialog aria-labelledby="new-integration-title" data-open-on-load`) {
 		t.Fatalf("empty /cloud-integrations opened the dialog or kept the inline panel:\n%s", emptyCI)
 	}
 

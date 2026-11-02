@@ -21,7 +21,7 @@
         if (name) name.focus();
       });
     });
-    if (dialog.hasAttribute('data-open-' + 'on-load')) {
+    if (dialog.hasAttribute('data-open-on-load')) {
       dialog.returnFocus = document.querySelector('[data-open-create="' + dialog.id + '"]');
       dialog.showModal();
       if (name) name.focus();

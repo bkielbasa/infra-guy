@@ -1350,6 +1350,10 @@ button.tag-filter-btn:hover {
   width: 100%;
   max-width: none;
 }
+.create-dialog .repo-results {
+  position: static;
+  margin-top: 4px;
+}
 .create-dialog-error {
   margin: 0 0 12px;
   padding: 10px 12px;
