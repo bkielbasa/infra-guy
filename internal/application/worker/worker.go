@@ -269,6 +269,9 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 	}()
 
 	r, err := w.Service.BeginStep(ctx, job.RunID, job.Step)
+	if errors.Is(err, runapp.ErrSuperseded) {
+		return w.completeAndCleanup(ctx, job)
+	}
 	if err != nil {
 		return err
 	}
@@ -322,8 +325,8 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 
 	dest := filepath.Join(w.WorkDir, string(job.RunID))
 	cacheKey := WorkspaceCacheKey(ps.TenantID, string(ps.ID), string(job.RunID))
-	// Each step can run in its own pod, so the local directory does not survive.
-	// Apply removes its copy when it finishes. Plan removes it after uploading.
+	// Apply runs in a later pod and removes the restored workspace when it finishes.
+	// Plan removes its copy after uploading the post-plan cache.
 	if w.Cache != nil && job.Step == run.StepApply {
 		defer func() { _ = os.RemoveAll(dest) }()
 	}
@@ -491,7 +494,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 	tfSpan.End()
 	telemetry.Default().RecordRunDuration(ps.TenantID, string(ps.ID), ps.Name, op, stepStatus, string(job.Step), execDur)
 	logger.SetExec(res.Logs)
-	if res.ExitCode == 0 && w.Cache != nil && (job.Step == run.StepInit || job.Step == run.StepPlan) {
+	if job.Step == run.StepPlan && res.ExitCode == 0 && w.Cache != nil {
 		logger.LogAfterf("Uploading workspace cache to S3 (%s)...", cacheKey)
 		if err := w.Cache.Save(ctx, cacheKey, dest); err != nil {
 			if ferr := w.Service.Fail(ctx, job.RunID, job.Step, "save workspace cache: "+err.Error()); ferr != nil {
@@ -500,9 +503,7 @@ func (w *Worker) runJob(ctx context.Context, job Job) (retErr error) {
 			return w.completeAndCleanup(ctx, job)
 		}
 		logger.LogAfterf("Workspace cache uploaded")
-		if job.Step == run.StepPlan {
-			_ = os.RemoveAll(dest)
-		}
+		_ = os.RemoveAll(dest)
 	}
 	if res.Version != "" {
 		if err := w.Service.SetTerraformVersion(ctx, job.RunID, res.Version); err != nil {
@@ -526,7 +527,7 @@ func (w *Worker) prepareWorkspace(ctx context.Context, job Job, ps project.Snaps
 		logger.LogBeforef("Reusing initialized local workspace")
 		return nil
 	}
-	if w.Cache != nil && job.Step != run.StepInit {
+	if w.Cache != nil && job.Step == run.StepApply {
 		if err := os.RemoveAll(dest); err != nil {
 			return err
 		}

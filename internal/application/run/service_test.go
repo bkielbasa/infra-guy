@@ -69,13 +69,20 @@ func (m *memRuns) Save(_ context.Context, r *run.Run) error {
 	return nil
 }
 func (m *memRuns) Get(_ context.Context, id run.ID) (*run.Run, error) { return m.items[id], nil }
-func (m *memRuns) ListByProject(context.Context, run.ProjectID) ([]*run.Run, error) {
-	return nil, nil
+func (m *memRuns) ListByProject(_ context.Context, projectID run.ProjectID) ([]*run.Run, error) {
+	var out []*run.Run
+	for _, item := range m.items {
+		if item.Snapshot().ProjectID == projectID {
+			out = append(out, item)
+		}
+	}
+	return out, nil
 }
 
 type memSched struct {
-	steps []run.StepName
-	err   error
+	steps     []run.StepName
+	cancelled []run.ID
+	err       error
 }
 
 func (m *memSched) Enqueue(_ context.Context, _ run.ID, step run.StepName) error {
@@ -83,6 +90,11 @@ func (m *memSched) Enqueue(_ context.Context, _ run.ID, step run.StepName) error
 		return m.err
 	}
 	m.steps = append(m.steps, step)
+	return nil
+}
+
+func (m *memSched) CancelPending(_ context.Context, id run.ID) error {
+	m.cancelled = append(m.cancelled, id)
 	return nil
 }
 
@@ -150,6 +162,78 @@ func TestConfirmEnqueueFailureFailsRun(t *testing.T) {
 	}
 	if projects.items["p1"].Snapshot().ActiveRunID != "" {
 		t.Fatalf("active run %q", projects.items["p1"].Snapshot().ActiveRunID)
+	}
+}
+
+func TestPushSupersedesQueuedAndUnconfirmedRuns(t *testing.T) {
+	ctx := context.Background()
+	repo, _ := project.ParseSourceRepo("bklebasa/infra")
+	p, _ := project.New("p1", "infra", repo, time.Unix(0, 0).UTC())
+	if err := p.ClaimActiveRun("run-wait"); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := run.Open(run.OpenInput{
+		ID: "run-queued", ProjectID: "p1", Trigger: run.TriggerPush, SHA: "old-queued", Now: time.Unix(1, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := run.Open(run.OpenInput{
+		ID: "run-wait", ProjectID: "p1", Trigger: run.TriggerPush, SHA: "old-wait", Now: time.Unix(2, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginStep(t, waiting, run.StepInit, time.Unix(2, 0).UTC())
+	completeStep(t, waiting, run.StepInit, run.StepResult{}, time.Unix(2, 0).UTC())
+	beginStep(t, waiting, run.StepPlan, time.Unix(3, 0).UTC())
+	completeStep(t, waiting, run.StepPlan, run.StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, time.Unix(3, 0).UTC())
+	running, err := run.Open(run.OpenInput{
+		ID: "run-running", ProjectID: "p1", Trigger: run.TriggerManual, SHA: "old-running", Now: time.Unix(4, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginStep(t, running, run.StepInit, time.Unix(4, 0).UTC())
+
+	projects := &memProjects{items: map[project.ID]*project.Project{"p1": p}}
+	runs := &memRuns{items: map[run.ID]*run.Run{
+		"run-queued": queued, "run-wait": waiting, "run-running": running,
+	}}
+	sched := &memSched{}
+	svc := &Service{
+		Projects: projects, Runs: runs, Schedule: sched,
+		Now:   func() time.Time { return time.Unix(10, 0).UTC() },
+		NewID: func() string { return "run-new" },
+	}
+	opened, err := svc.Open(ctx, OpenRequest{ProjectID: "p1", Trigger: run.TriggerPush, SHA: "new-sha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.Snapshot().ID != "run-new" || opened.Snapshot().Status != run.StatusQueued {
+		t.Fatalf("opened %#v", opened.Snapshot())
+	}
+	if runs.items["run-queued"].Snapshot().Status != run.StatusCancelled {
+		t.Fatalf("queued status %s", runs.items["run-queued"].Snapshot().Status)
+	}
+	if runs.items["run-wait"].Snapshot().Status != run.StatusCancelled || runs.items["run-wait"].Snapshot().ApprovedBy != "newer change" {
+		t.Fatalf("unconfirmed %#v", runs.items["run-wait"].Snapshot())
+	}
+	if runs.items["run-running"].Snapshot().Status != run.StatusRunning {
+		t.Fatalf("running status %s", runs.items["run-running"].Snapshot().Status)
+	}
+	if projects.items["p1"].Snapshot().ActiveRunID != "" {
+		t.Fatalf("active run %q", projects.items["p1"].Snapshot().ActiveRunID)
+	}
+	cancelled := map[run.ID]bool{}
+	for _, id := range sched.cancelled {
+		cancelled[id] = true
+	}
+	if !cancelled["run-queued"] || !cancelled["run-wait"] || cancelled["run-running"] {
+		t.Fatalf("cancelled jobs %#v", sched.cancelled)
+	}
+	if len(sched.steps) != 1 || sched.steps[0] != run.StepInit {
+		t.Fatalf("enqueued %#v", sched.steps)
 	}
 }
 
@@ -569,5 +653,3 @@ func TestBeginStepStartsAndSavesRun(t *testing.T) {
 		t.Fatalf("BeginStep already running: %v, %+v", err, r2)
 	}
 }
-
-

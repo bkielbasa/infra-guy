@@ -14,8 +14,12 @@ import (
 
 var ErrDuplicate = errors.New("run already queued or running for this commit")
 
+// ErrSuperseded means a newer change cancelled the run before this step started.
+var ErrSuperseded = errors.New("run was superseded by a newer change")
+
 type Scheduler interface {
 	Enqueue(ctx context.Context, runID run.ID, step run.StepName) error
+	CancelPending(ctx context.Context, runID run.ID) error
 }
 
 type StatusReport struct {
@@ -73,6 +77,9 @@ func (s *Service) BeginStep(ctx context.Context, id run.ID, step run.StepName) (
 	}
 	if r == nil {
 		return nil, fmt.Errorf("run %s not found", id)
+	}
+	if r.Snapshot().Status == run.StatusCancelled {
+		return nil, ErrSuperseded
 	}
 	for _, st := range r.Snapshot().Steps {
 		if st.Name == step && st.Status == run.StepRunning {
@@ -147,6 +154,11 @@ func (s *Service) Open(ctx context.Context, in OpenRequest) (*run.Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	if in.Trigger == run.TriggerPush {
+		if err := s.supersedeWaitingRuns(ctx, in.ProjectID); err != nil {
+			return nil, err
+		}
+	}
 	ok, err := s.Runs.InsertIfAbsent(ctx, opened)
 	if err != nil {
 		return nil, err
@@ -159,6 +171,47 @@ func (s *Service) Open(ctx context.Context, in OpenRequest) (*run.Run, error) {
 	}
 	s.reportPRStatus(ctx, opened)
 	return opened, nil
+}
+
+// supersedeWaitingRuns cancels earlier runs that are still queued or waiting
+// for confirmation so a newly pushed change can take the workspace.
+func (s *Service) supersedeWaitingRuns(ctx context.Context, projectID project.ID) error {
+	if s.Runs == nil {
+		return nil
+	}
+	existing, err := s.Runs.ListByProject(ctx, run.ProjectID(projectID))
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if s.Now != nil {
+		now = s.Now()
+	}
+	for _, existingRun := range existing {
+		if existingRun == nil {
+			continue
+		}
+		status := existingRun.Snapshot().Status
+		if status != run.StatusQueued && status != run.StatusNeedsApproval {
+			continue
+		}
+		if err := existingRun.Supersede(now); err != nil {
+			return err
+		}
+		if err := s.Runs.Save(ctx, existingRun); err != nil {
+			return err
+		}
+		if s.Schedule != nil {
+			if err := s.Schedule.CancelPending(ctx, existingRun.Snapshot().ID); err != nil {
+				return err
+			}
+		}
+		s.reportPRStatus(ctx, existingRun)
+		if err := s.releaseIfTerminal(ctx, existingRun); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // enqueue fails the run when the job cannot be queued, so the run never sits

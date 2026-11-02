@@ -68,6 +68,10 @@ func (e Executor) runEngine(ctx context.Context, req Request) (Result, error) {
 	case run.StepInit:
 		res, err = runEngineInit(ctx, eng, req, dir, env, streamer)
 	case run.StepPlan:
+		res, err = runEngineInit(ctx, eng, req, dir, env, streamer)
+		if err != nil || res.ExitCode != 0 {
+			break
+		}
 		res, err = runEnginePlan(ctx, eng, req, dir, env, streamer)
 	case run.StepApply:
 		res, err = runEngineApply(ctx, eng, req, dir, env, streamer)

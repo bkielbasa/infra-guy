@@ -145,6 +145,44 @@ func TestConfirmAndCancel(t *testing.T) {
 	}
 }
 
+func TestSupersedeQueuedAndUnconfirmed(t *testing.T) {
+	now := time.Unix(5, 0).UTC()
+	queued := openFull(false)
+	if err := queued.Supersede(now); err != nil {
+		t.Fatal(err)
+	}
+	snap := queued.Snapshot()
+	if snap.Status != StatusCancelled || snap.ApprovedBy != "newer change" || snap.FinishedAt == nil {
+		t.Fatalf("%#v", snap)
+	}
+	for _, st := range snap.Steps {
+		if st.Status != StepSkipped {
+			t.Fatalf("step %s is %s", st.Name, st.Status)
+		}
+	}
+
+	waiting := openFull(false)
+	beginStep(t, waiting, StepInit, now)
+	completeStep(t, waiting, StepInit, StepResult{}, now)
+	beginStep(t, waiting, StepPlan, now)
+	completeStep(t, waiting, StepPlan, StepResult{PlanText: "Plan: 1 to add, 0 to change, 0 to destroy.\n"}, now)
+	if err := waiting.Supersede(now); err != nil {
+		t.Fatal(err)
+	}
+	if waiting.Snapshot().Status != StatusCancelled || waiting.Snapshot().Steps[2].Status != StepSkipped {
+		t.Fatalf("%#v", waiting.Snapshot())
+	}
+
+	running := openFull(true)
+	beginStep(t, running, StepInit, now)
+	if err := running.Supersede(now); err == nil {
+		t.Fatal("expected running run to stay")
+	}
+	if running.Snapshot().Status != StatusRunning {
+		t.Fatalf("status %s", running.Snapshot().Status)
+	}
+}
+
 func TestNonZeroExitFailsAndDoesNotEnqueue(t *testing.T) {
 	r := openFull(true)
 	now := time.Unix(10, 0).UTC()

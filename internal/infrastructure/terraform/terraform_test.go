@@ -35,11 +35,11 @@ func TestBackendFile(t *testing.T) {
 	}
 }
 
-func TestPlanAndApplyDoNotReRunInit(t *testing.T) {
+func TestPlanRunsInitInItsOwnWorkspace(t *testing.T) {
 	if init := commands(run.StepInit); len(init) != 1 || strings.Join(init[0], " ") != "init -input=false -no-color" {
 		t.Fatalf("init commands %#v", init)
 	}
-	if plan := commands(run.StepPlan); len(plan) != 3 || plan[0][0] != "plan" || plan[1][0] != "show" || plan[2][0] != "show" || plan[2][1] != "-json" {
+	if plan := commands(run.StepPlan); len(plan) != 4 || plan[0][0] != "init" || plan[1][0] != "plan" || plan[2][0] != "show" || plan[3][0] != "show" || plan[3][1] != "-json" {
 		t.Fatalf("plan commands %#v", plan)
 	}
 	if apply := commands(run.StepApply); len(apply) != 1 || apply[0][0] != "apply" {
@@ -379,8 +379,8 @@ func TestExecutorPlanCapturesPlanJSONWithoutPollutingLogs(t *testing.T) {
 	if strings.Contains(res.Logs, `"format_version"`) {
 		t.Fatalf("raw JSON leaked into human logs: %s", res.Logs)
 	}
-	if strings.Contains(res.Logs, "Initialized!") {
-		t.Fatalf("plan step should not run terraform init: %s", res.Logs)
+	if !strings.Contains(res.Logs, "Initialized!") {
+		t.Fatalf("plan step should run terraform init in its own workspace: %s", res.Logs)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "~infraguy_backend_override.tf.json")); !os.IsNotExist(err) {
 		t.Fatalf("backend override file should be removed after Run: %v", err)

@@ -28,6 +28,13 @@ func (q *Queue) Enqueue(ctx context.Context, id run.ID, step run.StepName) error
 	return err
 }
 
+func (q *Queue) CancelPending(ctx context.Context, id run.ID) error {
+	_, err := q.pool.Exec(ctx, `
+		UPDATE jobs SET status = 'cancelled', locked_at = NULL
+		WHERE run_id = $1 AND status = 'pending'`, id)
+	return err
+}
+
 func (q *Queue) Claim(ctx context.Context, workerID string, retryDelay time.Duration) (*run.Job, error) {
 	// A busy or locked workspace used to stop the scan on its oldest job.
 	// Keep walking so that workspace's own next step, and every other

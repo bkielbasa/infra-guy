@@ -69,6 +69,7 @@ func commands(step run.StepName, destroy ...bool) [][]string {
 		}
 		planArgs = append(planArgs, "-out=tfplan")
 		return [][]string{
+			initArgs,
 			planArgs,
 			{"show", "-no-color", "tfplan"},
 			{"show", "-json", "tfplan"},

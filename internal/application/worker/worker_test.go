@@ -86,6 +86,8 @@ func (m *memSched) Enqueue(_ context.Context, _ run.ID, step run.StepName) error
 	return nil
 }
 
+func (m *memSched) CancelPending(context.Context, run.ID) error { return nil }
+
 type fakeQueue struct {
 	mu         sync.Mutex
 	claim      *Job
@@ -843,13 +845,13 @@ func TestTickCachesInitializedWorkspaceForTheNextPod(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(fx.ws, ".terraform.lock.hcl"), []byte("lock-v1"), 0o644)
 	}
 
-	// Init clones, initializes, and uploads. The next step may run in a new pod.
+	// Init clones and initializes. Its workspace is not uploaded.
 	if err := fx.w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	wantKey := "ten-1/p1/run-cached"
-	if cache.saved[wantKey] != "lock-v1" {
-		t.Fatalf("expected cache saved after init under %q, got %#v", wantKey, cache.saved)
+	if len(cache.saved) != 0 {
+		t.Fatalf("cache should not be saved after init, got %#v", cache.saved)
 	}
 	if len(cache.restored) != 0 {
 		t.Fatalf("cache should not be restored after init, got %v", cache.restored)
@@ -861,7 +863,7 @@ func TestTickCachesInitializedWorkspaceForTheNextPod(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Plan has no local workspace, so it restores the init upload instead of cloning.
+	// Plan starts in a fresh pod: clone, initialize during the step, then upload.
 	fx.co.dest = ""
 	fx.queue.claim = &Job{ID: 2, RunID: "run-cached", Step: run.StepPlan}
 	fx.exec.res = Result{
@@ -870,22 +872,18 @@ func TestTickCachesInitializedWorkspaceForTheNextPod(t *testing.T) {
 		PlanFile: []byte("plan-bytes"),
 		PlanJSON: []byte(`{"format_version":"1.2"}`),
 	}
-	var planSawLockfile string
 	fx.exec.onRun = func(context.Context) {
-		b, _ := os.ReadFile(filepath.Join(fx.ws, ".terraform.lock.hcl"))
-		planSawLockfile = string(b)
+		_ = os.MkdirAll(filepath.Join(fx.ws, ".terraform"), 0o755)
+		_ = os.WriteFile(filepath.Join(fx.ws, ".terraform.lock.hcl"), []byte("lock-v1"), 0o644)
 	}
 	if err := fx.w.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if fx.co.dest != "" {
-		t.Fatalf("StepPlan should restore the init cache instead of cloning, got dest=%q", fx.co.dest)
+	if fx.co.dest != fx.ws {
+		t.Fatalf("StepPlan should clone a fresh workspace, got dest=%q", fx.co.dest)
 	}
-	if len(cache.restored) != 1 || cache.restored[0] != wantKey {
-		t.Fatalf("StepPlan should restore %q, got %v", wantKey, cache.restored)
-	}
-	if planSawLockfile != "lock-v1" {
-		t.Fatalf("StepPlan did not see the restored lockfile, got %q", planSawLockfile)
+	if len(cache.restored) != 0 {
+		t.Fatalf("StepPlan should not restore from cache, got %v", cache.restored)
 	}
 	if cache.saved[wantKey] != "lock-v1" {
 		t.Fatalf("expected cache saved after plan under %q, got %#v", wantKey, cache.saved)
@@ -898,6 +896,7 @@ func TestTickCachesInitializedWorkspaceForTheNextPod(t *testing.T) {
 	}
 
 	// Apply restores the post-plan workspace and deletes the cache when the run finishes.
+	fx.co.dest = ""
 	fx.queue.claim = &Job{ID: 3, RunID: "run-cached", Step: run.StepApply}
 	fx.exec.res = Result{ExitCode: 0, Logs: "Apply complete!"}
 	var applySawLockfile string
@@ -911,8 +910,8 @@ func TestTickCachesInitializedWorkspaceForTheNextPod(t *testing.T) {
 	if fx.co.dest != "" {
 		t.Fatalf("StepApply should not clone when cache is configured, got dest=%q", fx.co.dest)
 	}
-	if len(cache.restored) != 2 || cache.restored[1] != wantKey {
-		t.Fatalf("StepApply should restore %q after plan, got %v", wantKey, cache.restored)
+	if len(cache.restored) != 1 || cache.restored[0] != wantKey {
+		t.Fatalf("StepApply should restore %q, got %v", wantKey, cache.restored)
 	}
 	if applySawLockfile != "lock-v1" {
 		t.Fatalf("StepApply did not see restored lockfile, got %q", applySawLockfile)

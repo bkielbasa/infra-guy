@@ -92,6 +92,7 @@ func (m *memRuns) ListSummariesByTenant(_ context.Context, _ string) ([]*run.Run
 type nopSched struct{}
 
 func (nopSched) Enqueue(context.Context, run.ID, run.StepName) error { return nil }
+func (nopSched) CancelPending(context.Context, run.ID) error         { return nil }
 
 type stubTip struct {
 	sha   string

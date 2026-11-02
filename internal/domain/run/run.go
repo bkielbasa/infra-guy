@@ -436,6 +436,30 @@ func (r *Run) Cancel(actor string, now time.Time) error {
 	return nil
 }
 
+// Supersede cancels a run that is still queued or waiting for confirmation
+// so a newer change can take the workspace.
+func (r *Run) Supersede(now time.Time) error {
+	switch r.s.Status {
+	case StatusNeedsApproval:
+		return r.Cancel("newer change", now)
+	case StatusQueued:
+		for i := range r.s.Steps {
+			st := &r.s.Steps[i]
+			if st.Status == StepPending || st.Status == StepRunning {
+				st.Status = StepSkipped
+				st.FinishedAt = &now
+			}
+		}
+		r.s.ApprovedBy = "newer change"
+		r.s.ApprovedAt = &now
+		r.s.Status = StatusCancelled
+		r.s.FinishedAt = &now
+		return nil
+	default:
+		return fmt.Errorf("run is %s", r.s.Status)
+	}
+}
+
 func (r *Run) Fail(name StepName, message string, now time.Time) error {
 	if st := r.step(name); st != nil && st.Status != StepSucceeded && st.Status != StepSkipped {
 		st.Status = StepFailed
