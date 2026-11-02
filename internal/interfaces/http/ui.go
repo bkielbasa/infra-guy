@@ -52,6 +52,7 @@ type layoutData struct {
 	UserRole  string
 	TenantID  string
 	AvatarURL string
+	Flash     *flashMessage
 }
 
 type metaView struct {
@@ -288,6 +289,10 @@ func (u *ui) now() time.Time {
 }
 
 func (u *ui) page(w http.ResponseWriter, title, name string, data any) {
+	u.pageWithStatus(w, http.StatusOK, title, name, data)
+}
+
+func (u *ui) pageWithStatus(w http.ResponseWriter, status int, title, name string, data any) {
 	var buf bytes.Buffer
 	if err := pages.ExecuteTemplate(&buf, name, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -302,9 +307,14 @@ func (u *ui) page(w http.ResponseWriter, title, name string, data any) {
 			ld.AvatarURL = "https://github.com/" + sp.Login + ".png?size=64"
 		}
 	}
+	if pw, ok := w.(*principalResponseWriter); ok && pw.flash != nil {
+		ld.Flash = pw.flash
+		clearFlashCookie(w, pw.publicBase)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
 	if err := pages.ExecuteTemplate(w, "layout", ld); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 }
 
@@ -3656,6 +3666,29 @@ type contextChoice struct {
 	Attached bool
 }
 
+type createDialog struct {
+	Open                        bool
+	Error                       string
+	Name                        string
+	Tags                        string
+	Description                 string
+	Rego                        string
+	InputJSON                   string
+	Provider                    string
+	AuthMethod                  string
+	RoleARN                     string
+	Region                      string
+	SessionDuration             string
+	ExternalID                  string
+	Audience                    string
+	GCPWorkloadIdentityProvider string
+	GCPServiceAccountEmail      string
+	GCPProjectID                string
+	AzureTenantID               string
+	AzureClientID               string
+	AzureSubscriptionID         string
+}
+
 type contextRow struct {
 	ID         string
 	Name       string
@@ -3728,6 +3761,10 @@ func (u *ui) contexts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusUnauthorized)
 		return
 	}
+	u.renderContexts(w, r, tenantID, http.StatusOK, createDialog{})
+}
+
+func (u *ui) renderContexts(w http.ResponseWriter, r *http.Request, tenantID string, status int, draft createDialog) {
 	filterName := strings.TrimSpace(r.URL.Query().Get("name"))
 	filterTag := strings.TrimSpace(strings.Join(r.URL.Query()["tag"], ", "))
 	var rows []contextRow
@@ -3754,12 +3791,13 @@ func (u *ui) contexts(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	u.page(w, "Contexts", "contexts", map[string]any{
+	u.pageWithStatus(w, status, "Contexts", "contexts", map[string]any{
 		"Contexts":   rows,
 		"FilterName": filterName,
 		"FilterTag":  filterTag,
 		"KnownTags":  u.knownTags(r.Context(), tenantID),
 		"CountAll":   len(rows),
+		"Create":     draft,
 	})
 }
 
@@ -3777,20 +3815,27 @@ func (u *ui) createContext(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "contexts service not configured", http.StatusInternalServerError)
 		return
 	}
-	tags, err := project.ParseTags(r.FormValue("tags"))
+	draft := createDialog{Open: true, Name: r.FormValue("name"), Tags: r.FormValue("tags")}
+	tags, err := project.ParseTags(draft.Tags)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		draft.Error = err.Error()
+		u.renderContexts(w, r, tenantID, http.StatusBadRequest, draft)
 		return
 	}
-	c, err := u.cfg.Contexts.Create(r.Context(), tenantID, r.FormValue("name"), tags)
+	c, err := u.cfg.Contexts.Create(r.Context(), tenantID, draft.Name, tags)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		draft.Error = err.Error()
+		u.renderContexts(w, r, tenantID, http.StatusBadRequest, draft)
 		return
 	}
 	u.recordAudit(r, tenantID, "context.created", "context", string(c.Snapshot().ID), c.Snapshot().Name,
 		fmt.Sprintf("Created context %s", c.Snapshot().Name),
 		map[string]any{"tags": project.FormatTags(tags)})
-	http.Redirect(w, r, "/contexts/"+string(c.Snapshot().ID), http.StatusSeeOther)
+	cs := c.Snapshot()
+	setFlash(w, u.cfg.PublicBaseURL, flashMessage{
+		Kind: "success", Text: "Created " + cs.Name + ".", Href: "/contexts/" + string(cs.ID), Label: "Open",
+	})
+	http.Redirect(w, r, "/contexts", http.StatusSeeOther)
 }
 
 func (u *ui) contextDetails(w http.ResponseWriter, r *http.Request) {

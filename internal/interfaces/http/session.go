@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,7 +23,9 @@ type principal struct {
 
 type principalResponseWriter struct {
 	http.ResponseWriter
-	principal principal
+	principal  principal
+	flash      *flashMessage
+	publicBase string
 }
 
 func (w *principalResponseWriter) Unwrap() http.ResponseWriter {
@@ -88,7 +92,13 @@ func withSession(next http.Handler, cfg ServerConfig) http.Handler {
 			UserID: sess.UserID, Login: sess.Login, TenantID: sess.TenantID, Role: sess.Role,
 		}
 		ctx := context.WithValue(r.Context(), ctxKey{}, p)
-		next.ServeHTTP(&principalResponseWriter{ResponseWriter: w, principal: p}, r.WithContext(ctx))
+		pw := &principalResponseWriter{
+			ResponseWriter: w, principal: p, publicBase: cfg.PublicBaseURL,
+		}
+		if msg, ok := readFlash(r); ok {
+			pw.flash = &msg
+		}
+		next.ServeHTTP(pw, r.WithContext(ctx))
 	})
 }
 
@@ -119,23 +129,63 @@ func emptyTenantUI(r *http.Request) bool {
 }
 
 func setSessionCookie(w http.ResponseWriter, publicBase, id string, expires time.Time) {
-	secure := false
-	if u, err := url.Parse(publicBase); err == nil && u.Scheme == "https" {
-		secure = true
-	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: id, Path: "/", Expires: expires,
-		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: cookieSecure(publicBase), SameSite: http.SameSiteLaxMode,
 	})
 }
 
 func clearSessionCookie(w http.ResponseWriter, publicBase string) {
-	secure := false
-	if u, err := url.Parse(publicBase); err == nil && u.Scheme == "https" {
-		secure = true
-	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(0, 0),
-		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: cookieSecure(publicBase), SameSite: http.SameSiteLaxMode,
+	})
+}
+
+const flashCookieName = "flash"
+
+type flashMessage struct {
+	Kind  string `json:"kind"`
+	Text  string `json:"text"`
+	Href  string `json:"href"`
+	Label string `json:"label"`
+}
+
+func cookieSecure(publicBase string) bool {
+	u, err := url.Parse(publicBase)
+	return err == nil && u.Scheme == "https"
+}
+
+func setFlash(w http.ResponseWriter, publicBase string, msg flashMessage) {
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: flashCookieName, Value: base64.RawURLEncoding.EncodeToString(raw), Path: "/",
+		HttpOnly: true, Secure: cookieSecure(publicBase), SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func readFlash(r *http.Request) (flashMessage, bool) {
+	c, err := r.Cookie(flashCookieName)
+	if err != nil || c.Value == "" {
+		return flashMessage{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(c.Value)
+	if err != nil {
+		return flashMessage{}, false
+	}
+	var msg flashMessage
+	if err := json.Unmarshal(raw, &msg); err != nil || msg.Text == "" {
+		return flashMessage{}, false
+	}
+	return msg, true
+}
+
+func clearFlashCookie(w http.ResponseWriter, publicBase string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: flashCookieName, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(0, 0),
+		HttpOnly: true, Secure: cookieSecure(publicBase), SameSite: http.SameSiteLaxMode,
 	})
 }

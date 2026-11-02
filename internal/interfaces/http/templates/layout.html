@@ -52,6 +52,18 @@
     </details>
     {{end}}
   </header>
+  {{if .Flash}}
+  <div class="flash" id="flash" role="status">
+    <span>{{.Flash.Text}}{{if .Flash.Href}} <a href="{{.Flash.Href}}">{{.Flash.Label}}</a>{{end}}</span>
+    <button type="button" class="btn" id="dismiss-flash">Dismiss</button>
+  </div>
+  <script>
+  document.getElementById('dismiss-flash').addEventListener('click', function () {
+    var el = document.getElementById('flash');
+    if (el) el.hidden = true;
+  });
+  </script>
+  {{end}}
   {{.Body}}
 </div>
 </body>

@@ -1,0 +1,32 @@
+{{define "create_dialog_script"}}
+<script>
+(function() {
+  document.querySelectorAll('[data-create-dialog]').forEach(function(dialog) {
+    dialog.querySelectorAll('[data-close-dialog]').forEach(function(btn) {
+      btn.addEventListener('click', function() { dialog.close(); });
+    });
+    dialog.addEventListener('click', function(event) {
+      if (event.target === dialog) dialog.close();
+    });
+    dialog.addEventListener('close', function() {
+      if (dialog.returnFocus && typeof dialog.returnFocus.focus === 'function') {
+        dialog.returnFocus.focus();
+      }
+    });
+    var name = dialog.querySelector('[data-create-focus]');
+    document.querySelectorAll('[data-open-create="' + dialog.id + '"]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        dialog.returnFocus = btn;
+        dialog.showModal();
+        if (name) name.focus();
+      });
+    });
+    if (dialog.hasAttribute('data-open-' + 'on-load')) {
+      dialog.returnFocus = document.querySelector('[data-open-create="' + dialog.id + '"]');
+      dialog.showModal();
+      if (name) name.focus();
+    }
+  });
+})();
+</script>
+{{end}}

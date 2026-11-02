@@ -1295,6 +1295,81 @@ button.tag-filter-btn:hover {
 .folder-dialog-extra {
   border-top: 1px solid var(--line);
 }
+.create-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(90vh, 900px);
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+.create-dialog-wide {
+  width: min(960px, calc(100vw - 32px));
+}
+.create-dialog::backdrop {
+  background: rgba(8, 10, 16, 0.72);
+}
+.create-dialog-form {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: min(90vh, 900px);
+}
+.create-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 0;
+}
+.create-dialog-head h2 { margin: 0; font-size: 18px; }
+.create-dialog-head .sub { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+.create-dialog-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 4px 8px;
+}
+.create-dialog-body {
+  padding: 12px 18px 4px;
+  overflow: auto;
+}
+.create-dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--line);
+}
+.create-dialog .field input,
+.create-dialog .field select,
+.create-dialog .field textarea,
+.create-dialog .code-editor {
+  width: 100%;
+  max-width: none;
+}
+.create-dialog-error {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #6b3030;
+  background: #3d1c1c;
+  color: var(--danger);
+}
+.flash {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid #3a435e;
+  background: #252b3d;
+}
+.empty .btn { margin-left: 10px; }
 .branch-badge {
   display: inline-block;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

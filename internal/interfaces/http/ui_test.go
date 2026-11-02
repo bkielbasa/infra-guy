@@ -200,6 +200,38 @@ func postUI(t *testing.T, h http.Handler, path string, body io.Reader) *httptest
 	return rr
 }
 
+func getUICookie(t *testing.T, h http.Handler, path string, c *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: uiSessionID})
+	if c != nil {
+		req.AddCookie(c)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func flashSetCookie(t *testing.T, rr *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == flashCookieName && c.Value != "" && c.MaxAge >= 0 {
+			return c
+		}
+	}
+	t.Fatal("missing flash cookie")
+	return nil
+}
+
+func flashCleared(rr *httptest.ResponseRecorder) bool {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == flashCookieName && c.Value == "" && !c.Expires.IsZero() && c.Expires.Before(time.Now()) {
+			return true
+		}
+	}
+	return false
+}
+
 func needsApprovalSnap(id run.ID) run.Snapshot {
 	return run.Snapshot{
 		ID: id, ProjectID: "p1", Trigger: run.TriggerPush, Status: run.StatusNeedsApproval,
@@ -2832,20 +2864,65 @@ func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
 		},
 	})
 
-	// 1. Create two contexts with tags
-	rr := postUI(t, h, "/contexts", strings.NewReader("name=aws-prod&tags=env%3Aprod%2C+cloud%3Aaws"))
-	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/contexts/ctx-1" {
-		t.Fatalf("create context aws-prod = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	rrEmpty := getUI(t, h, "/contexts")
+	emptyBody := rrEmpty.Body.String()
+	if rrEmpty.Code != http.StatusOK {
+		t.Fatalf("GET /contexts empty = %d: %s", rrEmpty.Code, emptyBody)
 	}
-	rr = postUI(t, h, "/contexts", strings.NewReader("name=gcp-staging&tags=env%3Astaging%2C+cloud%3Agcp"))
-	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/contexts/ctx-2" {
+	for _, want := range []string{
+		`id="new-context-dialog"`,
+		`class="create-dialog"`,
+		`data-create-dialog`,
+		`id="toggle-new-context"`,
+		`id="open-new-context-empty"`,
+		`data-open-create="new-context-dialog"`,
+		"No contexts created yet.",
+	} {
+		if !strings.Contains(emptyBody, want) {
+			t.Fatalf("expected empty /contexts to contain %q, got:\n%s", want, emptyBody)
+		}
+	}
+	if strings.Contains(emptyBody, `id="new-context-panel"`) || strings.Contains(emptyBody, `data-open-on-load`) || strings.Contains(emptyBody, `id="flash"`) {
+		t.Fatalf("empty /contexts opened the dialog or kept the inline panel:\n%s", emptyBody)
+	}
+
+	// 1. Create two contexts with tags
+	rrAWS := postUI(t, h, "/contexts", strings.NewReader("name=aws-prod&tags=env%3Aprod%2C+cloud%3Aaws"))
+	if rrAWS.Code != http.StatusSeeOther || rrAWS.Header().Get("Location") != "/contexts" {
+		t.Fatalf("create context aws-prod = %d (loc=%q): %s", rrAWS.Code, rrAWS.Header().Get("Location"), rrAWS.Body.String())
+	}
+	awsFlash := flashSetCookie(t, rrAWS)
+	rr := postUI(t, h, "/contexts", strings.NewReader("name=gcp-staging&tags=env%3Astaging%2C+cloud%3Agcp"))
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/contexts" {
 		t.Fatalf("create context gcp-staging = %d (loc=%q): %s", rr.Code, rr.Header().Get("Location"), rr.Body.String())
 	}
 
 	// Invalid tag format on context create returns 400
 	rrBadCtx := postUI(t, h, "/contexts", strings.NewReader("name=bad-ctx&tags=invalid-tag"))
+	badBody := rrBadCtx.Body.String()
 	if rrBadCtx.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for invalid context tag, got %d", rrBadCtx.Code)
+		t.Fatalf("expected 400 for invalid context tag, got %d: %s", rrBadCtx.Code, badBody)
+	}
+	for _, want := range []string{
+		`data-open-on-load`,
+		`role="alert"`,
+		"invalid tag: expected key:value",
+		`value="bad-ctx"`,
+		`value="invalid-tag"`,
+		`id="new-context-dialog"`,
+	} {
+		if !strings.Contains(badBody, want) {
+			t.Fatalf("expected invalid context create to contain %q, got:\n%s", want, badBody)
+		}
+	}
+	listed, err := ctxSvc.List(context.Background(), "ten")
+	if err != nil {
+		t.Fatalf("list contexts: %v", err)
+	}
+	for _, c := range listed {
+		if c.Snapshot().Name == "bad-ctx" {
+			t.Fatal("invalid context was saved")
+		}
 	}
 
 	// 2. GET /contexts renders unified layout with sidebar filters, search, and tag pills
@@ -2870,6 +2947,26 @@ func TestContextsAndPoliciesUnifiedTagsAndFilters(t *testing.T) {
 		if !strings.Contains(ctxListBody, want) {
 			t.Fatalf("expected GET /contexts to contain %q, got:\n%s", want, ctxListBody)
 		}
+	}
+
+	fc := awsFlash
+	rrFlash := getUICookie(t, h, "/contexts", fc)
+	flashBody := rrFlash.Body.String()
+	for _, want := range []string{
+		`id="flash"`,
+		"Created aws-prod.",
+		`href="/contexts/ctx-1"`,
+		">Open<",
+	} {
+		if !strings.Contains(flashBody, want) {
+			t.Fatalf("expected flash to contain %q, got:\n%s", want, flashBody)
+		}
+	}
+	if !flashCleared(rrFlash) {
+		t.Fatal("displaying the flash did not expire the cookie")
+	}
+	if strings.Contains(getUI(t, h, "/contexts").Body.String(), `id="flash"`) {
+		t.Fatal("flash rendered without a cookie")
 	}
 
 	// 3. Filter contexts by multi-tag query

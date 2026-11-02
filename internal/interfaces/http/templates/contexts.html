@@ -5,41 +5,7 @@
       <h1>Contexts</h1>
       <p class="settings-card-desc">Reusable sets of environment variables and mounted files shared across projects.</p>
     </div>
-    <button type="button" class="btn btn-trigger" id="toggle-new-context">New context</button>
-  </div>
-
-  <div id="new-context-panel" class="panel form-panel" style="margin-bottom: 18px;"{{if .Contexts}} hidden{{end}}>
-    <div class="form-header">
-      <h2>New context</h2>
-      <p class="sub">Create a shared environment and file bundle that can be attached to multiple projects.</p>
-    </div>
-    <form method="post" action="/contexts" class="project-form">
-      <section class="form-section">
-        <div class="form-grid">
-          <div class="field">
-            <label for="context-name">Name</label>
-            <input type="text" id="context-name" name="name" placeholder="e.g. aws-prod" aria-label="New context name" required>
-            <span class="field-hint">Unique identifier for this context within your organization.</span>
-          </div>
-          <div class="field">
-            <label for="tags-input">Tags (key:value)</label>
-            <div class="repo-Combobox" id="tag-combobox">
-              <input type="text" id="tags-input" name="tags" placeholder="env:prod, team:platform" autocomplete="off">
-              <div id="tag-results" class="repo-results" role="listbox"></div>
-              <div id="known-tags-data" hidden>
-                {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
-              </div>
-            </div>
-            <div id="tags-preview" class="tag-pills"></div>
-            <span class="field-hint">Optional comma-separated <code>key:value</code> pairs.</span>
-          </div>
-        </div>
-      </section>
-      <div class="actions">
-        <button type="submit" class="btn-trigger">Create context</button>
-        <button type="button" class="btn" id="cancel-new-context">Cancel</button>
-      </div>
-    </form>
+    <button type="button" class="btn btn-trigger" id="toggle-new-context" data-open-create="new-context-dialog">New context</button>
   </div>
 
   <div class="projects-topbar">
@@ -104,32 +70,51 @@
           </tr>
           {{else}}
           <tr>
-            <td colspan="4" class="empty">No contexts created yet.</td>
+            <td colspan="4" class="empty">No contexts created yet. <button type="button" class="btn btn-trigger" id="open-new-context-empty" data-open-create="new-context-dialog">New context</button></td>
           </tr>
           {{end}}
         </tbody>
       </table>
     </div>
   </div>
+<dialog id="new-context-dialog" class="create-dialog" data-create-dialog aria-labelledby="new-context-title"{{if .Create.Open}} data-open-on-load{{end}}>
+  <form method="post" action="/contexts" class="create-dialog-form">
+    <div class="create-dialog-head">
+      <div>
+        <h2 id="new-context-title">New context</h2>
+        <p class="sub">Create a shared environment and file bundle that can be attached to multiple projects.</p>
+      </div>
+      <button type="button" class="create-dialog-close" data-close-dialog aria-label="Close">Close</button>
+    </div>
+    <div class="create-dialog-body">
+      {{if .Create.Error}}<p class="create-dialog-error" role="alert">{{.Create.Error}}</p>{{end}}
+      <div class="field">
+        <label for="context-name">Name</label>
+        <input type="text" id="context-name" name="name" data-create-focus value="{{.Create.Name}}" placeholder="e.g. aws-prod" aria-label="New context name" required>
+        <span class="field-hint">Unique identifier for this context within your organization.</span>
+      </div>
+      <div class="field">
+        <label for="tags-input">Tags (key:value)</label>
+        <div class="repo-Combobox" id="tag-combobox">
+          <input type="text" id="tags-input" name="tags" value="{{.Create.Tags}}" placeholder="env:prod, team:platform" autocomplete="off">
+          <div id="tag-results" class="repo-results" role="listbox"></div>
+          <div id="known-tags-data" hidden>
+            {{range .KnownTags}}<span data-tag="{{.}}"></span>{{end}}
+          </div>
+        </div>
+        <div id="tags-preview" class="tag-pills"></div>
+        <span class="field-hint">Optional comma-separated <code>key:value</code> pairs.</span>
+      </div>
+    </div>
+    <div class="create-dialog-foot">
+      <button type="button" class="btn" data-close-dialog>Cancel</button>
+      <button type="submit" class="btn btn-trigger">Create context</button>
+    </div>
+  </form>
+</dialog>
 </div>
 <script>
 (function() {
-  const toggleBtn = document.getElementById('toggle-new-context');
-  const cancelBtn = document.getElementById('cancel-new-context');
-  const panel = document.getElementById('new-context-panel');
-  const nameField = document.getElementById('context-name');
-  if (toggleBtn && panel) {
-    toggleBtn.addEventListener('click', () => {
-      panel.hidden = !panel.hidden;
-      if (!panel.hidden && nameField) nameField.focus();
-    });
-  }
-  if (cancelBtn && panel) {
-    cancelBtn.addEventListener('click', () => {
-      panel.hidden = true;
-    });
-  }
-
   const queryInput = document.getElementById('filter-query');
   const nameInput = document.getElementById('filter-name');
   const tagInput = document.getElementById('filter-tag');
@@ -331,4 +316,5 @@
   }
 })();
 </script>
+{{template "create_dialog_script"}}
 {{end}}
